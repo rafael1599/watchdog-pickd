@@ -1,0 +1,8 @@
+.env
+.negative_counter
+__pycache__/
+*.pdf
+.DS_Store
+processed/
+errors/
+venv/
