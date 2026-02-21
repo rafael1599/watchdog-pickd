@@ -128,15 +128,61 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str) -> dict:
     return picking_list
 
 
-def append_to_order(list_id: str, existing_items: list, new_items: list,
+def get_new_items_delta(existing_items: list, new_parsed_items: list, client: Client) -> list:
+    """
+    Compare new parsed items with existing cart items in the database.
+    Returns only the items from `new_parsed_items` whose normalized SKU
+    is not present in the `existing_items` list.
+    """
+    if not existing_items:
+        return new_parsed_items
+
+    # Convert existing items to a set of SKUs for quick lookup
+    # existing_items are in CartItem format, so they have a 'sku' (which is the DB sku)
+    # or a 'raw_sku' if DB sku wasn't found. We'll track both to be safe.
+    existing_skus = set()
+    for item in existing_items:
+        if "sku" in item and item["sku"]:
+            existing_skus.add(item["sku"])
+        if "raw_sku" in item and item["raw_sku"]:
+            existing_skus.add(item["raw_sku"])
+            existing_skus.add(normalize_sku(item["raw_sku"]))
+
+    # Find the delta
+    delta_items = []
+    for new_item in new_parsed_items:
+        norm_sku = normalize_sku(new_item["sku"])
+        raw_sku = new_item.get("raw_sku", norm_sku)
+
+        # Check if this new item's SKU matches any existing SKU
+        # We need to consider that _to_cart_items might resolve the sku to a different DB sku.
+        # But for delta checking, normalized PDF sku is our best guess before hitting the DB.
+        
+        # A more robust check: What if the DB sku is "03-3684BL" but PDF is "03 3684 BL"?
+        # existing_skus has "03-3684BL" and "033684BL" (normalized from raw_sku).
+        # norm_sku will be "033684BL".
+        if norm_sku not in existing_skus and raw_sku not in existing_skus:
+            # Maybe the DB sku exists in our set? Let's check against stripped versions just in case
+            found = False
+            for ext_sku in existing_skus:
+                if normalize_sku(ext_sku) == norm_sku:
+                    found = True
+                    break
+            
+            if not found:
+                delta_items.append(new_item)
+
+    return delta_items
+
+
+def append_to_order(list_id: str, existing_items: list, delta_items: list,
                     order_number: str, pdf_hash: str, file_name: str) -> dict:
     """
-    Append new items to an existing active/ready picking list.
-    Merges items: if same SKU exists, adds quantities.
+    Append DELTA items to an existing active/ready picking list.
     """
     client = get_client()
 
-    cart_items = _to_cart_items(client, new_items)
+    cart_items = _to_cart_items(client, delta_items)
     merged = _merge_items(existing_items, cart_items)
 
     update_data = {"items": merged}
@@ -156,16 +202,16 @@ def append_to_order(list_id: str, existing_items: list, new_items: list,
     return result.data[0]
 
 
-def reopen_completed_order(list_id: str, existing_items: list, new_items: list,
+def reopen_completed_order(list_id: str, existing_items: list, delta_items: list,
                            order_number: str, pdf_hash: str, file_name: str) -> dict:
     """
     Reopen a completed order as an add-on.
     Sets is_addon=True, status back to 'ready_to_double_check'.
-    Appends new items to existing ones.
+    Appends DELTA items to existing ones.
     """
     client = get_client()
 
-    cart_items = _to_cart_items(client, new_items)
+    cart_items = _to_cart_items(client, delta_items)
     merged = _merge_items(existing_items, cart_items)
 
     result = (

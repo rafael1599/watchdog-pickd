@@ -74,26 +74,26 @@ def process_pdf(pdf_path: str):
     log.info(f"📄 Processing: {file_name}")
 
     try:
-        # 1. Compute hash for duplicate detection
-        pdf_hash = compute_hash(pdf_path)
-        log.info(f"   🔑 Hash: {pdf_hash[:16]}...")
-
-        # 2. Check for exact duplicate
-        existing_log = check_duplicate(pdf_hash)
-        if existing_log:
-            processed_at = existing_log.get("processed_at", "unknown date")
-            log.warning(
-                f"   ⚠️  DUPLICATE: This exact PDF was already processed on {processed_at}. "
-                f"Order #{existing_log.get('order_number', '?')}. Skipping."
-            )
-            move_file(pdf_path, PROCESSED_FOLDER)
-            return
-
-        # 3. Extract text
+        # 1. Extract text first to base hash on actual content
         text = extract_text(pdf_path)
         if not text or len(text.strip()) < 20:
             log.warning(f"   ⚠️  Could not extract text from PDF. Moving to errors/")
             move_file(pdf_path, ERRORS_FOLDER)
+            return
+
+        # 2. Compute hash of the text content
+        pdf_hash = compute_hash(text)
+        log.info(f"   🔑 Content Hash: {pdf_hash[:16]}...")
+
+        # 3. Check for exact duplicate
+        existing_log = check_duplicate(pdf_hash)
+        if existing_log:
+            processed_at = existing_log.get("processed_at", "unknown date")
+            log.warning(
+                f"   ⚠️  DUPLICATE: Identical content was already processed on {processed_at}. "
+                f"Order #{existing_log.get('order_number', '?')}. Skipping."
+            )
+            move_file(pdf_path, PROCESSED_FOLDER)
             return
 
         # 4. Parse order data
@@ -122,19 +122,32 @@ def process_pdf(pdf_path: str):
                 status = existing.get("status", "")
                 list_id = existing["id"]
                 existing_items = existing.get("items", []) or []
+                
+                # Check for new items (delta)
+                from supabase_client import get_new_items_delta
+                client = get_client()
+                delta_items = get_new_items_delta(existing_items, items, client)
+                
+                if not delta_items:
+                    log.warning(
+                        f"   ⚠️  DUPLICATE: No new SKUs found for Order #{order_number}. "
+                        f"All items are already in the database. Skipping."
+                    )
+                    move_file(pdf_path, PROCESSED_FOLDER)
+                    return
 
                 if status == "completed":
                     # ADDON: Reopen completed order
-                    log.info(f"   🔄 Order #{order_number} was COMPLETED. Reopening as ADD-ON...")
+                    log.info(f"   🔄 Order #{order_number} was COMPLETED. Reopening as ADD-ON with {len(delta_items)} new SKUs...")
                     result = reopen_completed_order(
-                        list_id, existing_items, items,
+                        list_id, existing_items, delta_items,
                         order_number, pdf_hash, file_name
                     )
                 elif status in ("active", "ready_to_double_check", "double_checking", "needs_correction"):
-                    # APPEND: Add items to existing active order
-                    log.info(f"   ➕ Appending to existing order #{order_number} (status: {status})...")
+                    # APPEND: Add new items to existing active order
+                    log.info(f"   ➕ Appending {len(delta_items)} new SKUs to existing order #{order_number} (status: {status})...")
                     result = append_to_order(
-                        list_id, existing_items, items,
+                        list_id, existing_items, delta_items,
                         order_number, pdf_hash, file_name
                     )
                 else:

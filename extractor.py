@@ -25,16 +25,13 @@ def extract_text(pdf_path: str) -> str:
     return "\n".join(full_text)
 
 
-def compute_hash(pdf_path: str) -> str:
+def compute_hash(text: str) -> str:
     """
-    Compute SHA-256 hash of the raw PDF file bytes.
-    Used for exact duplicate detection — if two files produce the same hash,
-    they are byte-for-byte identical.
+    Compute SHA-256 hash of the extracted text.
+    Used for duplicate detection — if two files have the exact same text,
+    they are considered identical orders. This prevents re-downloaded
+    PDFs (which have different metadata/bytes) from being processed again.
     """
     sha256 = hashlib.sha256()
-
-    with open(pdf_path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            sha256.update(chunk)
-
+    sha256.update(text.encode('utf-8'))
     return sha256.hexdigest()

@@ -45,13 +45,26 @@ def cleanup_database():
     try:
         client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
         
-        # 1. Delete from pdf_import_log
-        log_res = client.table("pdf_import_log").delete().eq("order_number", TEST_ORDER_NUMBER).execute()
-        log.info(f"   ✅ Deleted {len(log_res.data)} entries from pdf_import_log")
+        # 0. Find the picking list ID for the order
+        list_res = client.table("picking_lists").select("id").eq("order_number", TEST_ORDER_NUMBER).execute()
         
-        # 2. Delete from picking_lists
-        list_res = client.table("picking_lists").delete().eq("order_number", TEST_ORDER_NUMBER).execute()
-        log.info(f"   ✅ Deleted {len(list_res.data)} entries from picking_lists")
+        if list_res.data:
+            for item in list_res.data:
+                list_id = item["id"]
+                # 1. Delete associated inventory_logs (Cascade)
+                inv_res = client.table("inventory_logs").delete().eq("list_id", list_id).execute()
+                if inv_res.data:
+                    log.info(f"   ✅ Deleted {len(inv_res.data)} entries from inventory_logs")
+
+        # 2. Delete from pdf_import_log
+        log_res = client.table("pdf_import_log").delete().eq("order_number", TEST_ORDER_NUMBER).execute()
+        if hasattr(log_res, 'data') and log_res.data is not None:
+            log.info(f"   ✅ Deleted {len(log_res.data)} entries from pdf_import_log")
+        
+        # 3. Delete from picking_lists
+        final_list_res = client.table("picking_lists").delete().eq("order_number", TEST_ORDER_NUMBER).execute()
+        if hasattr(final_list_res, 'data') and final_list_res.data is not None:
+            log.info(f"   ✅ Deleted {len(final_list_res.data)} entries from picking_lists")
         
     except Exception as e:
         log.error(f"   ❌ Error during database cleanup: {e}")
