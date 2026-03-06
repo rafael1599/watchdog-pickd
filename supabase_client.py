@@ -291,31 +291,35 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         })
 
     # Step 2: Fetch locations and total stock from inventory for found SKUs
-    inventory_map = {}
+    inventory_data_map = {} # SKU -> List of all inventory entries
     total_stock_map = {}
+
     if found_db_skus:
-        # Fetch inventory for LUDLOW
+        # Fetch inventory for LUDLOW including distribution and hints
         inv_res = (
             client.table("inventory")
-            .select("sku, location, quantity")
+            .select("sku, location, quantity, distribution, location_hint")
             .in_("sku", found_db_skus)
             .eq("warehouse", "LUDLOW")
-            .order("quantity", desc=True) # Prefer locations with more stock
+            .eq("is_active", True)
             .execute()
         )
-        # Map SKU to its primary location and aggregate total stock
-        for inv in inv_res.data:
+        
+        # Group entries by SKU and aggregate total stock
+        raw_entries = inv_res.data or []
+        for inv in raw_entries:
             sku = inv["sku"]
             qty = inv["quantity"] or 0
-            
-            # Aggregate total stock
             total_stock_map[sku] = total_stock_map.get(sku, 0) + qty
             
-            # Map primary location (one with highest stock)
-            if sku not in inventory_map and inv["location"]:
-                inventory_map[sku] = inv["location"]
+            if sku not in inventory_data_map:
+                inventory_data_map[sku] = []
+            inventory_data_map[sku].append(inv)
 
-    # Step 3: Build final cart items
+    # Step 3: Build final cart items using prioritization logic
+    # PALLET (0) > LINE (1) > TOWER (2) > OTHER (3)
+    PRIORITY = {"PALLET": 0, "LINE": 1, "TOWER": 2, "OTHER": 3}
+    
     cart_items = []
     for res in item_results:
         db_sku = res["db_sku"]
@@ -323,20 +327,62 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         item = res["item"]
         requested_qty = item["qty"]
         
-        # Use database location if available
-        assigned_location = inventory_map.get(db_sku) if db_sku else None
-        
-        # Check availability
+        # Availability check
         available_qty = total_stock_map.get(db_sku, 0) if db_sku else 0
         insufficient_stock = requested_qty > available_qty
 
+        # Find best location for this SKU
+        assigned_location = None
+        assigned_hint = None
+        assigned_distribution = []
+        
+        sku_entries = inventory_data_map.get(db_sku, []) if db_sku else []
+        if sku_entries:
+            # Flatten all distribution options per location to compare them
+            candidates = []
+            for entry in sku_entries:
+                dist_list = entry.get("distribution") or []
+                if not isinstance(dist_list, list) or not dist_list:
+                    # No distribution: use a fake "OTHER" candidate with high priority number (low priority)
+                    # and the total quantity as 'units_each' for fallback tie-breaking
+                    candidates.append({
+                        "entry": entry,
+                        "priority": 4, 
+                        "units_each": entry["quantity"],
+                        "has_dist": False
+                    })
+                    continue
+                
+                for d in dist_list:
+                    candidates.append({
+                        "entry": entry,
+                        "priority": PRIORITY.get(d.get("type"), 3),
+                        "units_each": d.get("units_each", 999999),
+                        "has_dist": True
+                    })
+
+            # Sort: Priority first (Pallet=0), then units_each (fewer is better), 
+            # then quantity (more is better - original logic)
+            candidates.sort(key=lambda x: (
+                x["priority"], 
+                x["units_each"], 
+                -x["entry"]["quantity"]
+            ))
+            
+            best_match = candidates[0]["entry"]
+            assigned_location = best_match["location"]
+            assigned_hint = best_match.get("location_hint")
+            assigned_distribution = best_match.get("distribution") or []
+
         cart_items.append({
-            "sku": db_sku if db_sku else normalized_pdf_sku, # Use official format if found
+            "sku": db_sku if db_sku else normalized_pdf_sku,
             "pickingQty": requested_qty,
             "description": item.get("description", ""),
             "raw_sku": item.get("raw_sku", normalized_pdf_sku),
             "unit_price": item.get("unit_price", 0),
             "location": assigned_location,
+            "location_hint": assigned_hint,
+            "distribution": assigned_distribution,
             "warehouse": "LUDLOW",
             "source": "pdf_import",
             "sku_not_found": res["not_found"],
