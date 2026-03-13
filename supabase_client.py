@@ -377,10 +377,12 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         cart_items.append({
             "sku": db_sku if db_sku else normalized_pdf_sku,
             "pickingQty": requested_qty,
+            "item_name": item.get("description", ""),
             "description": item.get("description", ""),
             "raw_sku": item.get("raw_sku", normalized_pdf_sku),
             "unit_price": item.get("unit_price", 0),
             "location": assigned_location,
+            "internal_note": assigned_hint,
             "location_hint": assigned_hint,
             "distribution": assigned_distribution,
             "warehouse": "LUDLOW",
