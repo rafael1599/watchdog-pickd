@@ -298,7 +298,7 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         # Fetch inventory for LUDLOW including distribution and hints
         inv_res = (
             client.table("inventory")
-            .select("sku, location, quantity, distribution, location_hint, item_name, internal_note")
+            .select("sku, location, quantity, distribution, location_hint, item_name")
             .in_("sku", found_db_skus)
             .eq("warehouse", "LUDLOW")
             .eq("is_active", True)
@@ -336,7 +336,6 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         assigned_hint = None
         assigned_distribution = []
         assigned_item_name = None
-        assigned_internal_note = None
         
         sku_entries = inventory_data_map.get(db_sku, []) if db_sku else []
         if sku_entries:
@@ -376,7 +375,6 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
             assigned_hint = best_match.get("location_hint")
             assigned_distribution = best_match.get("distribution") or []
             assigned_item_name = best_match.get("item_name")
-            assigned_internal_note = best_match.get("internal_note")
 
         cart_items.append({
             "sku": db_sku if db_sku else normalized_pdf_sku,
@@ -386,7 +384,6 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
             "raw_sku": item.get("raw_sku", normalized_pdf_sku),
             "unit_price": item.get("unit_price", 0),
             "location": assigned_location,
-            "internal_note": assigned_internal_note or assigned_hint,
             "location_hint": assigned_hint,
             "distribution": assigned_distribution,
             "warehouse": "LUDLOW",
