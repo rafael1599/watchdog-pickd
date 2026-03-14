@@ -16,6 +16,8 @@ import sys
 import time
 import shutil
 import logging
+import subprocess
+import plistlib
 from pathlib import Path
 from datetime import datetime
 
@@ -234,8 +236,46 @@ def process_existing_files():
                 process_pdf(pdf_path)
 
 
+PLIST_LABEL = "com.antigravity.watchdog-pickd"
+
+
+def install_launchd():
+    """Install launchd plist so watcher starts automatically on login.
+    Skips silently if already installed."""
+    plist_path = Path.home() / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist"
+
+    if plist_path.exists():
+        return  # already installed
+
+    script_dir = Path(__file__).resolve().parent
+    python_path = sys.executable
+    log_dir = script_dir / "logs"
+    log_dir.mkdir(exist_ok=True)
+
+    plist = {
+        "Label": PLIST_LABEL,
+        "ProgramArguments": [str(python_path), str(script_dir / "watcher.py")],
+        "WorkingDirectory": str(script_dir),
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "StandardOutPath": str(log_dir / "stdout.log"),
+        "StandardErrorPath": str(log_dir / "stderr.log"),
+        "EnvironmentVariables": {
+            "PATH": os.environ.get("PATH", "/usr/bin:/usr/local/bin"),
+        },
+    }
+
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(plist_path, "wb") as f:
+        plistlib.dump(plist, f)
+
+    subprocess.run(["launchctl", "load", str(plist_path)], check=False)
+    log.info(f"✅ Auto-start installed: {plist_path}")
+
+
 def main():
     ensure_folders()
+    install_launchd()
 
     log.info("=" * 60)
     log.info("🚀 PickD Watcher v1.0")
