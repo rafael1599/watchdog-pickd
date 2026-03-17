@@ -8,7 +8,7 @@ Inserts orders directly into picking_lists so the web app picks them up via Real
 import os
 import json
 from typing import Optional, List, Dict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -227,6 +227,144 @@ def reopen_completed_order(list_id: str, existing_items: list, delta_items: list
     )
 
     _log_import(client, pdf_hash, order_number, file_name, len(cart_items), list_id)
+
+    return result.data[0]
+
+
+def resolve_customer(client: Client, name: str) -> Optional[str]:
+    """Public wrapper for _resolve_customer."""
+    return _resolve_customer(client, name)
+
+
+COMBINABLE_STATUSES = ["active", "ready_to_double_check", "needs_correction", "double_checking"]
+
+
+def find_combinable_order_by_customer(customer_id: str, exclude_order_number: str = None) -> Optional[dict]:
+    """
+    Find an existing picking list for the same customer that can be combined.
+    Only returns orders in combinable statuses, created within the last 24 hours.
+    Returns the most recently created one.
+    """
+    client = get_client()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+
+    query = (
+        client.table("picking_lists")
+        .select("*")
+        .eq("customer_id", customer_id)
+        .in_("status", COMBINABLE_STATUSES)
+        .gte("created_at", cutoff)
+        .order("created_at", desc=True)
+        .limit(1)
+    )
+
+    if exclude_order_number:
+        query = query.neq("order_number", exclude_order_number)
+
+    result = query.execute()
+    if result.data and len(result.data) > 0:
+        return result.data[0]
+    return None
+
+
+def combine_into_order(target_order: dict, new_order_data: dict,
+                       pdf_hash: str, file_name: str) -> dict:
+    """
+    Combine a new PDF order into an existing picking list for the same customer.
+    - Tags items with source_order for future splitting
+    - Concatenates order numbers: "878279 / 878280"
+    - Updates combine_meta with provenance data
+    - If target was in double_checking: resets to ready_to_double_check, releases checker
+    """
+    client = get_client()
+
+    target_id = target_order["id"]
+    existing_items = target_order.get("items", []) or []
+    existing_order_number = target_order["order_number"] or ""
+    new_order_number = new_order_data.get("order_number") or "UNKNOWN"
+
+    # Tag existing items with source_order if not already tagged
+    for item in existing_items:
+        if "source_order" not in item:
+            # Use the first order number segment (handles already-combined orders)
+            base_order = existing_order_number.split(" / ")[0] if " / " in existing_order_number else existing_order_number
+            item["source_order"] = base_order
+
+    # Convert new items to cart format and tag with source_order
+    cart_items = _to_cart_items(client, new_order_data["items"])
+    for item in cart_items:
+        item["source_order"] = new_order_number
+
+    # Delta check: only add items not already present
+    delta_items = []
+    existing_skus = set()
+    for item in existing_items:
+        sku = item.get("sku", "")
+        if sku:
+            existing_skus.add(sku)
+            existing_skus.add(normalize_sku(sku))
+
+    for new_item in cart_items:
+        sku = new_item.get("sku", "")
+        norm = normalize_sku(sku) if sku else ""
+        if sku not in existing_skus and norm not in existing_skus:
+            delta_items.append(new_item)
+        else:
+            # Same SKU but different source_order: keep as separate line item
+            delta_items.append(new_item)
+            # Mark that this is a cross-order duplicate so we DON'T merge quantities
+            new_item["_cross_order"] = True
+
+    # Merge: append delta items without merging same-SKU across source orders
+    merged = list(existing_items)
+    for new_item in delta_items:
+        cross_order = new_item.pop("_cross_order", False)
+        if cross_order:
+            # Keep as separate line item (different source_order)
+            merged.append(new_item)
+        else:
+            # New SKU, just append
+            merged.append(new_item)
+
+    # Concatenate order numbers
+    combined_order_number = f"{existing_order_number} / {new_order_number}"
+
+    # Build/update combine_meta
+    existing_meta = target_order.get("combine_meta") or {}
+    if not existing_meta.get("source_orders"):
+        existing_meta["source_orders"] = [{
+            "order_number": existing_order_number,
+            "added_at": target_order.get("created_at", datetime.now(timezone.utc).isoformat()),
+            "item_count": len(existing_items),
+        }]
+    existing_meta["is_combined"] = True
+    existing_meta["source_orders"].append({
+        "order_number": new_order_number,
+        "pdf_hash": pdf_hash,
+        "file_name": file_name,
+        "added_at": datetime.now(timezone.utc).isoformat(),
+        "item_count": len(cart_items),
+    })
+
+    update_data = {
+        "items": merged,
+        "order_number": combined_order_number,
+        "combine_meta": existing_meta,
+    }
+
+    # If checker had the order open, release it
+    if target_order.get("status") == "double_checking":
+        update_data["status"] = "ready_to_double_check"
+        update_data["checked_by"] = None
+
+    result = (
+        client.table("picking_lists")
+        .update(update_data)
+        .eq("id", target_id)
+        .execute()
+    )
+
+    _log_import(client, pdf_hash, new_order_number, file_name, len(cart_items), target_id)
 
     return result.data[0]
 

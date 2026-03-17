@@ -34,6 +34,9 @@ from supabase_client import (
     create_order,
     append_to_order,
     reopen_completed_order,
+    resolve_customer,
+    find_combinable_order_by_customer,
+    combine_into_order,
 )
 
 load_dotenv()
@@ -116,7 +119,9 @@ def process_pdf(pdf_path: str):
         log.info(f"   📦 Items: {len(items)}")
         log.info(f"   🏁 Last page: {is_last}")
 
-        # 5. Check if order already exists in the system
+        # 5. Check if order already exists in the system (by order_number)
+        result = None
+
         if order_number:
             existing = find_existing_order(order_number)
 
@@ -124,12 +129,12 @@ def process_pdf(pdf_path: str):
                 status = existing.get("status", "")
                 list_id = existing["id"]
                 existing_items = existing.get("items", []) or []
-                
+
                 # Check for new items (delta)
                 from supabase_client import get_new_items_delta
                 client = get_client()
                 delta_items = get_new_items_delta(existing_items, items, client)
-                
+
                 if not delta_items:
                     log.warning(
                         f"   ⚠️  DUPLICATE: No new SKUs found for Order #{order_number}. "
@@ -156,15 +161,31 @@ def process_pdf(pdf_path: str):
                     # Unknown status, create new
                     log.info(f"   🆕 Order #{order_number} has status '{status}'. Creating new...")
                     result = create_order(order_data, pdf_hash, file_name)
-            else:
-                # No existing order, create new
-                result = create_order(order_data, pdf_hash, file_name)
-        else:
-            # No order number in PDF, create with negative number
-            log.info("   ⚠️  No order number found. Generating negative number...")
+
+        # 5b. Auto-combine: no existing order by number, try combining by customer
+        if result is None and customer:
+            client = get_client()
+            customer_id = resolve_customer(client, customer)
+            if customer_id:
+                combinable = find_combinable_order_by_customer(customer_id, exclude_order_number=order_number)
+                if combinable:
+                    target_status = combinable.get("status", "")
+                    target_order_num = combinable.get("order_number", "?")
+                    log.info(f"   🔗 COMBINING with existing order #{target_order_num} (same customer: {customer})")
+                    if target_status == "double_checking":
+                        log.warning(f"   ⚠️  Target order was in DOUBLE_CHECKING. Resetting to ready_to_double_check and releasing checker.")
+                    elif target_status == "active":
+                        log.info(f"   📱 Target order is ACTIVE (picker will be notified of new items via Realtime).")
+                    result = combine_into_order(combinable, order_data, pdf_hash, file_name)
+
+        # 5c. Fallback: create new order
+        if result is None:
+            if not order_number:
+                log.info("   ⚠️  No order number found. Generating negative number...")
             result = create_order(order_data, pdf_hash, file_name)
-            # Force needs_correction for negative numbers anyway
-            get_client().table("picking_lists").update({"status": "needs_correction"}).eq("id", result["id"]).execute()
+            if not order_number:
+                # Force needs_correction for negative numbers
+                get_client().table("picking_lists").update({"status": "needs_correction"}).eq("id", result["id"]).execute()
 
         # 5b. Post-process result for warnings (Unknown SKUs or Low Stock)
         updated_items = result.get("items", [])
