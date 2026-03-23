@@ -6,7 +6,6 @@ Inserts orders directly into picking_lists so the web app picks them up via Real
 """
 
 import os
-import json
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
