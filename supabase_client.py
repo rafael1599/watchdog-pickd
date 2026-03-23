@@ -481,16 +481,14 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
             for entry in sku_entries:
                 dist_list = entry.get("distribution") or []
                 if not isinstance(dist_list, list) or not dist_list:
-                    # No distribution: use a fake "OTHER" candidate with high priority number (low priority)
-                    # and the total quantity as 'units_each' for fallback tie-breaking
                     candidates.append({
                         "entry": entry,
-                        "priority": 4, 
+                        "priority": 4,
                         "units_each": entry["quantity"],
                         "has_dist": False
                     })
                     continue
-                
+
                 for d in dist_list:
                     candidates.append({
                         "entry": entry,
@@ -499,19 +497,30 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
                         "has_dist": True
                     })
 
-            # Sort: Priority first (Pallet=0), then units_each (fewer is better), 
-            # then quantity (more is better - original logic)
-            candidates.sort(key=lambda x: (
-                x["priority"], 
-                x["units_each"], 
-                -x["entry"]["quantity"]
-            ))
-            
-            best_match = candidates[0]["entry"]
-            assigned_location = best_match["location"]
-            assigned_hint = best_match.get("location_hint")
-            assigned_distribution = best_match.get("distribution") or []
-            assigned_item_name = best_match.get("item_name")
+            # Filter out locations with qty=0 — only pick from locations that have stock
+            in_stock = [c for c in candidates if (c["entry"].get("quantity") or 0) > 0]
+
+            # If no location has stock, leave location=None (item stays flagged
+            # with insufficient_stock=True and the picker sees the warning)
+            active_candidates = in_stock if in_stock else None
+
+            if active_candidates:
+                # Sort: Priority first (Pallet=0), then units_each (fewer is better),
+                # then quantity (more is better)
+                active_candidates.sort(key=lambda x: (
+                    x["priority"],
+                    x["units_each"],
+                    -x["entry"]["quantity"]
+                ))
+
+                best_match = active_candidates[0]["entry"]
+                assigned_location = best_match["location"]
+                assigned_hint = best_match.get("location_hint")
+                assigned_distribution = best_match.get("distribution") or []
+                assigned_item_name = best_match.get("item_name")
+            else:
+                # No stock anywhere — grab item_name from any entry for display
+                assigned_item_name = sku_entries[0].get("item_name")
 
         cart_items.append({
             "sku": db_sku if db_sku else normalized_pdf_sku,
