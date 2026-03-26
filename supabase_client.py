@@ -448,10 +448,36 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
             sku = inv["sku"]
             qty = inv["quantity"] or 0
             total_stock_map[sku] = total_stock_map.get(sku, 0) + qty
-            
+
             if sku not in inventory_data_map:
                 inventory_data_map[sku] = []
             inventory_data_map[sku].append(inv)
+
+    # Step 2b: Query active picking lists to calculate already-reserved stock.
+    # This prevents two concurrent orders from over-assigning the same location.
+    reserved_map = {}  # (sku, location) -> reserved_qty
+    reserved_by_sku = {}  # sku -> total reserved across all locations
+
+    if found_db_skus:
+        active_lists = (
+            client.table("picking_lists")
+            .select("items")
+            .in_("status", COMBINABLE_STATUSES)
+            .execute()
+        )
+        for pl in (active_lists.data or []):
+            for pl_item in (pl.get("items") or []):
+                sku = pl_item.get("sku", "")
+                loc = pl_item.get("location", "")
+                qty = pl_item.get("pickingQty", 0)
+                if sku in found_db_skus and loc and qty > 0:
+                    key = (sku, loc)
+                    reserved_map[key] = reserved_map.get(key, 0) + qty
+                    reserved_by_sku[sku] = reserved_by_sku.get(sku, 0) + qty
+
+        # Adjust total_stock_map to reflect reservations
+        for sku in total_stock_map:
+            total_stock_map[sku] = max(0, total_stock_map[sku] - reserved_by_sku.get(sku, 0))
 
     # Step 3: Build final cart items using prioritization logic
     # PALLET (0) > LINE (1) > TOWER (2) > OTHER (3)
@@ -497,8 +523,15 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
                         "has_dist": True
                     })
 
-            # Filter out locations with qty=0 — only pick from locations that have stock
-            in_stock = [c for c in candidates if (c["entry"].get("quantity") or 0) > 0]
+            # Calculate effective available stock per candidate (physical - reserved)
+            for c in candidates:
+                entry = c["entry"]
+                loc = entry.get("location") or ""
+                reserved = reserved_map.get((db_sku, loc), 0)
+                c["effective_qty"] = max(0, (entry.get("quantity") or 0) - reserved)
+
+            # Filter: only locations with effective stock > 0
+            in_stock = [c for c in candidates if c["effective_qty"] > 0]
 
             # If no location has stock, leave location=None (item stays flagged
             # with insufficient_stock=True and the picker sees the warning)
@@ -506,11 +539,11 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
 
             if active_candidates:
                 # Sort: Priority first (Pallet=0), then units_each (fewer is better),
-                # then quantity (more is better)
+                # then effective quantity (more is better)
                 active_candidates.sort(key=lambda x: (
                     x["priority"],
                     x["units_each"],
-                    -x["entry"]["quantity"]
+                    -x["effective_qty"]
                 ))
 
                 best_match = active_candidates[0]["entry"]
