@@ -6,3 +6,7 @@ __pycache__/
 processed/
 errors/
 venv/
+
+# Claude (skills symlink + local config)
+.claude/skills
+.claude/skills/

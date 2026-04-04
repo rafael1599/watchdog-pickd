@@ -1,0 +1,6 @@
+#!/bin/sh
+FILES=$(git diff --cached --name-only --diff-filter=ACM -- '*.py')
+if [ -z "$FILES" ]; then
+  exit 0
+fi
+ruff check $FILES && ruff format --check $FILES
