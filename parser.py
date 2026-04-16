@@ -11,7 +11,7 @@ Handles the specific format of the order inquiry PDFs:
 """
 
 import re
-from typing import Optional, List, Dict
+from typing import Dict, List, Optional
 
 
 def normalize_sku(raw_sku: str) -> str:
@@ -79,35 +79,36 @@ def parse_items(text: str) -> List[Dict]:
     # The Stock# portion ends when we hit a single uppercase letter (the W/H code)
     # followed by a space and the description text.
     item_pattern = re.compile(
-        r"^\s*(\d+)\s+(\d+)\s+"   # qty_ord, qty_ship
+        r"^\s*(\d+)\s+(\d+)\s+"  # qty_ord, qty_ship
         r"([\d]{2}\s[\d]{4}\s?\w*)\s+"  # stock number (e.g., '03 3684 BR' or '03 3684 BLT')
-        r"([A-Z])\s+"             # warehouse code (single letter like N)
-        r"(.+?)\s+"               # description (non-greedy)
-        r"([\d,]+\.\d{2})\s+"     # unit price
-        r"([\d,]+\.\d{2})\s*$"    # extended price
+        r"([A-Z])\s+"  # warehouse code (single letter like N)
+        r"(.+?)\s+"  # description (non-greedy)
+        r"([\d,]*\.\d{2})\s+"  # unit price (allow ".00" with no leading digits)
+        r"([\d,]*\.\d{2})\s*$"  # extended price (allow ".00" with no leading digits)
     )
 
     for line in lines:
         match = item_pattern.match(line)
         if match:
             qty_ordered = int(match.group(1))
-            qty_shipped = int(match.group(2))
             raw_sku = match.group(3).strip()
             warehouse = match.group(4).strip()
             description = match.group(5).strip()
             unit_price = float(match.group(6).replace(",", ""))
             extend_price = float(match.group(7).replace(",", ""))
 
-            items.append({
-                "sku": normalize_sku(raw_sku),
-                "qty": qty_shipped,  # Use shipped qty as the actual quantity
-                "qty_ordered": qty_ordered,
-                "raw_sku": raw_sku,
-                "warehouse": warehouse,
-                "description": description,
-                "unit_price": unit_price,
-                "extend_price": extend_price,
-            })
+            items.append(
+                {
+                    "sku": normalize_sku(raw_sku),
+                    "qty": qty_ordered,  # Use ordered qty (backorders qty_ship=0 still need user decision)
+                    "qty_ordered": qty_ordered,
+                    "raw_sku": raw_sku,
+                    "warehouse": warehouse,
+                    "description": description,
+                    "unit_price": unit_price,
+                    "extend_price": extend_price,
+                }
+            )
 
     return items
 
