@@ -6,10 +6,13 @@ Inserts orders directly into picking_lists so the web app picks them up via Real
 """
 
 import os
-from typing import Optional, List, Dict
 from datetime import datetime, timedelta, timezone
-from supabase import create_client, Client
+from typing import Optional
+
 from dotenv import load_dotenv
+from supabase import Client, create_client
+
+from parser import normalize_sku
 
 load_dotenv()
 
@@ -50,12 +53,7 @@ def check_duplicate(pdf_hash: str) -> Optional[dict]:
     Returns the existing log entry if found, None otherwise.
     """
     client = get_client()
-    result = (
-        client.table("pdf_import_log")
-        .select("*")
-        .eq("pdf_hash", pdf_hash)
-        .execute()
-    )
+    result = client.table("pdf_import_log").select("*").eq("pdf_hash", pdf_hash).execute()
     if result.data and len(result.data) > 0:
         return result.data[0]
     return None
@@ -156,7 +154,7 @@ def get_new_items_delta(existing_items: list, new_parsed_items: list, client: Cl
         # Check if this new item's SKU matches any existing SKU
         # We need to consider that _to_cart_items might resolve the sku to a different DB sku.
         # But for delta checking, normalized PDF sku is our best guess before hitting the DB.
-        
+
         # A more robust check: What if the DB sku is "03-3684BL" but PDF is "03 3684 BL"?
         # existing_skus has "03-3684BL" and "033684BL" (normalized from raw_sku).
         # norm_sku will be "033684BL".
@@ -167,15 +165,21 @@ def get_new_items_delta(existing_items: list, new_parsed_items: list, client: Cl
                 if normalize_sku(ext_sku) == norm_sku:
                     found = True
                     break
-            
+
             if not found:
                 delta_items.append(new_item)
 
     return delta_items
 
 
-def append_to_order(list_id: str, existing_items: list, delta_items: list,
-                    order_number: str, pdf_hash: str, file_name: str) -> dict:
+def append_to_order(
+    list_id: str,
+    existing_items: list,
+    delta_items: list,
+    order_number: str,
+    pdf_hash: str,
+    file_name: str,
+) -> dict:
     """
     Append DELTA items to an existing active/ready picking list.
     """
@@ -185,24 +189,25 @@ def append_to_order(list_id: str, existing_items: list, delta_items: list,
     merged = _merge_items(existing_items, cart_items)
 
     update_data = {"items": merged}
-    
+
     # If any new item or existing item is unknown, the list should indicate it
     # Status handling will be done in watcher.py for new creations
-    
-    result = (
-        client.table("picking_lists")
-        .update(update_data)
-        .eq("id", list_id)
-        .execute()
-    )
+
+    result = client.table("picking_lists").update(update_data).eq("id", list_id).execute()
 
     _log_import(client, pdf_hash, order_number, file_name, len(cart_items), list_id)
 
     return result.data[0]
 
 
-def reopen_completed_order(list_id: str, existing_items: list, delta_items: list,
-                           order_number: str, pdf_hash: str, file_name: str) -> dict:
+def reopen_completed_order(
+    list_id: str,
+    existing_items: list,
+    delta_items: list,
+    order_number: str,
+    pdf_hash: str,
+    file_name: str,
+) -> dict:
     """
     Reopen a completed order as an add-on.
     Sets is_addon=True, status back to 'ready_to_double_check'.
@@ -215,12 +220,14 @@ def reopen_completed_order(list_id: str, existing_items: list, delta_items: list
 
     result = (
         client.table("picking_lists")
-        .update({
-            "items": merged,
-            "status": "ready_to_double_check",
-            "is_addon": True,
-            "checked_by": None,
-        })
+        .update(
+            {
+                "items": merged,
+                "status": "ready_to_double_check",
+                "is_addon": True,
+                "checked_by": None,
+            }
+        )
         .eq("id", list_id)
         .execute()
     )
@@ -238,7 +245,9 @@ def resolve_customer(client: Client, name: str) -> Optional[str]:
 COMBINABLE_STATUSES = ["active", "ready_to_double_check", "needs_correction", "double_checking"]
 
 
-def find_combinable_order_by_customer(customer_id: str, exclude_order_number: str = None) -> Optional[dict]:
+def find_combinable_order_by_customer(
+    customer_id: str, exclude_order_number: str = None
+) -> Optional[dict]:
     """
     Find an existing picking list for the same customer that can be combined.
     Only returns orders in combinable statuses, created within the last 24 hours.
@@ -266,8 +275,9 @@ def find_combinable_order_by_customer(customer_id: str, exclude_order_number: st
     return None
 
 
-def combine_into_order(target_order: dict, new_order_data: dict,
-                       pdf_hash: str, file_name: str) -> dict:
+def combine_into_order(
+    target_order: dict, new_order_data: dict, pdf_hash: str, file_name: str
+) -> dict:
     """
     Combine a new PDF order into an existing picking list for the same customer.
     - Tags items with source_order for future splitting
@@ -286,7 +296,11 @@ def combine_into_order(target_order: dict, new_order_data: dict,
     for item in existing_items:
         if "source_order" not in item:
             # Use the first order number segment (handles already-combined orders)
-            base_order = existing_order_number.split(" / ")[0] if " / " in existing_order_number else existing_order_number
+            base_order = (
+                existing_order_number.split(" / ")[0]
+                if " / " in existing_order_number
+                else existing_order_number
+            )
             item["source_order"] = base_order
 
     # Convert new items to cart format and tag with source_order
@@ -331,19 +345,23 @@ def combine_into_order(target_order: dict, new_order_data: dict,
     # Build/update combine_meta
     existing_meta = target_order.get("combine_meta") or {}
     if not existing_meta.get("source_orders"):
-        existing_meta["source_orders"] = [{
-            "order_number": existing_order_number,
-            "added_at": target_order.get("created_at", datetime.now(timezone.utc).isoformat()),
-            "item_count": len(existing_items),
-        }]
+        existing_meta["source_orders"] = [
+            {
+                "order_number": existing_order_number,
+                "added_at": target_order.get("created_at", datetime.now(timezone.utc).isoformat()),
+                "item_count": len(existing_items),
+            }
+        ]
     existing_meta["is_combined"] = True
-    existing_meta["source_orders"].append({
-        "order_number": new_order_number,
-        "pdf_hash": pdf_hash,
-        "file_name": file_name,
-        "added_at": datetime.now(timezone.utc).isoformat(),
-        "item_count": len(cart_items),
-    })
+    existing_meta["source_orders"].append(
+        {
+            "order_number": new_order_number,
+            "pdf_hash": pdf_hash,
+            "file_name": file_name,
+            "added_at": datetime.now(timezone.utc).isoformat(),
+            "item_count": len(cart_items),
+        }
+    )
 
     update_data = {
         "items": merged,
@@ -356,19 +374,12 @@ def combine_into_order(target_order: dict, new_order_data: dict,
         update_data["status"] = "ready_to_double_check"
         update_data["checked_by"] = None
 
-    result = (
-        client.table("picking_lists")
-        .update(update_data)
-        .eq("id", target_id)
-        .execute()
-    )
+    result = client.table("picking_lists").update(update_data).eq("id", target_id).execute()
 
     _log_import(client, pdf_hash, new_order_number, file_name, len(cart_items), target_id)
 
     return result.data[0]
 
-
-from parser import normalize_sku
 
 def _to_cart_items(client: Client, parsed_items: list) -> list:
     """
@@ -403,45 +414,47 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
     item_results = []
     for item in parsed_items:
         normalized_pdf_sku = item["sku"]
-        
+
         # Try finding exact normalized match first
         db_sku = sku_map.get(normalized_pdf_sku)
-        
+
         # Fuzzy Fallback: Many PDF SKUs have extra suffixes like 'T' or 'PALLET'
         # e.g., '033994BLT' (PDF) vs '03-3994BL' (DB)
         if not db_sku:
             # Try removing common suffixes
             for suffix in ["T", "PALLET"]:
                 if normalized_pdf_sku.endswith(suffix):
-                    stripped = normalized_pdf_sku[:-len(suffix)]
+                    stripped = normalized_pdf_sku[: -len(suffix)]
                     if stripped in sku_map:
                         db_sku = sku_map[stripped]
                         break
 
         not_found = db_sku is None
         found_db_skus.append(db_sku) if db_sku else None
-        item_results.append({
-            "normalized_pdf_sku": normalized_pdf_sku,
-            "db_sku": db_sku,
-            "not_found": not_found,
-            "item": item
-        })
+        item_results.append(
+            {
+                "normalized_pdf_sku": normalized_pdf_sku,
+                "db_sku": db_sku,
+                "not_found": not_found,
+                "item": item,
+            }
+        )
 
     # Step 2: Fetch locations and total stock from inventory for found SKUs
-    inventory_data_map = {} # SKU -> List of all inventory entries
+    inventory_data_map = {}  # SKU -> List of all inventory entries
     total_stock_map = {}
 
     if found_db_skus:
         # Fetch inventory for LUDLOW including distribution and hints
         inv_res = (
             client.table("inventory")
-            .select("sku, location, quantity, distribution, location_hint, item_name")
+            .select("sku, location, quantity, distribution, location_hint, item_name, sublocation")
             .in_("sku", found_db_skus)
             .eq("warehouse", "LUDLOW")
             .eq("is_active", True)
             .execute()
         )
-        
+
         # Group entries by SKU and aggregate total stock
         raw_entries = inv_res.data or []
         for inv in raw_entries:
@@ -465,8 +478,8 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
             .in_("status", COMBINABLE_STATUSES)
             .execute()
         )
-        for pl in (active_lists.data or []):
-            for pl_item in (pl.get("items") or []):
+        for pl in active_lists.data or []:
+            for pl_item in pl.get("items") or []:
                 sku = pl_item.get("sku", "")
                 loc = pl_item.get("location", "")
                 qty = pl_item.get("pickingQty", 0)
@@ -482,14 +495,14 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
     # Step 3: Build final cart items using prioritization logic
     # PALLET (0) > LINE (1) > TOWER (2) > OTHER (3)
     PRIORITY = {"PALLET": 0, "LINE": 1, "TOWER": 2, "OTHER": 3}
-    
+
     cart_items = []
     for res in item_results:
         db_sku = res["db_sku"]
         normalized_pdf_sku = res["normalized_pdf_sku"]
         item = res["item"]
         requested_qty = item["qty"]
-        
+
         # Availability check
         available_qty = total_stock_map.get(db_sku, 0) if db_sku else 0
         insufficient_stock = requested_qty > available_qty
@@ -497,9 +510,10 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         # Find best location for this SKU
         assigned_location = None
         assigned_hint = None
+        assigned_sublocation = None
         assigned_distribution = []
         assigned_item_name = None
-        
+
         sku_entries = inventory_data_map.get(db_sku, []) if db_sku else []
         if sku_entries:
             # Flatten all distribution options per location to compare them
@@ -507,21 +521,25 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
             for entry in sku_entries:
                 dist_list = entry.get("distribution") or []
                 if not isinstance(dist_list, list) or not dist_list:
-                    candidates.append({
-                        "entry": entry,
-                        "priority": 4,
-                        "units_each": entry["quantity"],
-                        "has_dist": False
-                    })
+                    candidates.append(
+                        {
+                            "entry": entry,
+                            "priority": 4,
+                            "units_each": entry["quantity"],
+                            "has_dist": False,
+                        }
+                    )
                     continue
 
                 for d in dist_list:
-                    candidates.append({
-                        "entry": entry,
-                        "priority": PRIORITY.get(d.get("type"), 3),
-                        "units_each": d.get("units_each", 999999),
-                        "has_dist": True
-                    })
+                    candidates.append(
+                        {
+                            "entry": entry,
+                            "priority": PRIORITY.get(d.get("type"), 3),
+                            "units_each": d.get("units_each", 999999),
+                            "has_dist": True,
+                        }
+                    )
 
             # Calculate effective available stock per candidate (physical - reserved)
             for c in candidates:
@@ -540,37 +558,39 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
             if active_candidates:
                 # Sort: Priority first (Pallet=0), then units_each (fewer is better),
                 # then effective quantity (more is better)
-                active_candidates.sort(key=lambda x: (
-                    x["priority"],
-                    x["units_each"],
-                    -x["effective_qty"]
-                ))
+                active_candidates.sort(
+                    key=lambda x: (x["priority"], x["units_each"], -x["effective_qty"])
+                )
 
                 best_match = active_candidates[0]["entry"]
                 assigned_location = best_match["location"]
                 assigned_hint = best_match.get("location_hint")
+                assigned_sublocation = best_match.get("sublocation")
                 assigned_distribution = best_match.get("distribution") or []
                 assigned_item_name = best_match.get("item_name")
             else:
                 # No stock anywhere — grab item_name from any entry for display
                 assigned_item_name = sku_entries[0].get("item_name")
 
-        cart_items.append({
-            "sku": db_sku if db_sku else normalized_pdf_sku,
-            "pickingQty": requested_qty,
-            "item_name": assigned_item_name or item.get("description", ""),
-            "description": item.get("description", ""),
-            "raw_sku": item.get("raw_sku", normalized_pdf_sku),
-            "unit_price": item.get("unit_price", 0),
-            "location": assigned_location,
-            "location_hint": assigned_hint,
-            "distribution": assigned_distribution,
-            "warehouse": "LUDLOW",
-            "source": "pdf_import",
-            "sku_not_found": res["not_found"],
-            "insufficient_stock": insufficient_stock,
-            "available_qty": available_qty,
-        })
+        cart_items.append(
+            {
+                "sku": db_sku if db_sku else normalized_pdf_sku,
+                "pickingQty": requested_qty,
+                "item_name": assigned_item_name or item.get("description", ""),
+                "description": item.get("description", ""),
+                "raw_sku": item.get("raw_sku", normalized_pdf_sku),
+                "unit_price": item.get("unit_price", 0),
+                "location": assigned_location,
+                "location_hint": assigned_hint,
+                "sublocation": assigned_sublocation,
+                "distribution": assigned_distribution,
+                "warehouse": "LUDLOW",
+                "source": "pdf_import",
+                "sku_not_found": res["not_found"],
+                "insufficient_stock": insufficient_stock,
+                "available_qty": available_qty,
+            }
+        )
     return cart_items
 
 
@@ -587,8 +607,8 @@ def _merge_items(existing: list, new_items: list) -> list:
         for i, existing_item in enumerate(merged):
             if existing_item.get("sku") == new_item.get("sku"):
                 # Same SKU: add quantities
-                merged[i]["pickingQty"] = (
-                    merged[i].get("pickingQty", 0) + new_item.get("pickingQty", 0)
+                merged[i]["pickingQty"] = merged[i].get("pickingQty", 0) + new_item.get(
+                    "pickingQty", 0
                 )
                 found = True
                 break
@@ -606,22 +626,13 @@ def _resolve_customer(client: Client, name: str) -> Optional[str]:
     normalized = name.strip()
 
     # Try exact match first
-    result = (
-        client.table("customers")
-        .select("id")
-        .eq("name", normalized)
-        .execute()
-    )
+    result = client.table("customers").select("id").eq("name", normalized).execute()
 
     if result.data and len(result.data) > 0:
         return result.data[0]["id"]
 
     # Create new customer
-    result = (
-        client.table("customers")
-        .insert({"name": normalized})
-        .execute()
-    )
+    result = client.table("customers").insert({"name": normalized}).execute()
 
     if result.data:
         return result.data[0]["id"]
@@ -629,14 +640,22 @@ def _resolve_customer(client: Client, name: str) -> Optional[str]:
     return None
 
 
-def _log_import(client: Client, pdf_hash: str, order_number: Optional[str],
-                file_name: str, items_count: int, picking_list_id: str):
+def _log_import(
+    client: Client,
+    pdf_hash: str,
+    order_number: Optional[str],
+    file_name: str,
+    items_count: int,
+    picking_list_id: str,
+):
     """Log the PDF import for audit and duplicate detection."""
-    client.table("pdf_import_log").insert({
-        "pdf_hash": pdf_hash,
-        "order_number": order_number,
-        "file_name": file_name,
-        "items_count": items_count,
-        "picking_list_id": picking_list_id,
-        "status": "processed",
-    }).execute()
+    client.table("pdf_import_log").insert(
+        {
+            "pdf_hash": pdf_hash,
+            "order_number": order_number,
+            "file_name": file_name,
+            "items_count": items_count,
+            "picking_list_id": picking_list_id,
+            "status": "processed",
+        }
+    ).execute()
