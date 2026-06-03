@@ -100,8 +100,8 @@ class MochaDriver:
         self._osascript(f'tell application "System Events" to keystroke "{text}"')
 
     def key(self, name: str):
-        """Press a special key: 'enter', 'tab' or 'f5'."""
-        key_codes = {"enter": 36, "return": 36, "tab": 48, "f5": 96}
+        """Press a special key: 'enter', 'tab', 'f5' or 'f6'."""
+        key_codes = {"enter": 36, "return": 36, "tab": 48, "f5": 96, "f6": 97}
         code = key_codes.get(name.lower())
         if code is None:
             raise ValueError(f"Unknown key: {name}")
@@ -172,6 +172,10 @@ def capture_order(
     Raises CaptureError if END OF ORDER is not seen within max_pages.
     """
     driver.focus()
+
+    # F6 opens a fresh order search before each new order.
+    driver.key("f6")
+    time.sleep(page_wait)
 
     # Page 1: customer header. Typing the last digit surfaces it automatically.
     driver.type_text(str(order_number))
