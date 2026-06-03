@@ -51,9 +51,13 @@ class MochaDriver:
     and pbpaste. Only functional on macOS with the emulator open and logged in.
     """
 
-    def __init__(self, app_name: str = MOCHA_APP_NAME, launch_target: str = AS400_LAUNCH_TARGET):
-        self.app_name = app_name
-        self.launch_target = launch_target
+    def __init__(self, app_name: str = None, launch_target: str = None):
+        # Resolve at instantiation (request time) so a .env loaded after import
+        # is still honored.
+        self.app_name = app_name or os.getenv("MOCHA_APP_NAME", "Mocha TN5250")
+        self.launch_target = (
+            launch_target or os.getenv("AS400_LAUNCH_TARGET") or self.app_name
+        )
 
     def _osascript(self, script: str):
         subprocess.run(["osascript", "-e", script], check=True)

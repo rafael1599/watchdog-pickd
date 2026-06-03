@@ -18,15 +18,19 @@ The capture layer only works on macOS. Sending requires the Supabase env vars (.
 import logging
 import threading
 
-from flask import Flask, jsonify, render_template_string, request
+from dotenv import load_dotenv
 
-from as400_capture import (
+load_dotenv()  # must run before importing modules that read env at import time
+
+from flask import Flask, jsonify, render_template_string, request  # noqa: E402
+
+from as400_capture import (  # noqa: E402
     CaptureError,
     MochaDriver,
     bootstrap_session,
     capture_order,
 )
-from pipeline import preview_order, process_order_text
+from pipeline import preview_order, process_order_text  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
 
