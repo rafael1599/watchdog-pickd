@@ -68,6 +68,12 @@ class MochaDriver:
         self.launch_target = (
             launch_target or os.getenv("AS400_LAUNCH_TARGET") or self.app_name
         )
+        # If the launch target is a bundle id, use it to activate the app reliably
+        # (sandboxed apps can't be resolved by name via `tell application "<name>"`).
+        bundle_re = r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$"
+        self.bundle_id = (
+            self.launch_target if re.match(bundle_re, self.launch_target) else None
+        )
 
     def _osascript(self, script: str):
         subprocess.run(["osascript", "-e", script], check=True)
@@ -83,18 +89,21 @@ class MochaDriver:
         target = self.launch_target
         if "/" in target:
             subprocess.run(["open", target], check=True)
-        elif re.match(r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$", target):
+        elif self.bundle_id:
             subprocess.run(["open", "-b", target], check=True)
         else:
             subprocess.run(["open", "-a", target], check=True)
 
     def focus(self):
-        # Bring the running process to the front by name (works for sandboxed apps
-        # whose name isn't directly resolvable via `tell application "<name>"`).
-        self._osascript(
-            f'tell application "System Events" to set frontmost of process "{self.app_name}" to true'
-        )
-        time.sleep(0.3)
+        # Activate by bundle id when available (reliable for sandboxed apps);
+        # otherwise bring the running process to the front by name.
+        if self.bundle_id:
+            self._osascript(f'tell application id "{self.bundle_id}" to activate')
+        else:
+            self._osascript(
+                f'tell application "System Events" to set frontmost of process "{self.app_name}" to true'
+            )
+        time.sleep(0.4)
 
     def type_text(self, text: str):
         self._osascript(f'tell application "System Events" to keystroke "{text}"')
@@ -108,13 +117,29 @@ class MochaDriver:
         self._osascript(f'tell application "System Events" to key code {code}')
 
     def copy_screen(self) -> str:
-        """Select all (Cmd+A), copy (Cmd+C), then read the clipboard via pbpaste."""
+        """Focus Mocha, select all (Cmd+A), copy (Cmd+C), read the clipboard.
+
+        Writes a sentinel to the clipboard first; if Cmd+A/Cmd+C didn't replace it,
+        the copy went nowhere (wrong window focused, or Mocha doesn't copy via
+        Cmd+A) — we raise instead of looping forever on stale clipboard content.
+        """
+        self.focus()
+        sentinel = f"__PICKD_NO_COPY__{time.time()}"
+        subprocess.run(["pbcopy"], input=sentinel, text=True, check=True)
+
         self._osascript('tell application "System Events" to keystroke "a" using command down')
-        time.sleep(0.1)
+        time.sleep(0.15)
         self._osascript('tell application "System Events" to keystroke "c" using command down')
-        time.sleep(0.1)
-        result = subprocess.run(["pbpaste"], capture_output=True, text=True, check=True)
-        return result.stdout
+        time.sleep(0.2)
+
+        out = subprocess.run(["pbpaste"], capture_output=True, text=True, check=True).stdout
+        if out == sentinel:
+            raise CaptureError(
+                "Cmd+A/Cmd+C no copió la pantalla del AS400 (el portapapeles no cambió). "
+                "Verifica que Mocha quede al frente y que copie con Cmd+A+Cmd+C; "
+                "si en Mocha se copia de otra forma (menú Edit), dime cuál."
+            )
+        return out
 
 
 def run_login(driver, login_steps=DEFAULT_LOGIN_STEPS, step_wait: float = 0.6):
