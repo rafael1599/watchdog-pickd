@@ -20,7 +20,12 @@ import threading
 
 from flask import Flask, jsonify, render_template_string, request
 
-from as400_capture import CaptureError, MochaDriver, capture_order
+from as400_capture import (
+    CaptureError,
+    MochaDriver,
+    bootstrap_session,
+    capture_order,
+)
 from pipeline import preview_order, process_order_text
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
@@ -67,6 +72,16 @@ def index():
 def list_orders():
     with _lock:
         return jsonify([_public(o) for o in _orders.values()])
+
+
+@app.post("/api/connect")
+def connect():
+    """Launch the AS400 emulator and run the login macro, all from the UI."""
+    try:
+        bootstrap_session(MochaDriver())
+    except Exception as e:
+        return jsonify({"error": f"Error conectando al AS400: {e}"}), 500
+    return jsonify({"ok": True, "message": "AS400 conectado y logueado."})
 
 
 @app.post("/api/capture")
@@ -153,6 +168,9 @@ INDEX_HTML = """
 <body>
   <h1>📦 AS400 → PickD</h1>
   <div class="row">
+    <button id="conn" class="secondary" onclick="doConnect()">Conectar AS400</button>
+  </div>
+  <div class="row">
     <input id="num" placeholder="Número de orden (ej. 880005)" autofocus
            onkeydown="if(event.key==='Enter') doCapture()">
     <button id="cap" onclick="doCapture()">Capturar</button>
@@ -191,6 +209,17 @@ function render(orders) {
       </div>
     </div>`;
   }).join('');
+}
+
+async function doConnect() {
+  const btn = document.getElementById('conn'); btn.disabled = true;
+  msg('Lanzando AS400 y haciendo login… no toques el teclado (~10s).', 'warn');
+  try {
+    const r = await fetch('/api/connect', {method:'POST'});
+    const data = await r.json();
+    msg(r.ok ? (data.message || 'Conectado.') : (data.error||'Error al conectar.'), r.ok?'ok':'err');
+  } catch(e) { msg('Error de red: '+e, 'err'); }
+  finally { btn.disabled = false; document.getElementById('num').focus(); }
 }
 
 async function doCapture() {

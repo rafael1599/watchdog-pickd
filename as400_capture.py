@@ -20,6 +20,25 @@ log = logging.getLogger("pickd-as400")
 END_OF_ORDER_MARKER = "END OF ORDER"
 MOCHA_APP_NAME = os.getenv("MOCHA_APP_NAME", "Mocha TN5250")
 
+# App/document to open to start the emulator. Either an app name (open -a)
+# or a full path to a .app / saved session file (open <path>).
+AS400_LAUNCH_TARGET = os.getenv("AS400_LAUNCH_TARGET", MOCHA_APP_NAME)
+
+# Seconds to wait after launching before the emulator is ready to receive keys.
+LAUNCH_WAIT = float(os.getenv("AS400_LAUNCH_WAIT", "5"))
+
+# Login macro: replicates "ROMAN + TAB + STOU + ENTER + 3" (+ ENTER to reach the
+# order-search screen). Each step is (kind, value): kind in {"text", "key", "wait"}.
+# Edit here if the real sequence/timing differs.
+DEFAULT_LOGIN_STEPS = [
+    ("text", "ROMAN"),
+    ("key", "tab"),
+    ("text", "STOU"),
+    ("key", "enter"),
+    ("text", "3"),
+    ("key", "enter"),
+]
+
 
 class CaptureError(Exception):
     """Raised when a capture cannot complete (e.g. END OF ORDER never appears)."""
@@ -31,11 +50,24 @@ class MochaDriver:
     and pbpaste. Only functional on macOS with the emulator open and logged in.
     """
 
-    def __init__(self, app_name: str = MOCHA_APP_NAME):
+    def __init__(self, app_name: str = MOCHA_APP_NAME, launch_target: str = AS400_LAUNCH_TARGET):
         self.app_name = app_name
+        self.launch_target = launch_target
 
     def _osascript(self, script: str):
         subprocess.run(["osascript", "-e", script], check=True)
+
+    def launch(self):
+        """Launch (or focus, if already running) the emulator via `open`.
+
+        Robust alternative to Spotlight: a path is opened directly, otherwise
+        the value is treated as an application name.
+        """
+        target = self.launch_target
+        if "/" in target:
+            subprocess.run(["open", target], check=True)
+        else:
+            subprocess.run(["open", "-a", target], check=True)
 
     def focus(self):
         self._osascript(f'tell application "{self.app_name}" to activate')
@@ -45,8 +77,8 @@ class MochaDriver:
         self._osascript(f'tell application "System Events" to keystroke "{text}"')
 
     def key(self, name: str):
-        """Press a special key: 'enter' or 'f5'."""
-        key_codes = {"enter": 36, "f5": 96, "return": 36}
+        """Press a special key: 'enter', 'tab' or 'f5'."""
+        key_codes = {"enter": 36, "return": 36, "tab": 48, "f5": 96}
         code = key_codes.get(name.lower())
         if code is None:
             raise ValueError(f"Unknown key: {name}")
@@ -60,6 +92,41 @@ class MochaDriver:
         time.sleep(0.1)
         result = subprocess.run(["pbpaste"], capture_output=True, text=True, check=True)
         return result.stdout
+
+
+def run_login(driver, login_steps=DEFAULT_LOGIN_STEPS, step_wait: float = 0.6):
+    """Replay the login macro on a focused emulator window.
+
+    Each step is (kind, value): "text" types a string, "key" presses a special
+    key, "wait" sleeps for `value` seconds. A short pause follows every step.
+    """
+    for kind, value in login_steps:
+        if kind == "text":
+            driver.type_text(value)
+        elif kind == "key":
+            driver.key(value)
+        elif kind == "wait":
+            time.sleep(float(value))
+            continue
+        else:
+            raise ValueError(f"Unknown login step kind: {kind}")
+        time.sleep(step_wait)
+
+
+def bootstrap_session(
+    driver,
+    launch_wait: float = LAUNCH_WAIT,
+    login_steps=DEFAULT_LOGIN_STEPS,
+    step_wait: float = 0.6,
+):
+    """Open the emulator and log in, leaving the session at the order-search screen.
+
+    Sequence: launch → wait for the app → focus → run the login macro.
+    """
+    driver.launch()
+    time.sleep(launch_wait)
+    driver.focus()
+    run_login(driver, login_steps=login_steps, step_wait=step_wait)
 
 
 def capture_order(

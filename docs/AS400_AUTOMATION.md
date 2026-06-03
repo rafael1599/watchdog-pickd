@@ -183,7 +183,20 @@ Flujo en la UI:
 Permiso macOS necesario (una vez): dar **Accesibilidad** y **Automatización** a la terminal
 desde la que corre `python3` (Ajustes → Privacidad y seguridad).
 
-Variable opcional: `MOCHA_APP_NAME` si la app no se llama exactamente "Mocha TN5250".
+### Conectar AS400 desde la UI (lanzar + login)
+Botón **Conectar AS400** en la interfaz: lanza el emulador con `open -a` (robusto, no usa
+Spotlight/Cmd+Space), espera ~5 s y corre el macro de login
+`ROMAN → TAB → STOU → ENTER → 3 → ENTER`, dejando la sesión en la pantalla de búsqueda.
+Todo sin salir de la interfaz.
+
+Variables de entorno:
+- `MOCHA_APP_NAME` — nombre de la app para enfocar/teclear (default "Mocha TN5250").
+- `AS400_LAUNCH_TARGET` — qué abrir: nombre de app o ruta a un `.app`/archivo de sesión
+  (default = `MOCHA_APP_NAME`).
+- `AS400_LAUNCH_WAIT` — segundos a esperar tras lanzar antes del login (default 5).
+
+El macro de login está en `DEFAULT_LOGIN_STEPS` (`as400_capture.py`) — fácil de editar si la
+secuencia/tiempos reales difieren (ej. si "3" no necesita ENTER después).
 
 ### Archivos del MVP
 | Archivo | Rol |

@@ -7,27 +7,34 @@ flow and the multi-page accumulation without driving Mocha.
 
 import pytest
 
-from as400_capture import CaptureError, capture_order
+from as400_capture import CaptureError, capture_order, run_login
 
 
 class FakeDriver:
     """Replays a list of screens and records the keys pressed."""
 
-    def __init__(self, screens):
-        self._screens = list(screens)
+    def __init__(self, screens=None):
+        self._screens = list(screens or [])
         self._idx = -1  # first copy_screen returns screens[0]
         self.keys = []
         self.typed = None
         self.focused = False
+        self.launched = False
+        self.actions = []  # ordered ("text"|"key", value) for login assertions
+
+    def launch(self):
+        self.launched = True
 
     def focus(self):
         self.focused = True
 
     def type_text(self, text):
         self.typed = text
+        self.actions.append(("text", text))
 
     def key(self, name):
         self.keys.append(name.lower())
+        self.actions.append(("key", name.lower()))
 
     def copy_screen(self):
         self._idx += 1
@@ -75,3 +82,23 @@ def test_raises_when_marker_never_appears():
     driver = FakeDriver(["HEADER"] + ["ITEMS NO MARKER"] * 50)
     with pytest.raises(CaptureError):
         capture_order("999", driver, page_wait=0, max_pages=5)
+
+
+def test_login_macro_replays_steps_in_order():
+    driver = FakeDriver()
+    run_login(driver, step_wait=0)
+    # Default macro: ROMAN, TAB, STOU, ENTER, 3, ENTER
+    assert driver.actions == [
+        ("text", "ROMAN"),
+        ("key", "tab"),
+        ("text", "STOU"),
+        ("key", "enter"),
+        ("text", "3"),
+        ("key", "enter"),
+    ]
+
+
+def test_login_supports_custom_steps_and_wait():
+    driver = FakeDriver()
+    run_login(driver, login_steps=[("text", "USER"), ("wait", 0), ("key", "enter")], step_wait=0)
+    assert driver.actions == [("text", "USER"), ("key", "enter")]
