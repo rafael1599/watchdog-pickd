@@ -11,33 +11,22 @@ Monitors ~/send-to-pickd/ for new PDF files and processes them:
 Usage: python3 watcher.py
 """
 
+import logging
 import os
+import plistlib
+import shutil
+import subprocess
 import sys
 import time
-import shutil
-import logging
-import subprocess
-import plistlib
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 from dotenv import load_dotenv
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
-from extractor import extract_text, compute_hash
-from parser import parse_order
-from supabase_client import (
-    get_client,
-    check_duplicate,
-    find_existing_order,
-    create_order,
-    append_to_order,
-    reopen_completed_order,
-    resolve_customer,
-    find_combinable_order_by_customer,
-    combine_into_order,
-)
+from extractor import extract_text
+from pipeline import process_order_text
 
 load_dotenv()
 
@@ -79,129 +68,36 @@ def process_pdf(pdf_path: str):
     log.info(f"📄 Processing: {file_name}")
 
     try:
-        # 1. Extract text first to base hash on actual content
+        # 1. Extract text from the PDF
         text = extract_text(pdf_path)
-        if not text or len(text.strip()) < 20:
-            log.warning(f"   ⚠️  Could not extract text from PDF. Moving to errors/")
+
+        # 2. Run the shared ingestion pipeline (parse → Supabase)
+        result = process_order_text(text, source_name=file_name)
+        status = result["status"]
+
+        # 3. Route the file based on the outcome
+        if status == "empty_text":
+            log.warning("   ⚠️  Could not extract text from PDF. Moving to errors/")
             move_file(pdf_path, ERRORS_FOLDER)
             return
-
-        # 2. Compute hash of the text content
-        pdf_hash = compute_hash(text)
-        log.info(f"   🔑 Content Hash: {pdf_hash[:16]}...")
-
-        # 3. Check for exact duplicate
-        existing_log = check_duplicate(pdf_hash)
-        if existing_log:
-            processed_at = existing_log.get("processed_at", "unknown date")
-            log.warning(
-                f"   ⚠️  DUPLICATE: Identical content was already processed on {processed_at}. "
-                f"Order #{existing_log.get('order_number', '?')}. Skipping."
-            )
+        if status == "no_items":
+            log.warning("   ⚠️  No items found in PDF. Moving to errors/")
+            move_file(pdf_path, ERRORS_FOLDER)
+            return
+        if status == "duplicate":
+            log.warning(f"   ⚠️  DUPLICATE: {result['message']} Skipping.")
             move_file(pdf_path, PROCESSED_FOLDER)
             return
 
-        # 4. Parse order data
-        order_data = parse_order(text)
-        items = order_data.get("items", [])
+        log.info(f"   📋 Order: #{result.get('order_number') or 'NO NUMBER'}")
+        log.info(f"   👤 Customer: {result.get('customer')}")
+        if result.get("needs_correction"):
+            log.warning(f"   ⚠️  Order #{result.get('order_number')} set to 'needs_correction'.")
+        log.info(
+            f"   ✅ PROCESSED ({status}): Order #{result.get('order_number')} "
+            f"({result.get('item_count')} total items)"
+        )
 
-        if not items:
-            log.warning(f"   ⚠️  No items found in PDF. Moving to errors/")
-            move_file(pdf_path, ERRORS_FOLDER)
-            return
-
-        order_number = order_data.get("order_number")
-        customer = order_data.get("customer_name", "Unknown")
-        is_last = order_data.get("is_last_page", False)
-
-        log.info(f"   📋 Order: #{order_number or 'NO NUMBER'}")
-        log.info(f"   👤 Customer: {customer}")
-        log.info(f"   📦 Items: {len(items)}")
-        log.info(f"   🏁 Last page: {is_last}")
-
-        # 5. Check if order already exists in the system (by order_number)
-        result = None
-
-        if order_number:
-            existing = find_existing_order(order_number)
-
-            if existing:
-                status = existing.get("status", "")
-                list_id = existing["id"]
-                existing_items = existing.get("items", []) or []
-
-                # Check for new items (delta)
-                from supabase_client import get_new_items_delta
-                client = get_client()
-                delta_items = get_new_items_delta(existing_items, items, client)
-
-                if not delta_items:
-                    log.warning(
-                        f"   ⚠️  DUPLICATE: No new SKUs found for Order #{order_number}. "
-                        f"All items are already in the database. Skipping."
-                    )
-                    move_file(pdf_path, PROCESSED_FOLDER)
-                    return
-
-                if status == "completed":
-                    # ADDON: Reopen completed order
-                    log.info(f"   🔄 Order #{order_number} was COMPLETED. Reopening as ADD-ON with {len(delta_items)} new SKUs...")
-                    result = reopen_completed_order(
-                        list_id, existing_items, delta_items,
-                        order_number, pdf_hash, file_name
-                    )
-                elif status in ("active", "ready_to_double_check", "double_checking", "needs_correction"):
-                    # APPEND: Add new items to existing active order
-                    log.info(f"   ➕ Appending {len(delta_items)} new SKUs to existing order #{order_number} (status: {status})...")
-                    result = append_to_order(
-                        list_id, existing_items, delta_items,
-                        order_number, pdf_hash, file_name
-                    )
-                else:
-                    # Unknown status, create new
-                    log.info(f"   🆕 Order #{order_number} has status '{status}'. Creating new...")
-                    result = create_order(order_data, pdf_hash, file_name)
-
-        # 5b. Auto-combine: no existing order by number, try combining by customer
-        if result is None and customer:
-            client = get_client()
-            customer_id = resolve_customer(client, customer)
-            if customer_id:
-                combinable = find_combinable_order_by_customer(customer_id, exclude_order_number=order_number)
-                if combinable:
-                    target_status = combinable.get("status", "")
-                    target_order_num = combinable.get("order_number", "?")
-                    log.info(f"   🔗 COMBINING with existing order #{target_order_num} (same customer: {customer})")
-                    if target_status == "double_checking":
-                        log.warning(f"   ⚠️  Target order was in DOUBLE_CHECKING. Resetting to ready_to_double_check and releasing checker.")
-                    elif target_status == "active":
-                        log.info(f"   📱 Target order is ACTIVE (picker will be notified of new items via Realtime).")
-                    result = combine_into_order(combinable, order_data, pdf_hash, file_name)
-
-        # 5c. Fallback: create new order
-        if result is None:
-            if not order_number:
-                log.info("   ⚠️  No order number found. Generating negative number...")
-            result = create_order(order_data, pdf_hash, file_name)
-            if not order_number:
-                # Force needs_correction for negative numbers
-                get_client().table("picking_lists").update({"status": "needs_correction"}).eq("id", result["id"]).execute()
-
-        # 5b. Post-process result for warnings (Unknown SKUs or Low Stock)
-        updated_items = result.get("items", [])
-        has_unknown = any(i.get("sku_not_found") for i in updated_items)
-        has_low_stock = any(i.get("insufficient_stock") for i in updated_items)
-
-        if has_unknown or has_low_stock:
-            msg = "Unknown SKUs" if has_unknown else "Insufficient stock"
-            if has_unknown and has_low_stock: msg = "Unknown SKUs & Low stock"
-            
-            log.warning(f"   ⚠️  {msg} detected in Order #{result.get('order_number')}. Setting to 'needs_correction'.")
-            get_client().table("picking_lists").update({"status": "needs_correction"}).eq("id", result["id"]).execute()
-        
-        log.info(f"   ✅ PROCESSED: Order #{result.get('order_number')} ({len(updated_items)} total items)")
-
-        # 6. Move to processed
         dest = move_file(pdf_path, PROCESSED_FOLDER)
         log.info(f"   📂 Moved to: {os.path.basename(dest)}")
 
@@ -209,7 +105,7 @@ def process_pdf(pdf_path: str):
         log.error(f"   ❌ ERROR: {e}")
         try:
             move_file(pdf_path, ERRORS_FOLDER)
-            log.info(f"   📂 Moved to errors/")
+            log.info("   📂 Moved to errors/")
         except Exception:
             pass
 
