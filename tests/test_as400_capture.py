@@ -7,7 +7,7 @@ flow and the multi-page accumulation without driving Mocha.
 
 import pytest
 
-from as400_capture import CaptureError, capture_order, run_login
+from as400_capture import CaptureError, _has_end_marker, capture_order, run_login
 
 
 class FakeDriver:
@@ -78,6 +78,19 @@ def test_marker_is_case_insensitive():
     assert driver.keys == ["f5"]
 
 
+def test_marker_ignores_extra_whitespace():
+    # 5250 captures may space out letters/words
+    assert _has_end_marker("... E N D  O F  O R D E R")
+    assert _has_end_marker("items\nEND   OF\nORDER")
+    assert not _has_end_marker("END OF LINE")
+
+
+def test_stops_with_spaced_out_marker():
+    driver = FakeDriver(["HEADER", "ITEM 1", "E N D   O F   O R D E R"])
+    capture_order("7", driver, page_wait=0)
+    assert driver.keys == ["f5", "enter"]  # one ENTER, then stop on spaced marker
+
+
 def test_raises_when_marker_never_appears():
     driver = FakeDriver(["HEADER"] + ["ITEMS NO MARKER"] * 50)
     with pytest.raises(CaptureError):
@@ -87,11 +100,12 @@ def test_raises_when_marker_never_appears():
 def test_login_macro_replays_steps_in_order():
     driver = FakeDriver()
     run_login(driver, step_wait=0)
-    # Default macro: ROMAN, TAB, STOU, ENTER, 3, ENTER
+    # Default macro: ROMAN, TAB, STOU, ENTER, ENTER, 3, ENTER
     assert driver.actions == [
         ("text", "ROMAN"),
         ("key", "tab"),
         ("text", "STOU"),
+        ("key", "enter"),
         ("key", "enter"),
         ("text", "3"),
         ("key", "enter"),

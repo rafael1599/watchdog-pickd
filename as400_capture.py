@@ -28,17 +28,27 @@ AS400_LAUNCH_TARGET = os.getenv("AS400_LAUNCH_TARGET", MOCHA_APP_NAME)
 # Seconds to wait after launching before the emulator is ready to receive keys.
 LAUNCH_WAIT = float(os.getenv("AS400_LAUNCH_WAIT", "5"))
 
-# Login macro: replicates "ROMAN + TAB + STOU + ENTER + 3" (+ ENTER to reach the
-# order-search screen). Each step is (kind, value): kind in {"text", "key", "wait"}.
+# Login macro: replicates "ROMAN + TAB + STOU + ENTER + ENTER + 3 + ENTER" to reach the
+# order-search screen. Each step is (kind, value): kind in {"text", "key", "wait"}.
 # Edit here if the real sequence/timing differs.
 DEFAULT_LOGIN_STEPS = [
     ("text", "ROMAN"),
     ("key", "tab"),
     ("text", "STOU"),
     ("key", "enter"),
+    ("key", "enter"),
     ("text", "3"),
     ("key", "enter"),
 ]
+
+
+def _has_end_marker(text: str) -> bool:
+    """Whitespace-insensitive match for the END OF ORDER marker.
+
+    The 5250 screen capture can include extra spacing between characters, so we
+    strip all whitespace before checking (e.g. 'E N D  O F  O R D E R' still matches).
+    """
+    return "ENDOFORDER" in re.sub(r"\s+", "", text.upper())
 
 
 class CaptureError(Exception):
@@ -166,16 +176,27 @@ def capture_order(
     # Page 1: customer header. Typing the last digit surfaces it automatically.
     driver.type_text(str(order_number))
     time.sleep(page_wait)
-    pages = [driver.copy_screen()]
+    header = driver.copy_screen()
+    pages = [header]
+    log.info("AS400 header captured: %d chars", len(header))
 
     # Switch to the items view (once).
     driver.key("f5")
 
-    for _ in range(max_pages):
+    for i in range(1, max_pages + 1):
         time.sleep(page_wait)
         page = driver.copy_screen()
         pages.append(page)
-        if END_OF_ORDER_MARKER in page.upper():
+        found = _has_end_marker(page)
+        log.info(
+            "AS400 items page %d: %d chars, end_marker=%s | tail=%r",
+            i,
+            len(page),
+            found,
+            page[-60:].replace("\n", "\\n"),
+        )
+        if found:
+            log.info("END OF ORDER found on page %d — stopping.", i)
             return "\n".join(pages)
         driver.key("enter")
 
