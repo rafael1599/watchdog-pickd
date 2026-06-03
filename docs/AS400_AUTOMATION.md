@@ -164,6 +164,37 @@ Marcados por quién los resuelve y prioridad.
   aparecer, parar y enviar.
 - Esperar **~0.5–1 s** tras teclear/F5/ENTER antes de copiar.
 
-## 8. Próximo paso
-Construir el MVP: comando `capturar <numero_orden>` → maneja Mocha, pagina con ENTER hasta
-END OF ORDER, parsea y manda a PickD. Refinar la picture con el usuario antes de codear.
+## 8. MVP construido (cómo correrlo)
+
+Interfaz web local. **Correr en la Mac con Mocha TN5250 abierto y logueado.**
+
+```bash
+pip install -r requirements.txt
+python3 app.py
+# abrir http://127.0.0.1:5000
+```
+
+Flujo en la UI:
+1. Teclear el número de orden → **Capturar** (maneja Mocha: encabezado → F5 → ENTER hasta
+   "END OF ORDER"). No tocar el teclado durante la captura.
+2. La orden aparece en la lista con preview: **número, cliente, conteo de ítems**.
+3. **Enviar a PickD** una por una, la que elijas, tras revisar el preview.
+
+Permiso macOS necesario (una vez): dar **Accesibilidad** y **Automatización** a la terminal
+desde la que corre `python3` (Ajustes → Privacidad y seguridad).
+
+Variable opcional: `MOCHA_APP_NAME` si la app no se llama exactamente "Mocha TN5250".
+
+### Archivos del MVP
+| Archivo | Rol |
+|---------|-----|
+| `app.py` | UI web local (Flask): capturar, preview, enviar una por una |
+| `as400_capture.py` | Driver Mocha (AppleScript) + loop de captura (testeable) |
+| `pipeline.py` | Lógica compartida texto → Supabase (la usan watcher y app) |
+| `tests/test_as400_capture.py` | Tests de la lógica del loop (sin GUI) |
+
+### Próximos pasos (pendientes del backlog §6)
+- Probar en la Mac la captura real (timing, marcador exacto, paginación multi-página).
+- Login automático opcional (`ROMAN+TAB+STOU+ENTER+3`) si se quiere arrancar desde cero.
+- Robustez de clipboard (detectar pantalla no refrescada en vez de espera fija).
+- Reforma de reservas en PickD web app (no reservar hasta Start Picking).
