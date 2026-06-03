@@ -36,21 +36,34 @@ Esto deja la sesión en la pantalla donde se buscan los números de orden.
 ### 3.2 Números de orden
 - Son **secuenciales**. Referencia: ~880004 (actualizar a medida que avanza).
 
-### 3.3 Lectura de una orden (con paginación por ENTER)
+### 3.3 Lectura de una orden (secuencia CONFIRMADA)
 
 ```
 1. Teclear el número de orden.
-   → Al poner el ÚLTIMO dígito, la orden aparece sola en pantalla (no requiere ENTER extra).
-2. Cmd+A  (seleccionar todo)
-3. Cmd+C  (copiar)  → contenido al clipboard
-4. Consumir el clipboard (pbpaste) y acumular el texto.
-5. ENTER  → avanza a la SIGUIENTE PÁGINA  (NO se usa PgDn; en AS400 se pagina con ENTER)
-6. ¿Hay más ítems? → repetir Cmd+A, Cmd+C, consumir, ENTER
-7. Repetir hasta encontrar el mensaje "END OF ORDER".
+   → Al poner el ÚLTIMO dígito, aparece sola la PÁGINA 1 = encabezado:
+     dirección + info importante del cliente.
+2. Esperar ~0.5–1 s (refresco de pantalla; normalmente instantáneo pero hay que esperar).
+3. Cmd+A → Cmd+C → pbpaste → acumular   (captura del encabezado/cliente)
+4. F5   → cambia a la vista de ÍTEMS (lo que hay que recoger).  [se presiona UNA sola vez]
+
+   ┌──────── LOOP DE PÁGINAS DE ÍTEMS ────────────────────┐
+5. │  Esperar ~0.5–1 s                                    │
+6. │  Cmd+A → Cmd+C → pbpaste → acumular                  │
+7. │  ¿el texto acumulado contiene "END OF ORDER"?        │
+   │     SÍ → PARAR y enviar la orden                     │
+   │     NO → ENTER (siguiente página) → volver a paso 5  │
+   └──────────────────────────────────────────────────────┘
 ```
 
-**Importante:** la paginación es con **ENTER**, no PgDn. El fin de la orden se detecta por el
-texto **"END OF ORDER"** (el parser ya tiene `has_end_of_order()`).
+**Reglas clave:**
+- **F5 una sola vez**, justo después de capturar la página 1 (encabezado). Pasa del
+  encabezado del cliente al detalle de ítems.
+- La paginación de ítems es con **ENTER**, no PgDn.
+- **"END OF ORDER"** puede aparecer en la 1ª, 2ª, 3ª… página de ítems, según el tamaño de
+  la orden. La regla es única: apenas aparece, se detiene y se envía. El parser ya tiene
+  `has_end_of_order()`.
+- Esperar **~0.5–1 s** tras teclear el número, tras el F5 y tras cada ENTER, antes de copiar,
+  para no copiar la pantalla anterior.
 
 ## 4. Estado actual de PickD (lo que se reutiliza tal cual)
 
@@ -83,8 +96,28 @@ as400_capture (nuevo)
   └─ pipeline supabase_client  ← REUTILIZADO (dedup, create/append/combine, SKUs, ubicación)
 ```
 
-MVP mínimo: **un comando que recibe un número de orden**, lo captura del AS400 (con
-paginación), lo parsea y lo manda a PickD. La lista/UI para elegir órdenes va encima después.
+MVP mínimo: **un comando que recibe un número de orden**, lo captura del AS400 siguiendo la
+secuencia confirmada en §3.3 (encabezado → F5 → loop de ítems con ENTER hasta "END OF ORDER"),
+lo parsea y lo manda a PickD. La lista/UI para elegir órdenes va encima después.
+
+Pseudocódigo del MVP:
+
+```
+def capturar(numero):
+    activar_mocha()
+    teclear(numero)              # al último dígito aparece la pág. 1 (encabezado)
+    sleep(0.5..1)
+    texto = copiar_pantalla()    # Cmd+A, Cmd+C, pbpaste
+    tecla("F5")                  # pasa a ítems  (una sola vez)
+    while True:
+        sleep(0.5..1)
+        texto += copiar_pantalla()
+        if "END OF ORDER" in texto:
+            break
+        tecla("ENTER")           # siguiente página de ítems
+        # (tope de seguridad de N páginas para no quedar en loop infinito)
+    enviar_a_pickd(parse_order(texto))
+```
 
 ## 6. Backlog / puntos ciegos parqueados (para mejorar después)
 
@@ -124,6 +157,12 @@ Marcados por quién los resuelve y prioridad.
   vs (B) auto-listar un rango. El MVP arranca con A (1 orden por comando).
 - Login: ¿la automatización teclea el login o asume sesión Mocha ya abierta? (MVP: asume abierta).
 - Multi-usuario / multi-máquina: definir más adelante (dedup en Supabase protege duplicados).
+
+### Resueltas (confirmadas por el usuario)
+- F5 se presiona **una sola vez**, tras capturar el encabezado, para pasar a los ítems.
+- Paginación de ítems con **ENTER**; "END OF ORDER" puede caer en cualquier página → al
+  aparecer, parar y enviar.
+- Esperar **~0.5–1 s** tras teclear/F5/ENTER antes de copiar.
 
 ## 8. Próximo paso
 Construir el MVP: comando `capturar <numero_orden>` → maneja Mocha, pagina con ENTER hasta
