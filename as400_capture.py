@@ -12,6 +12,7 @@ The keystroke/clipboard layer (MochaDriver) only works on macOS. The capture LOO
 
 import logging
 import os
+import re
 import subprocess
 import time
 
@@ -60,17 +61,25 @@ class MochaDriver:
     def launch(self):
         """Launch (or focus, if already running) the emulator via `open`.
 
-        Robust alternative to Spotlight: a path is opened directly, otherwise
-        the value is treated as an application name.
+        Robust alternative to Spotlight. The launch target may be:
+          - a path (contains "/")        → open <path>
+          - a bundle id (reverse-DNS)    → open -b <id>   (App Store / sandboxed apps)
+          - an application name          → open -a <name>
         """
         target = self.launch_target
         if "/" in target:
             subprocess.run(["open", target], check=True)
+        elif re.match(r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$", target):
+            subprocess.run(["open", "-b", target], check=True)
         else:
             subprocess.run(["open", "-a", target], check=True)
 
     def focus(self):
-        self._osascript(f'tell application "{self.app_name}" to activate')
+        # Bring the running process to the front by name (works for sandboxed apps
+        # whose name isn't directly resolvable via `tell application "<name>"`).
+        self._osascript(
+            f'tell application "System Events" to set frontmost of process "{self.app_name}" to true'
+        )
         time.sleep(0.3)
 
     def type_text(self, text: str):
