@@ -75,8 +75,8 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
             "duplicate",
             order_number=existing_log.get("order_number"),
             message=(
-                f"Contenido idéntico ya procesado el "
-                f"{existing_log.get('processed_at', 'fecha desconocida')}."
+                f"Identical content already processed on "
+                f"{existing_log.get('processed_at', 'unknown date')}."
             ),
         )
 
@@ -84,7 +84,7 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
     order_data = parse_order(text)
     items = order_data.get("items", [])
     if not items:
-        return _result("no_items", message="No se encontraron ítems en la captura.")
+        return _result("no_items", message="No items found in the capture.")
 
     order_number = order_data.get("order_number")
     customer = order_data.get("customer_name") or "Unknown"
@@ -108,7 +108,7 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
                     "duplicate",
                     order_number=order_number,
                     customer=customer,
-                    message=f"Orden #{order_number}: sin SKUs nuevos. Nada que agregar.",
+                    message=f"Order #{order_number}: no new SKUs. Nothing to add.",
                 )
 
             if existing_status == "completed":
@@ -169,7 +169,7 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
         item_count=len(updated_items),
         needs_correction=needs_correction,
         picking_list=result,
-        message=f"Orden #{result.get('order_number')} ({len(updated_items)} ítems).",
+        message=f"Order #{result.get('order_number')} ({len(updated_items)} items).",
     )
 
 

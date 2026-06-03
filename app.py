@@ -84,8 +84,8 @@ def connect():
     try:
         bootstrap_session(MochaDriver())
     except Exception as e:
-        return jsonify({"error": f"Error conectando al AS400: {e}"}), 500
-    return jsonify({"ok": True, "message": "AS400 conectado y logueado."})
+        return jsonify({"error": f"Error connecting to AS400: {e}"}), 500
+    return jsonify({"ok": True, "message": "AS400 connected and logged in."})
 
 
 @app.post("/api/capture")
@@ -93,14 +93,14 @@ def capture():
     data = request.get_json(force=True) or {}
     order_number = str(data.get("order_number", "")).strip()
     if not order_number:
-        return jsonify({"error": "Falta el número de orden."}), 400
+        return jsonify({"error": "Missing order number."}), 400
 
     try:
         raw_text = capture_order(order_number, MochaDriver())
     except CaptureError as e:
         return jsonify({"error": str(e)}), 422
     except Exception as e:  # AppleScript / clipboard / environment failures
-        return jsonify({"error": f"Error capturando del AS400: {e}"}), 500
+        return jsonify({"error": f"Error capturing from AS400: {e}"}), 500
 
     entry = _add_order(raw_text)
     return jsonify(_public(entry))
@@ -111,14 +111,14 @@ def send(oid: int):
     with _lock:
         entry = _orders.get(oid)
     if not entry:
-        return jsonify({"error": "Orden no encontrada."}), 404
+        return jsonify({"error": "Order not found."}), 404
     if entry["sent"]:
-        return jsonify({"error": "Esta orden ya fue enviada."}), 409
+        return jsonify({"error": "This order was already sent."}), 409
 
     try:
         result = process_order_text(entry["raw_text"], source_name="as400_app")
     except Exception as e:
-        return jsonify({"error": f"Error enviando a PickD: {e}"}), 500
+        return jsonify({"error": f"Error sending to PickD: {e}"}), 500
 
     with _lock:
         entry["result"] = result
@@ -141,7 +141,7 @@ def remove(oid: int):
 
 INDEX_HTML = """
 <!doctype html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -172,12 +172,12 @@ INDEX_HTML = """
 <body>
   <h1>📦 AS400 → PickD</h1>
   <div class="row">
-    <button id="conn" class="secondary" onclick="doConnect()">Conectar AS400</button>
+    <button id="conn" class="secondary" onclick="doConnect()">Connect AS400</button>
   </div>
   <div class="row">
-    <input id="num" placeholder="Número de orden (ej. 880005)" autofocus
+    <input id="num" placeholder="Order number (e.g. 880005)" autofocus
            onkeydown="if(event.key==='Enter') doCapture()">
-    <button id="cap" onclick="doCapture()">Capturar</button>
+    <button id="cap" onclick="doCapture()">Capture</button>
   </div>
   <div id="msg" class="muted"></div>
   <div id="list"></div>
@@ -192,7 +192,7 @@ async function load() {
 
 function render(orders) {
   const list = document.getElementById('list');
-  if (!orders.length) { list.innerHTML = '<p class="muted">Sin órdenes capturadas todavía.</p>'; return; }
+  if (!orders.length) { list.innerHTML = '<p class="muted">No orders captured yet.</p>'; return; }
   list.innerHTML = orders.map(o => {
     const res = o.result;
     let status = '';
@@ -202,14 +202,14 @@ function render(orders) {
     }
     return `<div class="card">
       <div class="meta">
-        <span>Orden <b>#${o.order_number ?? '—'}</b></span>
-        <span>Cliente <b>${o.customer}</b></span>
-        <span>Ítems <b>${o.item_count}</b></span>
+        <span>Order <b>#${o.order_number ?? '—'}</b></span>
+        <span>Customer <b>${o.customer}</b></span>
+        <span>Items <b>${o.item_count}</b></span>
       </div>
       ${status}
       <div class="actions">
-        <button class="send" ${o.sent?'disabled':''} onclick="doSend(${o.id})">${o.sent?'Enviada ✓':'Enviar a PickD'}</button>
-        <button class="secondary" onclick="doRemove(${o.id})">Quitar</button>
+        <button class="send" ${o.sent?'disabled':''} onclick="doSend(${o.id})">${o.sent?'Sent ✓':'Send to PickD'}</button>
+        <button class="secondary" onclick="doRemove(${o.id})">Remove</button>
       </div>
     </div>`;
   }).join('');
@@ -217,36 +217,36 @@ function render(orders) {
 
 async function doConnect() {
   const btn = document.getElementById('conn'); btn.disabled = true;
-  msg('Lanzando AS400 y haciendo login… no toques el teclado (~10s).', 'warn');
+  msg('Launching AS400 and logging in… do not touch the keyboard (~10s).', 'warn');
   try {
     const r = await fetch('/api/connect', {method:'POST'});
     const data = await r.json();
-    msg(r.ok ? (data.message || 'Conectado.') : (data.error||'Error al conectar.'), r.ok?'ok':'err');
-  } catch(e) { msg('Error de red: '+e, 'err'); }
+    msg(r.ok ? (data.message || 'Connected.') : (data.error||'Error connecting.'), r.ok?'ok':'err');
+  } catch(e) { msg('Network error: '+e, 'err'); }
   finally { btn.disabled = false; document.getElementById('num').focus(); }
 }
 
 async function doCapture() {
   const num = document.getElementById('num').value.trim();
-  if (!num) { msg('Escribe un número de orden.', 'err'); return; }
+  if (!num) { msg('Enter an order number.', 'err'); return; }
   const btn = document.getElementById('cap'); btn.disabled = true;
-  msg('Capturando del AS400… no toques el teclado.', 'warn');
+  msg('Capturing from AS400… do not touch the keyboard.', 'warn');
   try {
     const r = await fetch('/api/capture', {method:'POST', headers:{'Content-Type':'application/json'},
                                             body: JSON.stringify({order_number: num})});
     const data = await r.json();
-    if (!r.ok) { msg(data.error || 'Error al capturar.', 'err'); }
-    else { msg(`Capturada orden #${data.order_number ?? '—'} (${data.item_count} ítems).`, 'ok');
+    if (!r.ok) { msg(data.error || 'Error capturing.', 'err'); }
+    else { msg(`Captured order #${data.order_number ?? '—'} (${data.item_count} items).`, 'ok');
            document.getElementById('num').value=''; }
-  } catch(e) { msg('Error de red: '+e, 'err'); }
+  } catch(e) { msg('Network error: '+e, 'err'); }
   finally { btn.disabled = false; await load(); document.getElementById('num').focus(); }
 }
 
 async function doSend(id) {
-  msg('Enviando a PickD…', 'warn');
+  msg('Sending to PickD…', 'warn');
   const r = await fetch(`/api/orders/${id}/send`, {method:'POST'});
   const data = await r.json();
-  msg(r.ok ? (data.result?.message || 'Enviada.') : (data.error||'Error al enviar.'), r.ok?'ok':'err');
+  msg(r.ok ? (data.result?.message || 'Sent.') : (data.error||'Error sending.'), r.ok?'ok':'err');
   await load();
 }
 
