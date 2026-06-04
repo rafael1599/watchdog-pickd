@@ -674,19 +674,34 @@ def _save_shipping_address(client: Client, customer_id: str, ship: dict) -> None
         "zip_code": ship.get("zip_code"),
     }
 
+    # Always overwrite the customer's main address (mirrors the web Orders view,
+    # reflecting a Moved/Renamed customer).
     try:
         client.table("customers").update(address_fields).eq("id", customer_id).execute()
     except Exception as e:  # noqa: BLE001
         log.warning(f"Could not update customer address: {e}")
 
+    entry = {
+        "customer_id": customer_id,
+        "label": (ship.get("name") or "").strip() or None,
+        **address_fields,
+    }
     try:
+        # Mark this address as the default only when the customer has none yet —
+        # never downgrade an existing default (respects one_default_per_customer).
+        existing_default = (
+            client.table("customer_addresses")
+            .select("id")
+            .eq("customer_id", customer_id)
+            .eq("is_default", True)
+            .limit(1)
+            .execute()
+        )
+        if not existing_default.data:
+            entry["is_default"] = True
+
         client.table("customer_addresses").upsert(
-            {
-                "customer_id": customer_id,
-                "label": (ship.get("name") or "").strip() or None,
-                **address_fields,
-            },
-            on_conflict="customer_id,normalized_address",
+            entry, on_conflict="customer_id,normalized_address"
         ).execute()
     except Exception as e:  # noqa: BLE001
         log.warning(f"Could not save customer_addresses entry: {e}")
