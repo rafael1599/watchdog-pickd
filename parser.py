@@ -45,15 +45,25 @@ def parse_account_number(text: str) -> Optional[str]:
 
 def parse_customer_name(text: str) -> Optional[str]:
     """
-    Extract customer name from the 'Bill' line.
-    The customer name follows 'Bill ' on its own line.
-    Handles: 'Bill MATTHEWS BICYCLE MART, INC'
+    Extract the customer (Bill-to) name from the 'Bill' line.
+
+    PDFs put it at the line start ('Bill MATTHEWS BICYCLE MART, INC'), but AS400
+    screen captures indent it AND place the Ship-to name on the SAME line:
+        ' Bill DEALER WARRANTY 2009             Ship CHICAGO LAND BICYCLES'
+    So we allow leading whitespace and cut off the right-hand Ship-to column.
     """
-    # Look for a line starting with "Bill " followed by the customer name
-    match = re.search(r"^Bill\s+(.+)$", text, re.MULTILINE | re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    return None
+    match = re.search(r"^\s*Bill\b[ \t]*(.*)$", text, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return None
+    # Drop the Ship-to column when Bill and Ship share one line (the columns are
+    # separated by a gap of 2+ spaces before 'Ship').
+    name = re.split(r"\s{2,}Ship\b", match.group(1), flags=re.IGNORECASE)[0]
+    name = re.sub(r"\s+", " ", name).strip()
+    # Blank Bill: the whole line was '  Bill            Ship NAME', so what is
+    # left collapses to 'Ship NAME' — treat that as no Bill-to name.
+    if re.match(r"^Ship\b", name, re.IGNORECASE):
+        return None
+    return name or None
 
 
 def parse_items(text: str) -> List[Dict]:
@@ -126,12 +136,17 @@ def parse_order_comments(text: str) -> Optional[str]:
     Extract the 'Order Comments:' value from the header.
     Handles: 'Order Comments: SEE EMAIL FOR CC PAYMENT' (same line).
     Returns None if absent or empty. ('Invoice Comments' is a different field.)
+
+    AS400 screens render the function-key legend ('Cmd5 Cmd6 Cmd7 ...') on the
+    same row, so we strip that legend; an order with no real comment → None.
     """
     match = re.search(r"Order\s+Comments:\s*(.+)", text, re.IGNORECASE)
-    if match:
-        comment = re.sub(r"\s+", " ", match.group(1)).strip()
-        return comment or None
-    return None
+    if not match:
+        return None
+    comment = re.sub(r"\s+", " ", match.group(1)).strip()
+    # Remove the AS400 command-key legend (Cmd5, Cmd6=..., etc.) and anything after it.
+    comment = re.sub(r"\s*\bCmd\d+\b.*$", "", comment, flags=re.IGNORECASE).strip()
+    return comment or None
 
 
 def _extract_ship_to_lines(text: str) -> list:
@@ -186,6 +201,64 @@ def parse_shipping_address(text: str) -> Optional[str]:
     return ", ".join(parts) if parts else None
 
 
+# Canonical USPS abbreviations, mirroring PickD's parseUSAddress so a watcher
+# import and a manual paste produce the same normalized_address (dedup key).
+_STREET_SUFFIXES = {
+    "STREET": "ST", "STR": "ST", "ST": "ST",
+    "AVENUE": "AVE", "AVEN": "AVE", "AV": "AVE", "AVE": "AVE",
+    "BOULEVARD": "BLVD", "BLVD": "BLVD",
+    "ROAD": "RD", "RD": "RD",
+    "DRIVE": "DR", "DRV": "DR", "DR": "DR",
+    "LANE": "LN", "LN": "LN",
+    "COURT": "CT", "CT": "CT",
+    "CIRCLE": "CIR", "CIR": "CIR",
+    "PLACE": "PL", "PL": "PL",
+    "TERRACE": "TER", "TER": "TER",
+    "PARKWAY": "PKWY", "PKWY": "PKWY",
+    "HIGHWAY": "HWY", "HWY": "HWY",
+    "TRAIL": "TRL", "TRL": "TRL",
+    "SQUARE": "SQ", "SQ": "SQ",
+    "WAY": "WAY",
+}
+_DIRECTIONALS = {
+    "NORTH": "N", "SOUTH": "S", "EAST": "E", "WEST": "W",
+    "NORTHEAST": "NE", "NORTHWEST": "NW", "SOUTHEAST": "SE", "SOUTHWEST": "SW",
+    "N": "N", "S": "S", "E": "E", "W": "W",
+    "NE": "NE", "NW": "NW", "SE": "SE", "SW": "SW",
+}
+_UNIT_DESIGNATORS = {"APT", "STE", "SUITE", "UNIT", "FL", "FLOOR", "BLDG", "RM", "DEPT", "#"}
+
+
+def normalize_street(street: Optional[str]) -> Optional[str]:
+    """
+    Canonicalize a street line so it matches what PickD's parseUSAddress stores:
+    spell-out suffixes/directionals collapse to their USPS abbreviation
+    ('123 SAINT JOHNS AVENUE' → '123 SAINT JOHNS AVE'). 'FL' as a unit
+    designator (e.g. '2ND FL') is left alone, never treated as a directional.
+    Unknown tokens pass through unchanged. Returns None unchanged.
+    """
+    if not street:
+        return street
+
+    tokens = street.split()
+    out = []
+    for i, tok in enumerate(tokens):
+        core = re.sub(r"[.,]+$", "", tok)
+        key = core.upper()
+        prev = out[-1].upper() if out else ""
+        # Don't fold a directional/suffix that is actually a unit value
+        # (e.g. '2ND FL', 'APT W'): skip when the previous token is a designator.
+        if prev in _UNIT_DESIGNATORS:
+            out.append(core)
+        elif key in _STREET_SUFFIXES and i > 0:
+            out.append(_STREET_SUFFIXES[key])
+        elif key in _DIRECTIONALS and i > 0:
+            out.append(_DIRECTIONALS[key])
+        else:
+            out.append(core)
+    return " ".join(out)
+
+
 def parse_shipping_address_struct(text: str) -> Optional[dict]:
     """
     Ship-to block split into structured fields for the customers /
@@ -212,7 +285,7 @@ def parse_shipping_address_struct(text: str) -> Optional[dict]:
             city, state, zip_code = m.group(1).strip(), m.group(2), m.group(3)
             rest = rest[:-1]
 
-    street = ", ".join(rest) if rest else None
+    street = normalize_street(", ".join(rest)) if rest else None
     return {
         "name": name,
         "street": street,
