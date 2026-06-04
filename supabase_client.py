@@ -7,6 +7,7 @@ Inserts orders directly into picking_lists so the web app picks them up via Real
 
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -631,21 +632,40 @@ def _merge_items(existing: list, new_items: list) -> list:
     return merged
 
 
+def _normalize_customer_name(name: str) -> str:
+    """Collapse a name to uppercase alphanumerics so 'ACME, INC.' == 'acme inc'."""
+    return re.sub(r"[^A-Z0-9]", "", (name or "").upper())
+
+
 def _resolve_customer(client: Client, name: str) -> Optional[str]:
     """
-    Look up customer by name. If not found, create a new one.
-    Returns the customer ID.
+    Look up a customer by name, creating one only if there is no match.
+
+    PickD itself does not normalize customer names — dedup is a human picking a
+    fuzzy autocomplete suggestion, and there is no UNIQUE constraint on
+    ``customers.name``. So we normalize defensively here (comparing on uppercased
+    alphanumerics) to avoid inserting duplicates the web app would never merge
+    back together.
     """
-    normalized = name.strip()
+    clean = name.strip()
+    target = _normalize_customer_name(clean)
 
-    # Try exact match first
-    result = client.table("customers").select("id").eq("name", normalized).execute()
+    if target:
+        # Fast path: exact match on the stored name.
+        result = client.table("customers").select("id").eq("name", clean).execute()
+        if result.data:
+            return result.data[0]["id"]
 
-    if result.data and len(result.data) > 0:
-        return result.data[0]["id"]
+        # Fall back to a normalized comparison against existing customers,
+        # tolerating differences in casing, spacing and punctuation.
+        existing = client.table("customers").select("id, name").execute()
+        for row in existing.data or []:
+            if _normalize_customer_name(row.get("name", "")) == target:
+                return row["id"]
 
-    # Create new customer
-    result = client.table("customers").insert({"name": normalized}).execute()
+    # No match — create the customer. Store the name uppercased to stay
+    # consistent with how the rest of the app renders customer names.
+    result = client.table("customers").insert({"name": clean.upper()}).execute()
 
     if result.data:
         return result.data[0]["id"]
