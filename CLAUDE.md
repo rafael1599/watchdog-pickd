@@ -31,6 +31,16 @@ python3 watcher.py
 
 El watcher se instala automaticamente como LaunchAgent en macOS (`com.antigravity.watchdog-pickd`).
 
+## Actualizar (un solo comando)
+
+```bash
+./scripts/update.sh        # rama actual: git pull + deps + reinicia LaunchAgents
+./scripts/update.sh main   # o una rama especifica
+```
+
+Hace `git pull` (fast-forward), reinstala dependencias en el venv y reinicia los
+LaunchAgents (`com.antigravity.watchdog-pickd` y `com.antigravity.pickd-app`).
+
 ## Estructura
 
 | Archivo | Descripcion |
