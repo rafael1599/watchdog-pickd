@@ -45,15 +45,25 @@ def parse_account_number(text: str) -> Optional[str]:
 
 def parse_customer_name(text: str) -> Optional[str]:
     """
-    Extract customer name from the 'Bill' line.
-    The customer name follows 'Bill ' on its own line.
-    Handles: 'Bill MATTHEWS BICYCLE MART, INC'
+    Extract the customer (Bill-to) name from the 'Bill' line.
+
+    PDFs put it at the line start ('Bill MATTHEWS BICYCLE MART, INC'), but AS400
+    screen captures indent it AND place the Ship-to name on the SAME line:
+        ' Bill DEALER WARRANTY 2009             Ship CHICAGO LAND BICYCLES'
+    So we allow leading whitespace and cut off the right-hand Ship-to column.
     """
-    # Look for a line starting with "Bill " followed by the customer name
-    match = re.search(r"^Bill\s+(.+)$", text, re.MULTILINE | re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    return None
+    match = re.search(r"^\s*Bill\b[ \t]*(.*)$", text, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return None
+    # Drop the Ship-to column when Bill and Ship share one line (the columns are
+    # separated by a gap of 2+ spaces before 'Ship').
+    name = re.split(r"\s{2,}Ship\b", match.group(1), flags=re.IGNORECASE)[0]
+    name = re.sub(r"\s+", " ", name).strip()
+    # Blank Bill: the whole line was '  Bill            Ship NAME', so what is
+    # left collapses to 'Ship NAME' — treat that as no Bill-to name.
+    if re.match(r"^Ship\b", name, re.IGNORECASE):
+        return None
+    return name or None
 
 
 def parse_items(text: str) -> List[Dict]:
@@ -126,12 +136,17 @@ def parse_order_comments(text: str) -> Optional[str]:
     Extract the 'Order Comments:' value from the header.
     Handles: 'Order Comments: SEE EMAIL FOR CC PAYMENT' (same line).
     Returns None if absent or empty. ('Invoice Comments' is a different field.)
+
+    AS400 screens render the function-key legend ('Cmd5 Cmd6 Cmd7 ...') on the
+    same row, so we strip that legend; an order with no real comment → None.
     """
     match = re.search(r"Order\s+Comments:\s*(.+)", text, re.IGNORECASE)
-    if match:
-        comment = re.sub(r"\s+", " ", match.group(1)).strip()
-        return comment or None
-    return None
+    if not match:
+        return None
+    comment = re.sub(r"\s+", " ", match.group(1)).strip()
+    # Remove the AS400 command-key legend (Cmd5, Cmd6=..., etc.) and anything after it.
+    comment = re.sub(r"\s*\bCmd\d+\b.*$", "", comment, flags=re.IGNORECASE).strip()
+    return comment or None
 
 
 def _extract_ship_to_lines(text: str) -> list:

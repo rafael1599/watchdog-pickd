@@ -5,6 +5,7 @@ These only import `parser` (no Supabase deps).
 """
 
 from parser import (
+    parse_customer_name,
     parse_order,
     parse_order_comments,
     parse_shipping_address,
@@ -25,8 +26,33 @@ HEADER = """                            O R D E R   I N Q U I R Y
                                 END OF ORDER                              14.95"""
 
 
+def test_parse_customer_name_from_as400_header():
+    # AS400 indents 'Bill' and puts 'Ship' on the same line — must return only
+    # the Bill-to name, not the Ship-to column.
+    assert parse_customer_name(HEADER) == "DEALER WARRANTY 2009"
+
+
+def test_parse_customer_name_from_pdf_line_start():
+    assert parse_customer_name("Bill MATTHEWS BICYCLE MART, INC") == "MATTHEWS BICYCLE MART, INC"
+
+
+def test_parse_customer_name_absent():
+    assert parse_customer_name("Order Number: 1\n Terms: 5") is None
+
+
+def test_parse_customer_name_blank_bill_returns_none():
+    # Bill column empty, only a Ship-to name present — must not return 'Ship NAME'.
+    assert parse_customer_name(" Bill                       Ship CAMP HIGH ROCKS") is None
+
+
 def test_parse_order_comments():
     assert parse_order_comments(HEADER) == "SEE EMAIL FOR CC PAYMENT"
+
+
+def test_parse_order_comments_strips_as400_cmd_legend():
+    # AS400 renders the function-key legend on the same row; it is not a comment.
+    assert parse_order_comments("Order Comments: Cmd5 Cmd6 Cmd7") is None
+    assert parse_order_comments("Order Comments: CALL FIRST  Cmd5 Cmd6") == "CALL FIRST"
 
 
 def test_parse_order_comments_absent():
@@ -85,3 +111,37 @@ def test_parse_order_exposes_new_fields():
     assert d["order_comments"] == "SEE EMAIL FOR CC PAYMENT"
     assert d["shipping_address"].startswith("CHICAGO LAND BICYCLES")
     assert d["shipping"]["city"] == "CHICAGO"
+
+
+# A full real AS400 capture (order #880036): indented Bill on the same line as
+# Ship, a blank line inside the Ship-to block, and the Cmd legend after the
+# Order Comments. Guards the customer / comments / shipping parsing end to end.
+REAL_880036 = """   O R D E R   I N Q U I R Y
+
+ Order Number: 880036                       Account Number: 0010495 00
+
+ Bill TUCKER CYCLES                    Ship TUCKER CYCLES
+      3544 ST JOHNS AVE                     3544 ST JOHNS AVE
+
+      JACKSONVILLE    FL  32205             JACKSONVILLE    FL  32205
+
+ Terms: 28        Cr Lim:        .00   Invoice Comments
+ Sales ID: 223    Order Taken By: ANN
+ Order Date: 060426 P/O: SO1610
+ Order Comments: FREE FREIGHT
+                                   Cmd5            Cmd6                 Cmd7
+                                    DETAILS         RETURN TO SELECT     EXIT
+"""
+
+
+def test_real_capture_880036():
+    d = parse_order(REAL_880036)
+    assert d["customer_name"] == "TUCKER CYCLES"
+    assert d["order_comments"] == "FREE FREIGHT"
+    assert d["shipping"] == {
+        "name": "TUCKER CYCLES",
+        "street": "3544 ST JOHNS AVE",
+        "city": "JACKSONVILLE",
+        "state": "FL",
+        "zip_code": "32205",
+    }
