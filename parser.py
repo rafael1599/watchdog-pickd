@@ -121,6 +121,64 @@ def has_end_of_order(text: str) -> bool:
     return bool(re.search(r"END\s+OF\s+ORDER", text, re.IGNORECASE))
 
 
+def parse_order_comments(text: str) -> Optional[str]:
+    """
+    Extract the 'Order Comments:' value from the header.
+    Handles: 'Order Comments: SEE EMAIL FOR CC PAYMENT' (same line).
+    Returns None if absent or empty. ('Invoice Comments' is a different field.)
+    """
+    match = re.search(r"Order\s+Comments:\s*(.+)", text, re.IGNORECASE)
+    if match:
+        comment = re.sub(r"\s+", " ", match.group(1)).strip()
+        return comment or None
+    return None
+
+
+def parse_shipping_address(text: str) -> Optional[str]:
+    """
+    Extract the Ship-to block (right column of the header) as a single string.
+
+    The header is a fixed-width two-column layout: 'Bill ...' on the left and
+    'Ship ...' on the right. We locate the 'Ship' label, take the name after it,
+    then collect the right-column text of the following lines until a footer field
+    (Terms:, Sales ID:, etc.) appears. Best-effort; returns None if not found.
+    """
+    lines = text.split("\n")
+    ship_col = None
+    parts = []
+    blanks = 0
+
+    for line in lines:
+        if ship_col is None:
+            m = re.search(r"\bShip\b", line)
+            # The Ship-to label, not 'Ship Via' / 'Ship Date' / 'Shipped From'.
+            if m and not re.search(r"Ship\s+(Via|Date)|Shipped", line):
+                ship_col = m.start()
+                name = line[m.end() :].strip()
+                if name:
+                    parts.append(re.sub(r"\s+", " ", name))
+            continue
+
+        # Stop when the left column starts a footer field, or we reach the items
+        # table / end marker / a new page's inquiry title.
+        if re.match(r"\s*(Terms:|Sales ID:|Credit Hold:|Order Date:|Order Comments:)", line):
+            break
+        if re.search(r"END\s+OF\s+ORDER|Quant|Stock\s*#|I\s*N\s*Q\s*U\s*I\s*R\s*Y", line, re.IGNORECASE):
+            break
+
+        right = re.sub(r"\s+", " ", line[ship_col:]).strip()
+        if not right:
+            blanks += 1
+            if blanks >= 2:  # two blank right-column lines → end of block
+                break
+            continue
+        parts.append(right)
+        if len(parts) >= 4:
+            break
+
+    return ", ".join(parts) if parts else None
+
+
 def parse_order(text: str) -> dict:
     """
     Main entry point: parse all data from extracted PDF text.
@@ -132,6 +190,8 @@ def parse_order(text: str) -> dict:
             'customer_name': str | None,
             'items': [ { sku, qty, qty_ordered, raw_sku, warehouse, description, unit_price, extend_price } ],
             'is_last_page': bool,
+            'order_comments': str | None,
+            'shipping_address': str | None,
             'raw_text': str
         }
     """
@@ -141,5 +201,7 @@ def parse_order(text: str) -> dict:
         "customer_name": parse_customer_name(text),
         "items": parse_items(text),
         "is_last_page": has_end_of_order(text),
+        "order_comments": parse_order_comments(text),
+        "shipping_address": parse_shipping_address(text),
         "raw_text": text,
     }
