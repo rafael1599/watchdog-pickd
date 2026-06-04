@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # must run before importing modules that read env at import time
 
-from flask import Flask, jsonify, render_template_string, request  # noqa: E402
+from flask import Flask, abort, jsonify, render_template_string, request  # noqa: E402
 
 from as400_capture import (  # noqa: E402
     CaptureError,
@@ -35,6 +35,23 @@ from pipeline import preview_order, process_order_text  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
 
 app = Flask(__name__)
+
+# Only loopback hosts are valid. Rejecting other Host headers blocks DNS-rebinding
+# attacks; rejecting cross-site Origins blocks a malicious page (open in the same
+# Mac's browser) from driving the app via CSRF. The server is bound to 127.0.0.1,
+# so it is not reachable from the local network at all.
+PORT = 5000
+_ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+_ALLOWED_ORIGINS = {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"}
+
+
+@app.before_request
+def _guard_localhost_only():
+    if request.headers.get("Host") not in _ALLOWED_HOSTS:
+        abort(403)
+    origin = request.headers.get("Origin")
+    if origin and origin not in _ALLOWED_ORIGINS:
+        abort(403)
 
 # In-memory queue of captured orders for this session.
 _orders: dict[int, dict] = {}
@@ -292,4 +309,4 @@ load();
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    app.run(host="127.0.0.1", port=PORT, debug=False)
