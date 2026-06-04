@@ -198,10 +198,37 @@ Variables de entorno:
 El macro de login está en `DEFAULT_LOGIN_STEPS` (`as400_capture.py`) — fácil de editar si la
 secuencia/tiempos reales difieren (ej. si "3" no necesita ENTER después).
 
+### Auto-arranque al prender la Mac (sin Terminal)
+Para que al iniciar sesión se abra el AS400, arranque la app y se abra Safari en la UI —
+sin ventana de Terminal — instalar el LaunchAgent **una vez** en la Mac del AS400:
+
+```bash
+cd ~/watchdog-pickd
+python3 scripts/install_autostart.py
+```
+
+Qué hace en cada login (vía `scripts/start_pickd.sh`):
+1. Abre el emulador (`open -b <AS400_LAUNCH_TARGET>`).
+2. Levanta `app.py` en segundo plano (sin Terminal).
+3. Espera a que el servidor responda y abre **Safari** en `http://127.0.0.1:5000`.
+
+No hace login automático en el AS400 (eso se hace a mano o con el botón Connect). Corre una
+vez por login (`KeepAlive=False`) para no reabrir Safari/Mocha en bucle.
+
+Para quitarlo:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.antigravity.pickd-app.plist
+rm ~/Library/LaunchAgents/com.antigravity.pickd-app.plist
+```
+
+Logs: `logs/app-stdout.log` y `logs/app-stderr.log`.
+
 ### Archivos del MVP
 | Archivo | Rol |
 |---------|-----|
 | `app.py` | UI web local (Flask): capturar, preview, enviar una por una |
+| `scripts/start_pickd.sh` | Launcher: abre Mocha + app + Safari (para el LaunchAgent) |
+| `scripts/install_autostart.py` | Instala el LaunchAgent de auto-arranque al login |
 | `as400_capture.py` | Driver Mocha (AppleScript) + loop de captura (testeable) |
 | `pipeline.py` | Lógica compartida texto → Supabase (la usan watcher y app) |
 | `tests/test_as400_capture.py` | Tests de la lógica del loop (sin GUI) |
