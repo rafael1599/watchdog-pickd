@@ -88,6 +88,18 @@ def connect():
     return jsonify({"ok": True, "message": "AS400 connected and logged in."})
 
 
+@app.post("/api/peek")
+def peek():
+    """Return what Mocha currently shows on screen (for debugging login/focus/copy)."""
+    try:
+        text = MochaDriver().copy_screen()
+    except CaptureError as e:
+        return jsonify({"error": str(e)}), 422
+    except Exception as e:
+        return jsonify({"error": f"Error reading screen: {e}"}), 500
+    return jsonify({"screen": text})
+
+
 @app.post("/api/capture")
 def capture():
     data = request.get_json(force=True) or {}
@@ -173,7 +185,10 @@ INDEX_HTML = """
   <h1>📦 AS400 → PickD</h1>
   <div class="row">
     <button id="conn" class="secondary" onclick="doConnect()">Connect AS400</button>
+    <button id="peek" class="secondary" onclick="doPeek()">Peek screen</button>
   </div>
+  <pre id="screen" style="display:none; background:#111; color:#0f0; padding:.8rem;
+       border-radius:8px; overflow:auto; font-size:.75rem; line-height:1.15;"></pre>
   <div class="row">
     <input id="num" placeholder="Order number (e.g. 880005)" autofocus
            onkeydown="if(event.key==='Enter') doCapture()">
@@ -224,6 +239,20 @@ async function doConnect() {
     msg(r.ok ? (data.message || 'Connected.') : (data.error||'Error connecting.'), r.ok?'ok':'err');
   } catch(e) { msg('Network error: '+e, 'err'); }
   finally { btn.disabled = false; document.getElementById('num').focus(); }
+}
+
+async function doPeek() {
+  const btn = document.getElementById('peek'); btn.disabled = true;
+  msg('Reading current Mocha screen…', 'warn');
+  try {
+    const r = await fetch('/api/peek', {method:'POST'});
+    const data = await r.json();
+    const pre = document.getElementById('screen');
+    if (!r.ok) { msg(data.error || 'Error reading screen.', 'err'); pre.style.display='none'; }
+    else { pre.textContent = data.screen || '(empty)'; pre.style.display='block';
+           msg('Screen captured below (' + (data.screen||'').length + ' chars).', 'ok'); }
+  } catch(e) { msg('Network error: '+e, 'err'); }
+  finally { btn.disabled = false; }
 }
 
 async function doCapture() {

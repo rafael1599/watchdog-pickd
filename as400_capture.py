@@ -149,6 +149,7 @@ def run_login(driver, login_steps=DEFAULT_LOGIN_STEPS, step_wait: float = 0.6):
     key, "wait" sleeps for `value` seconds. A short pause follows every step.
     """
     for kind, value in login_steps:
+        log.info("login step: %s %r", kind, value)
         if kind == "text":
             driver.type_text(value)
         elif kind == "key":
