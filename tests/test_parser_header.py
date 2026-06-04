@@ -5,6 +5,7 @@ These only import `parser` (no Supabase deps).
 """
 
 from parser import (
+    normalize_street,
     parse_customer_name,
     parse_order,
     parse_order_comments,
@@ -83,7 +84,7 @@ def test_parse_shipping_ignores_ship_via_and_date():
 def test_parse_shipping_struct_splits_fields():
     assert parse_shipping_address_struct(HEADER) == {
         "name": "CHICAGO LAND BICYCLES",
-        "street": "10355 SOUTH KEDZIE",
+        "street": "10355 S KEDZIE",  # SOUTH → S, canonicalized like PickD
         "city": "CHICAGO",
         "state": "IL",
         "zip_code": "60655",
@@ -132,6 +133,36 @@ REAL_880036 = """   O R D E R   I N Q U I R Y
                                    Cmd5            Cmd6                 Cmd7
                                     DETAILS         RETURN TO SELECT     EXIT
 """
+
+
+def test_normalize_street_abbreviates_suffix():
+    assert normalize_street("3544 SAINT JOHNS AVENUE") == "3544 SAINT JOHNS AVE"
+    assert normalize_street("10355 SOUTH KEDZIE STREET") == "10355 S KEDZIE ST"
+
+
+def test_normalize_street_leaves_canonical_unchanged():
+    # AS400 usually already abbreviates — must be idempotent / a no-op.
+    assert normalize_street("3544 ST JOHNS AVE") == "3544 ST JOHNS AVE"
+
+
+def test_normalize_street_keeps_unit_fl_not_a_directional():
+    # 'FL' after a unit designator is a floor, not the state/west-style token.
+    assert normalize_street("12 MAIN ST APT 2ND FL") == "12 MAIN ST APT 2ND FL"
+
+
+def test_normalize_street_passthrough_for_empty():
+    assert normalize_street(None) is None
+    assert normalize_street("") == ""
+
+
+def test_struct_normalizes_street_suffix():
+    text = (
+        " Bill X CORP                           Ship ACME CO\n"
+        "                                            5 MARKET AVENUE\n"
+        "                                            RENO            NV  89501\n"
+        " Terms: 1"
+    )
+    assert parse_shipping_address_struct(text)["street"] == "5 MARKET AVE"
 
 
 def test_real_capture_880036():

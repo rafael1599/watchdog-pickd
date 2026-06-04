@@ -201,6 +201,64 @@ def parse_shipping_address(text: str) -> Optional[str]:
     return ", ".join(parts) if parts else None
 
 
+# Canonical USPS abbreviations, mirroring PickD's parseUSAddress so a watcher
+# import and a manual paste produce the same normalized_address (dedup key).
+_STREET_SUFFIXES = {
+    "STREET": "ST", "STR": "ST", "ST": "ST",
+    "AVENUE": "AVE", "AVEN": "AVE", "AV": "AVE", "AVE": "AVE",
+    "BOULEVARD": "BLVD", "BLVD": "BLVD",
+    "ROAD": "RD", "RD": "RD",
+    "DRIVE": "DR", "DRV": "DR", "DR": "DR",
+    "LANE": "LN", "LN": "LN",
+    "COURT": "CT", "CT": "CT",
+    "CIRCLE": "CIR", "CIR": "CIR",
+    "PLACE": "PL", "PL": "PL",
+    "TERRACE": "TER", "TER": "TER",
+    "PARKWAY": "PKWY", "PKWY": "PKWY",
+    "HIGHWAY": "HWY", "HWY": "HWY",
+    "TRAIL": "TRL", "TRL": "TRL",
+    "SQUARE": "SQ", "SQ": "SQ",
+    "WAY": "WAY",
+}
+_DIRECTIONALS = {
+    "NORTH": "N", "SOUTH": "S", "EAST": "E", "WEST": "W",
+    "NORTHEAST": "NE", "NORTHWEST": "NW", "SOUTHEAST": "SE", "SOUTHWEST": "SW",
+    "N": "N", "S": "S", "E": "E", "W": "W",
+    "NE": "NE", "NW": "NW", "SE": "SE", "SW": "SW",
+}
+_UNIT_DESIGNATORS = {"APT", "STE", "SUITE", "UNIT", "FL", "FLOOR", "BLDG", "RM", "DEPT", "#"}
+
+
+def normalize_street(street: Optional[str]) -> Optional[str]:
+    """
+    Canonicalize a street line so it matches what PickD's parseUSAddress stores:
+    spell-out suffixes/directionals collapse to their USPS abbreviation
+    ('123 SAINT JOHNS AVENUE' → '123 SAINT JOHNS AVE'). 'FL' as a unit
+    designator (e.g. '2ND FL') is left alone, never treated as a directional.
+    Unknown tokens pass through unchanged. Returns None unchanged.
+    """
+    if not street:
+        return street
+
+    tokens = street.split()
+    out = []
+    for i, tok in enumerate(tokens):
+        core = re.sub(r"[.,]+$", "", tok)
+        key = core.upper()
+        prev = out[-1].upper() if out else ""
+        # Don't fold a directional/suffix that is actually a unit value
+        # (e.g. '2ND FL', 'APT W'): skip when the previous token is a designator.
+        if prev in _UNIT_DESIGNATORS:
+            out.append(core)
+        elif key in _STREET_SUFFIXES and i > 0:
+            out.append(_STREET_SUFFIXES[key])
+        elif key in _DIRECTIONALS and i > 0:
+            out.append(_DIRECTIONALS[key])
+        else:
+            out.append(core)
+    return " ".join(out)
+
+
 def parse_shipping_address_struct(text: str) -> Optional[dict]:
     """
     Ship-to block split into structured fields for the customers /
@@ -227,7 +285,7 @@ def parse_shipping_address_struct(text: str) -> Optional[dict]:
             city, state, zip_code = m.group(1).strip(), m.group(2), m.group(3)
             rest = rest[:-1]
 
-    street = ", ".join(rest) if rest else None
+    street = normalize_street(", ".join(rest)) if rest else None
     return {
         "name": name,
         "street": street,
