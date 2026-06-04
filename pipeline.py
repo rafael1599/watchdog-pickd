@@ -40,6 +40,8 @@ def preview_order(text: str) -> dict:
         "customer": data.get("customer_name") or "Unknown",
         "item_count": len(items),
         "is_last_page": data.get("is_last_page", False),
+        "order_comments": data.get("order_comments"),
+        "shipping_address": data.get("shipping_address"),
         "items": items,
     }
 

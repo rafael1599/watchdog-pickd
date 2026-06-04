@@ -116,6 +116,11 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str) -> dict:
         "customer_id": customer_id,
     }
 
+    # Order Comments → notes (only on create, so we never clobber manual notes).
+    order_comments = order_data.get("order_comments")
+    if order_comments:
+        insert_data["notes"] = order_comments
+
     result = client.table("picking_lists").insert(insert_data).execute()
     picking_list = result.data[0]
 

@@ -70,6 +70,8 @@ def _add_order(raw_text: str) -> dict:
             "order_number": preview["order_number"],
             "customer": preview["customer"],
             "item_count": preview["item_count"],
+            "shipping_address": preview.get("shipping_address"),
+            "order_comments": preview.get("order_comments"),
             "items": preview["items"],
             "raw_text": raw_text,
             "sent": False,
@@ -229,12 +231,15 @@ function card(o) {
     const cls = res.status === 'duplicate' ? 'warn' : (res.needs_correction ? 'warn' : 'ok');
     status = `<div class="${cls}">→ ${res.status}${res.needs_correction ? ' (needs_correction)' : ''}: ${res.message||''}</div>`;
   }
+  const ship = o.shipping_address ? `<div class="muted">📍 Ship to: ${o.shipping_address}</div>` : '';
+  const notes = o.order_comments ? `<div class="muted">📝 Notes: ${o.order_comments}</div>` : '';
   return `<div class="card">
       <div class="meta">
         <span>Order <b>#${o.order_number ?? '—'}</b></span>
         <span>Customer <b>${o.customer}</b></span>
         <span>Items <b>${o.item_count}</b></span>
       </div>
+      ${ship}${notes}
       ${status}
       <div class="actions">
         <button class="send" ${o.sent?'disabled':''} onclick="doSend(${o.id})">${o.sent?'Sent ✓':'Send to PickD'}</button>
