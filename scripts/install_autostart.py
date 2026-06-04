@@ -15,6 +15,7 @@ To remove it later:
 
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
 
 LABEL = "com.antigravity.pickd-app"
@@ -22,15 +23,16 @@ LABEL = "com.antigravity.pickd-app"
 
 def main():
     repo = Path(__file__).resolve().parent.parent
-    start_script = repo / "scripts" / "start_pickd.sh"
+    start_script = repo / "scripts" / "start_pickd.py"
     logs = repo / "logs"
     logs.mkdir(exist_ok=True)
 
     plist_path = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
     plist = {
         "Label": LABEL,
-        # bash runs the launcher (open Mocha → start app → open Safari).
-        "ProgramArguments": ["/bin/bash", str(start_script)],
+        # Run the launcher with THIS python (the venv python). Same pattern as the
+        # PDF watcher — avoids macOS TCC blocking bash inside ~/Documents.
+        "ProgramArguments": [sys.executable, str(start_script)],
         "RunAtLoad": True,
         # Run once at login; don't relaunch (avoids reopening Safari/Mocha in a loop).
         "KeepAlive": False,

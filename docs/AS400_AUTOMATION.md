@@ -207,13 +207,17 @@ cd ~/watchdog-pickd
 python3 scripts/install_autostart.py
 ```
 
-Qué hace en cada login (vía `scripts/start_pickd.sh`):
+Qué hace en cada login (vía `scripts/start_pickd.py`, ejecutado por el python del venv):
 1. Abre el emulador (`open -b <AS400_LAUNCH_TARGET>`).
 2. Levanta `app.py` en segundo plano (sin Terminal).
 3. Espera a que el servidor responda y abre **Safari** en `http://127.0.0.1:5000`.
 
 No hace login automático en el AS400 (eso se hace a mano o con el botón Connect). Corre una
 vez por login (`KeepAlive=False`) para no reabrir Safari/Mocha en bucle.
+
+> Nota TCC: el launcher es **Python ejecutado por el python del venv** (no `bash`). macOS
+> bloquea a `bash` al leer scripts dentro de carpetas protegidas como `~/Documents`
+> (error "Operation not permitted"); el python del venv ya tiene acceso (igual que el watcher).
 
 Para quitarlo:
 ```bash
@@ -227,7 +231,7 @@ Logs: `logs/app-stdout.log` y `logs/app-stderr.log`.
 | Archivo | Rol |
 |---------|-----|
 | `app.py` | UI web local (Flask): capturar, preview, enviar una por una |
-| `scripts/start_pickd.sh` | Launcher: abre Mocha + app + Safari (para el LaunchAgent) |
+| `scripts/start_pickd.py` | Launcher: abre Mocha + app + Safari (para el LaunchAgent) |
 | `scripts/install_autostart.py` | Instala el LaunchAgent de auto-arranque al login |
 | `as400_capture.py` | Driver Mocha (AppleScript) + loop de captura (testeable) |
 | `pipeline.py` | Lógica compartida texto → Supabase (la usan watcher y app) |
