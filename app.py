@@ -222,17 +222,14 @@ async function load() {
   render(await r.json());
 }
 
-function render(orders) {
-  const list = document.getElementById('list');
-  if (!orders.length) { list.innerHTML = '<p class="muted">No orders captured yet.</p>'; return; }
-  list.innerHTML = orders.map(o => {
-    const res = o.result;
-    let status = '';
-    if (res) {
-      const cls = res.status === 'duplicate' ? 'warn' : (res.needs_correction ? 'warn' : 'ok');
-      status = `<div class="${cls}">→ ${res.status}${res.needs_correction ? ' (needs_correction)' : ''}: ${res.message||''}</div>`;
-    }
-    return `<div class="card">
+function card(o) {
+  const res = o.result;
+  let status = '';
+  if (res) {
+    const cls = res.status === 'duplicate' ? 'warn' : (res.needs_correction ? 'warn' : 'ok');
+    status = `<div class="${cls}">→ ${res.status}${res.needs_correction ? ' (needs_correction)' : ''}: ${res.message||''}</div>`;
+  }
+  return `<div class="card">
       <div class="meta">
         <span>Order <b>#${o.order_number ?? '—'}</b></span>
         <span>Customer <b>${o.customer}</b></span>
@@ -244,7 +241,27 @@ function render(orders) {
         <button class="secondary" onclick="doRemove(${o.id})">Remove</button>
       </div>
     </div>`;
-  }).join('');
+}
+
+function render(orders) {
+  const list = document.getElementById('list');
+  const active = orders.filter(o => !o.sent);
+  const sent = orders.filter(o => o.sent);
+
+  let html = '';
+  if (!active.length) {
+    html += '<p class="muted">No pending orders. Capture one above.</p>';
+  } else {
+    html += active.map(card).join('');
+  }
+  // Sent orders are hidden in a collapsed section so they don't clutter the list.
+  if (sent.length) {
+    html += `<details style="margin-top:1rem;">
+      <summary class="muted" style="cursor:pointer;">✓ Sent to PickD (${sent.length})</summary>
+      <div style="margin-top:.6rem;">${sent.map(card).join('')}</div>
+    </details>`;
+  }
+  list.innerHTML = html;
 }
 
 async function doConnect() {

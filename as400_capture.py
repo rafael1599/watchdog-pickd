@@ -51,6 +51,17 @@ def _has_end_marker(text: str) -> bool:
     return "ENDOFORDER" in re.sub(r"\s+", "", text.upper())
 
 
+def _looks_like_order_screen(text: str) -> bool:
+    """True if the captured text looks like an ORDER INQUIRY screen.
+
+    Used to bail out (instead of looping) when we're on a different AS400 view
+    (e.g. a menu) or the order doesn't exist. Whitespace-insensitive so the
+    spaced-out 'O R D E R  I N Q U I R Y' title still matches.
+    """
+    norm = re.sub(r"\s+", "", text.upper())
+    return "ORDERINQUIRY" in norm or "ORDERNUMBER" in norm
+
+
 class CaptureError(Exception):
     """Raised when a capture cannot complete (e.g. END OF ORDER never appears)."""
 
@@ -209,6 +220,15 @@ def capture_order(
     header = driver.copy_screen()
     pages = [header]
     log.info("AS400 header captured: %d chars", len(header))
+
+    # Guard: if this isn't an ORDER INQUIRY screen we're on the wrong view (a menu,
+    # etc.) or the order doesn't exist. Bail out now instead of pressing F5 and
+    # looping through pages that will never show END OF ORDER.
+    if not _looks_like_order_screen(header):
+        raise CaptureError(
+            f"La pantalla no es una consulta de orden (vista incorrecta o la orden "
+            f"{order_number} no existe). Ve a búsqueda de orden (F7 → 3) e intenta de nuevo."
+        )
 
     # Switch to the items view (once).
     driver.key("f5")

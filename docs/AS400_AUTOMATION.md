@@ -152,6 +152,21 @@ Marcados por quién los resuelve y prioridad.
       stock y ubicación en ese momento** (lo calculado al enviar queda stale).
 - [ ] Estado inicial nuevo (ej. `available`) y expiración/archivado de órdenes no iniciadas.
 
+## 6b. Mejoras de UI / captura (hechas)
+
+- **Anti-loop por vista**: antes de paginar, `capture_order` valida que el encabezado sea
+  una pantalla `ORDER INQUIRY` (`_looks_like_order_screen`). Si no lo es (estamos en un menú
+  u otra vista, o la orden no existe), corta con un mensaje claro en vez de pulsar F5 y entrar
+  al loop. Recuperación manual sugerida: **F7 → 3** para volver a búsqueda de orden.
+- **Órdenes enviadas ocultas**: en la UI, las órdenes ya enviadas se mueven a una sección
+  colapsable "✓ Sent to PickD (n)" para no saturar la lista de pendientes.
+
+### Backlog de captura (pendiente, requiere ejemplos de pantallas)
+- Auto-recuperación: si la vista es incorrecta, pulsar **F7 → 3** automáticamente y reintentar.
+- Detectar las distintas vistas del AS400 (menú principal, búsqueda, etc.) por marcadores.
+- Extraer del encabezado: **Ship-to** (dirección/cliente), y **Order Comments** → notas, para
+  usarlos en PickD (definir columnas en Supabase).
+
 ## 7. Decisiones abiertas
 - Cómo se puebla la lista de órdenes elegibles (UI): (A) el usuario teclea/elige el número
   vs (B) auto-listar un rango. El MVP arranca con A (1 orden por comando).

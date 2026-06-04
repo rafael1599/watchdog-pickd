@@ -43,21 +43,21 @@ class FakeDriver:
 
 def test_single_item_page_stops_immediately():
     # header, then one items page already containing END OF ORDER
-    driver = FakeDriver(["CUSTOMER HEADER", "ITEM 1\nITEM 2\nEND OF ORDER"])
+    driver = FakeDriver(["O R D E R  I N Q U I R Y\nCUSTOMER HEADER", "ITEM 1\nITEM 2\nEND OF ORDER"])
     text = capture_order("880005", driver, page_wait=0)
 
     assert driver.focused
     assert driver.typed == "880005"
     # F6 (new search), F5 once to enter items, no ENTER (marker on first items page)
     assert driver.keys == ["f6", "f5"]
-    assert "CUSTOMER HEADER" in text
+    assert "O R D E R  I N Q U I R Y\nCUSTOMER HEADER" in text
     assert "END OF ORDER" in text
 
 
 def test_multi_page_pages_with_enter_until_marker():
     driver = FakeDriver(
         [
-            "CUSTOMER HEADER",  # page 1 (header)
+            "O R D E R  I N Q U I R Y\nCUSTOMER HEADER",  # page 1 (header)
             "ITEM 1\nITEM 2",  # items page 1 (no marker)
             "ITEM 3\nITEM 4",  # items page 2 (no marker)
             "ITEM 5\nEND OF ORDER",  # items page 3 (marker)
@@ -67,12 +67,12 @@ def test_multi_page_pages_with_enter_until_marker():
 
     # F6 (new search), F5 once, then ENTER between item pages (2 ENTERs for 3 pages)
     assert driver.keys == ["f6", "f5", "enter", "enter"]
-    for chunk in ["CUSTOMER HEADER", "ITEM 1", "ITEM 3", "ITEM 5", "END OF ORDER"]:
+    for chunk in ["O R D E R  I N Q U I R Y\nCUSTOMER HEADER", "ITEM 1", "ITEM 3", "ITEM 5", "END OF ORDER"]:
         assert chunk in text
 
 
 def test_marker_is_case_insensitive():
-    driver = FakeDriver(["HEADER", "item\nend of order"])
+    driver = FakeDriver(["ORDER INQUIRY", "item\nend of order"])
     text = capture_order("1", driver, page_wait=0)
     assert "end of order" in text
     assert driver.keys == ["f6", "f5"]
@@ -86,15 +86,23 @@ def test_marker_ignores_extra_whitespace():
 
 
 def test_stops_with_spaced_out_marker():
-    driver = FakeDriver(["HEADER", "ITEM 1", "E N D   O F   O R D E R"])
+    driver = FakeDriver(["ORDER INQUIRY", "ITEM 1", "E N D   O F   O R D E R"])
     capture_order("7", driver, page_wait=0)
     assert driver.keys == ["f6", "f5", "enter"]  # F6 search, F5 items, one ENTER, then stop
 
 
 def test_raises_when_marker_never_appears():
-    driver = FakeDriver(["HEADER"] + ["ITEMS NO MARKER"] * 50)
+    driver = FakeDriver(["ORDER INQUIRY"] + ["ITEMS NO MARKER"] * 50)
     with pytest.raises(CaptureError):
         capture_order("999", driver, page_wait=0, max_pages=5)
+
+
+def test_rejects_wrong_view_without_looping():
+    # On a non-order screen (e.g. a menu): bail out after the header, never press F5.
+    driver = FakeDriver(["MAIN MENU\n1. Inventory\n2. Customers\n3. Selection"])
+    with pytest.raises(CaptureError):
+        capture_order("880013", driver, page_wait=0)
+    assert driver.keys == ["f6"]  # F6 only; no F5, no ENTER loop
 
 
 def test_login_macro_replays_steps_in_order():
