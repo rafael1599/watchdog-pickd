@@ -5,6 +5,7 @@ Uses the SERVICE_ROLE_KEY to bypass RLS (runs locally only).
 Inserts orders directly into picking_lists so the web app picks them up via Realtime.
 """
 
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -15,6 +16,8 @@ from supabase import Client, create_client
 from parser import normalize_sku
 
 load_dotenv()
+
+log = logging.getLogger(__name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "http://localhost:54321")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -104,6 +107,11 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str) -> dict:
     customer_name = order_data.get("customer_name")
     if customer_name:
         customer_id = _resolve_customer(client, customer_name)
+
+    # Mirror the web Orders view: persist the Ship-to address on the customer
+    # (main address) and in customer_addresses (history). Non-blocking.
+    if customer_id and order_data.get("shipping"):
+        _save_shipping_address(client, customer_id, order_data["shipping"])
 
     # Insert picking list
     insert_data = {
@@ -643,6 +651,45 @@ def _resolve_customer(client: Client, name: str) -> Optional[str]:
         return result.data[0]["id"]
 
     return None
+
+
+def _save_shipping_address(client: Client, customer_id: str, ship: dict) -> None:
+    """
+    Persist the parsed Ship-to address, mirroring the web Orders view:
+      1. customers   — update the customer's main address fields.
+      2. customer_addresses — upsert into the address history (dedup via the
+         unique (customer_id, normalized_address) constraint); label = Ship-to name.
+
+    Non-blocking: any failure is logged and swallowed so order creation succeeds.
+    'street' is required (customer_addresses.street is NOT NULL).
+    """
+    street = (ship.get("street") or "").strip()
+    if not street:
+        return
+
+    address_fields = {
+        "street": street,
+        "city": ship.get("city"),
+        "state": ship.get("state"),
+        "zip_code": ship.get("zip_code"),
+    }
+
+    try:
+        client.table("customers").update(address_fields).eq("id", customer_id).execute()
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Could not update customer address: {e}")
+
+    try:
+        client.table("customer_addresses").upsert(
+            {
+                "customer_id": customer_id,
+                "label": (ship.get("name") or "").strip() or None,
+                **address_fields,
+            },
+            on_conflict="customer_id,normalized_address",
+        ).execute()
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Could not save customer_addresses entry: {e}")
 
 
 def _log_import(
