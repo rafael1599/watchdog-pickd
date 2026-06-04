@@ -134,14 +134,15 @@ def parse_order_comments(text: str) -> Optional[str]:
     return None
 
 
-def parse_shipping_address(text: str) -> Optional[str]:
+def _extract_ship_to_lines(text: str) -> list:
     """
-    Extract the Ship-to block (right column of the header) as a single string.
+    Collect the raw lines of the Ship-to block (right column of the header).
 
     The header is a fixed-width two-column layout: 'Bill ...' on the left and
     'Ship ...' on the right. We locate the 'Ship' label, take the name after it,
     then collect the right-column text of the following lines until a footer field
-    (Terms:, Sales ID:, etc.) appears. Best-effort; returns None if not found.
+    (Terms:, Sales ID:, etc.), the items table, or an end marker appears.
+    Returns [name, *address_lines]; empty list if no Ship-to found.
     """
     lines = text.split("\n")
     ship_col = None
@@ -176,7 +177,49 @@ def parse_shipping_address(text: str) -> Optional[str]:
         if len(parts) >= 4:
             break
 
+    return parts
+
+
+def parse_shipping_address(text: str) -> Optional[str]:
+    """Ship-to block as a single comma-joined string (for previews/display)."""
+    parts = _extract_ship_to_lines(text)
     return ", ".join(parts) if parts else None
+
+
+def parse_shipping_address_struct(text: str) -> Optional[dict]:
+    """
+    Ship-to block split into structured fields for the customers /
+    customer_addresses tables:
+
+        { 'name': str, 'street': str|None, 'city': str|None,
+          'state': str|None, 'zip_code': str|None }
+
+    First line is the Ship-to name; the last line is parsed as 'CITY ST ZIP'
+    when it matches; everything in between is the street. Returns None if no
+    Ship-to block is found.
+    """
+    parts = _extract_ship_to_lines(text)
+    if not parts:
+        return None
+
+    name = parts[0]
+    rest = parts[1:]
+    city = state = zip_code = None
+
+    if rest:
+        m = re.match(r"^(.*?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$", rest[-1])
+        if m:
+            city, state, zip_code = m.group(1).strip(), m.group(2), m.group(3)
+            rest = rest[:-1]
+
+    street = ", ".join(rest) if rest else None
+    return {
+        "name": name,
+        "street": street,
+        "city": city,
+        "state": state,
+        "zip_code": zip_code,
+    }
 
 
 def parse_order(text: str) -> dict:
@@ -203,5 +246,6 @@ def parse_order(text: str) -> dict:
         "is_last_page": has_end_of_order(text),
         "order_comments": parse_order_comments(text),
         "shipping_address": parse_shipping_address(text),
+        "shipping": parse_shipping_address_struct(text),
         "raw_text": text,
     }

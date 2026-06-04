@@ -4,7 +4,12 @@ Order Comments → notes, and the Ship-to block (right column of the header).
 These only import `parser` (no Supabase deps).
 """
 
-from parser import parse_order, parse_order_comments, parse_shipping_address
+from parser import (
+    parse_order,
+    parse_order_comments,
+    parse_shipping_address,
+    parse_shipping_address_struct,
+)
 
 HEADER = """                            O R D E R   I N Q U I R Y
  Order Number: 880013                       Account Number: 0020045 00
@@ -49,7 +54,34 @@ def test_parse_shipping_ignores_ship_via_and_date():
     assert parse_shipping_address(text) is None
 
 
+def test_parse_shipping_struct_splits_fields():
+    assert parse_shipping_address_struct(HEADER) == {
+        "name": "CHICAGO LAND BICYCLES",
+        "street": "10355 SOUTH KEDZIE",
+        "city": "CHICAGO",
+        "state": "IL",
+        "zip_code": "60655",
+    }
+
+
+def test_parse_shipping_struct_handles_zip_plus_four():
+    text = (
+        " Bill X CORP                           Ship ACME CO\n"
+        "                                            5 MAIN ST\n"
+        "                                            RENO            NV  89501-1234\n"
+        " Terms: 1"
+    )
+    s = parse_shipping_address_struct(text)
+    assert s["zip_code"] == "89501-1234"
+    assert s["city"] == "RENO" and s["state"] == "NV"
+
+
+def test_parse_shipping_struct_none_when_absent():
+    assert parse_shipping_address_struct("Order Number: 1\n Terms: 5") is None
+
+
 def test_parse_order_exposes_new_fields():
     d = parse_order(HEADER)
     assert d["order_comments"] == "SEE EMAIL FOR CC PAYMENT"
     assert d["shipping_address"].startswith("CHICAGO LAND BICYCLES")
+    assert d["shipping"]["city"] == "CHICAGO"
