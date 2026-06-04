@@ -27,12 +27,17 @@ def main():
     logs = repo / "logs"
     logs.mkdir(exist_ok=True)
 
+    # Always use the repo's venv python (it has flask/dotenv/supabase), regardless of
+    # how this installer was invoked. Falls back to the current interpreter.
+    venv_python = repo / "venv" / "bin" / "python3"
+    python = str(venv_python) if venv_python.exists() else sys.executable
+
     plist_path = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
     plist = {
         "Label": LABEL,
-        # Run the launcher with THIS python (the venv python). Same pattern as the
-        # PDF watcher — avoids macOS TCC blocking bash inside ~/Documents.
-        "ProgramArguments": [sys.executable, str(start_script)],
+        # Run the launcher with the venv python. Same pattern as the PDF watcher —
+        # avoids macOS TCC blocking bash inside ~/Documents, and ensures deps exist.
+        "ProgramArguments": [python, str(start_script)],
         "RunAtLoad": True,
         # Run once at login; don't relaunch (avoids reopening Safari/Mocha in a loop).
         "KeepAlive": False,
@@ -49,6 +54,7 @@ def main():
 
     print(f"✅ Autostart installed: {plist_path}")
     print("   It will run at every login: open AS400, start the app, open Safari.")
+    print(f"   Python:   {python}")
     print(f"   Launcher: {start_script}")
 
 

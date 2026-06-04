@@ -20,6 +20,12 @@ REPO = Path(__file__).resolve().parent.parent
 URL = "http://127.0.0.1:5000"
 
 
+def _venv_python() -> str:
+    """The repo's venv python (has flask/dotenv/supabase); fall back to current."""
+    venv_python = REPO / "venv" / "bin" / "python3"
+    return str(venv_python) if venv_python.exists() else sys.executable
+
+
 def _launch_target() -> str:
     """Read AS400_LAUNCH_TARGET from .env (no shell-sourcing); fall back to Mocha's id."""
     env_path = REPO / ".env"
@@ -42,8 +48,8 @@ def main():
     # 1. Launch the AS400 emulator (by bundle id; ignore if already open).
     subprocess.run(["open", "-b", _launch_target()], check=False)
 
-    # 2. Start the web app in the background using THIS python (the venv python).
-    app_proc = subprocess.Popen([sys.executable, str(REPO / "app.py")], cwd=str(REPO))
+    # 2. Start the web app in the background using the venv python.
+    app_proc = subprocess.Popen([_venv_python(), str(REPO / "app.py")], cwd=str(REPO))
 
     # 3. Wait until the server answers (up to ~20s), then open it in Safari.
     for _ in range(40):
