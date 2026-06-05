@@ -35,7 +35,7 @@ from as400_capture import (  # noqa: E402
     capture_order,
     classify_screen,
 )
-from pipeline import preview_order, process_order_text  # noqa: E402
+from pipeline import preview_order, process_order_text, resolve_order_items  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
 
@@ -192,6 +192,28 @@ def send(oid: int):
     return jsonify({**_public(entry), "result": result})
 
 
+@app.get("/api/orders/<int:oid>/detail")
+def order_detail(oid: int):
+    """Read-only pick-location detail for a captured order (like PickD's
+    double-check view), resolved fresh from inventory without reserving anything."""
+    with _lock:
+        entry = _orders.get(oid)
+    if not entry:
+        return jsonify({"error": "Order not found."}), 404
+    try:
+        items = resolve_order_items(entry["raw_text"])
+    except Exception as e:
+        return jsonify({"error": f"Error resolving detail: {e}"}), 500
+    return jsonify(
+        {
+            "order_number": entry["order_number"],
+            "customer": entry["customer"],
+            "total_units": entry["total_units"],
+            "items": items,
+        }
+    )
+
+
 @app.delete("/api/orders/<int:oid>")
 def remove(oid: int):
     with _lock:
@@ -264,6 +286,50 @@ INDEX_HTML = """
     .ok { color: #16a34a; } .warn { color: #d97706; } .err { color: #dc2626; }
     .actions { display: flex; gap: .5rem; }
     #msg { min-height: 1.2rem; margin-bottom: .8rem; }
+    .meta.clickable { cursor: pointer; }
+    .meta .chev { color: #9ca3af; font-size: .9rem; }
+    /* Read-only detail panel — dark, double-check inspired. */
+    .detail { background: #0f0f12; color: #e5e7eb; border-radius: 12px;
+              padding: .6rem; margin: .2rem 0 .8rem; }
+    .detail .dhead { display: flex; gap: 1rem; flex-wrap: wrap; font-size: .8rem;
+                     color: #9ca3af; padding: .2rem .4rem .6rem; }
+    .detail .dhead b { color: #e5e7eb; }
+    .ditem { display: flex; align-items: center; gap: .7rem; background: #17171c;
+             border: 1px solid #26262e; border-radius: 12px; padding: .55rem .7rem;
+             margin-bottom: .45rem; }
+    .ditem.prob  { background: rgba(239,68,68,.07); border-color: rgba(239,68,68,.35); }
+    .ditem.lowst { background: rgba(232,160,74,.07); border-color: rgba(232,160,74,.35); }
+    .ditem .qty { text-align: center; min-width: 42px; border-right: 1px solid #26262e;
+                  padding-right: .6rem; }
+    .ditem .qty .lbl { font-size: .55rem; letter-spacing: .15em; color: #9ca3af; }
+    .ditem .qty b { display: block; font-size: 1.4rem; font-weight: 800; line-height: 1; }
+    .ditem .qty.alert b { color: #e8a04a; }
+    .ditem .mid { flex: 1; min-width: 0; }
+    .ditem .sku { font-size: 1.05rem; font-weight: 800; white-space: nowrap;
+                  overflow: hidden; text-overflow: ellipsis; }
+    .ditem .sku.bad { color: #f87171; }
+    .ditem .name { font-size: .72rem; color: #9ca3af; text-transform: uppercase;
+                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ditem .badge { font-size: .58rem; font-weight: 800; letter-spacing: .08em;
+                    padding: .08rem .3rem; border-radius: 5px; margin-left: .4rem;
+                    vertical-align: middle; }
+    .badge.unreg { background: rgba(239,68,68,.2); color: #fca5a5; }
+    .badge.low   { background: rgba(232,160,74,.2); color: #f0c089; }
+    .dist { display: inline-flex; gap: .25rem; margin-top: .3rem; flex-wrap: wrap; }
+    .dist .tile { min-width: 30px; text-align: center; border-radius: 5px;
+                  padding: .1rem .25rem; background: #e8a04a; color: #3a1f06;
+                  border: 1px solid #5c2e0a; }
+    .dist .tile b { display: block; font-size: .9rem; font-weight: 800; line-height: 1; }
+    .dist .tile .t { font-size: .5rem; letter-spacing: .06em; }
+    .ditem .loc { text-align: right; min-width: 64px; }
+    .ditem .loc .lbl { font-size: .55rem; letter-spacing: .15em; color: #9ca3af; }
+    .ditem .loc b { display: block; font-family: ui-monospace, monospace; font-weight: 800;
+                    font-size: 1.4rem; color: #e8a04a; line-height: 1.05; }
+    .ditem .loc .none { color: #6b7280; font-size: 1rem; }
+    .ditem .loc .sub { display: inline-block; font-size: .6rem; font-weight: 700;
+                       color: #e8a04a; background: rgba(232,160,74,.15);
+                       border: 1px solid rgba(232,160,74,.4); border-radius: 5px;
+                       padding: 0 .3rem; margin-top: .2rem; }
   </style>
 </head>
 <body>
@@ -302,12 +368,14 @@ function card(o) {
   const ship = o.shipping_address ? `<div class="muted">📍 Ship to: ${o.shipping_address}</div>` : '';
   const notes = o.order_comments ? `<div class="muted">📝 Notes: ${o.order_comments}</div>` : '';
   return `<div class="card">
-      <div class="meta">
+      <div class="meta clickable" onclick="toggleDetail(${o.id})" title="Show pick detail">
         <span>Order <b>#${o.order_number ?? '—'}</b></span>
         <span>Customer <b>${o.customer}</b></span>
         <span>Items <b>${o.item_count}</b></span>
         <span>Total units <b>${o.total_units ?? '—'}</b></span>
+        <span class="chev" id="chev-${o.id}">▾ detail</span>
       </div>
+      <div class="detail" id="detail-${o.id}" style="display:none;"></div>
       ${ship}${notes}
       ${status}
       <div class="actions">
@@ -315,6 +383,73 @@ function card(o) {
         <button class="secondary" onclick="doRemove(${o.id})">Remove</button>
       </div>
     </div>`;
+}
+
+function distFigures(distribution) {
+  if (!Array.isArray(distribution) || !distribution.length) return '';
+  const tiles = distribution.map(d => {
+    const type = (d.type || 'OTHER').toUpperCase();
+    const n = d.count ?? d.units_each ?? '';
+    return `<span class="tile" title="${type}${d.units_each?(' · '+d.units_each+' each'):''}"><b>${n}</b><span class="t">${type.slice(0,4)}</span></span>`;
+  }).join('');
+  return `<div class="dist">${tiles}</div>`;
+}
+
+function locCell(it) {
+  const loc = (it.location || '').trim();
+  if (!loc) return `<div class="loc"><span class="lbl">LOC</span><span class="none">—</span></div>`;
+  const isRow = /row/i.test(loc);
+  const label = isRow ? 'ROW' : 'LOC';
+  const value = isRow ? loc.replace(/row/i, '').trim() : loc.toUpperCase();
+  const sub = it.sublocation ? `<span class="sub">${it.sublocation}</span>` : '';
+  return `<div class="loc"><span class="lbl">${label}</span><b>${value}</b>${sub}</div>`;
+}
+
+function ditem(it) {
+  const qty = it.pickingQty ?? it.qty ?? 0;
+  const prob = it.sku_not_found ? ' prob' : (it.insufficient_stock ? ' lowst' : '');
+  const skuBad = it.sku_not_found ? ' bad' : '';
+  let badges = '';
+  if (it.sku_not_found) badges += '<span class="badge unreg">UNREG</span>';
+  if (it.insufficient_stock) badges += '<span class="badge low">LOW STOCK</span>';
+  const name = (it.item_name || it.description || '').toString();
+  return `<div class="ditem${prob}">
+      <div class="qty${qty!=1?' alert':''}"><span class="lbl">QTY</span><b>${qty}</b></div>
+      <div class="mid">
+        <div class="sku${skuBad}">${it.sku ?? it.raw_sku ?? '—'}${badges}</div>
+        <div class="name">${name}</div>
+        ${distFigures(it.distribution)}
+      </div>
+      ${locCell(it)}
+    </div>`;
+}
+
+async function toggleDetail(id) {
+  const box = document.getElementById('detail-'+id);
+  const chev = document.getElementById('chev-'+id);
+  if (!box) return;
+  if (box.style.display !== 'none') { box.style.display='none'; if(chev) chev.textContent='▾ detail'; return; }
+  box.style.display = 'block';
+  if (chev) chev.textContent = '▴ detail';
+  if (box.dataset.loaded) return;             // already fetched this session
+  box.innerHTML = '<div class="dhead">Resolving pick locations…</div>';
+  try {
+    const r = await fetch(`/api/orders/${id}/detail`);
+    const data = await r.json();
+    if (!r.ok) { box.innerHTML = `<div class="dhead err">${data.error || 'Error loading detail.'}</div>`; return; }
+    const items = data.items || [];
+    const probs = items.filter(i => i.sku_not_found || i.insufficient_stock).length;
+    const head = `<div class="dhead">
+        <span>Order <b>#${data.order_number ?? '—'}</b></span>
+        <span>Units <b>${data.total_units ?? '—'}</b></span>
+        <span>Lines <b>${items.length}</b></span>
+        ${probs ? `<span class="err">⚠ ${probs} need attention</span>` : '<span class="ok">✓ all resolved</span>'}
+      </div>`;
+    box.innerHTML = head + (items.length ? items.map(ditem).join('') : '<div class="dhead">No items.</div>');
+    box.dataset.loaded = '1';
+  } catch(e) {
+    box.innerHTML = `<div class="dhead err">Network error: ${e}</div>`;
+  }
 }
 
 function render(orders) {
