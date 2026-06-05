@@ -216,9 +216,9 @@ class MochaDriver:
         out = subprocess.run(["pbpaste"], capture_output=True, text=True, check=True).stdout
         if out == sentinel:
             raise CaptureError(
-                "Cmd+A/Cmd+C no copió la pantalla del AS400 (el portapapeles no cambió). "
-                "Verifica que Mocha quede al frente y que copie con Cmd+A+Cmd+C; "
-                "si en Mocha se copia de otra forma (menú Edit), dime cuál."
+                "Cmd+A/Cmd+C didn't copy the AS400 screen (the clipboard didn't change). "
+                "Make sure Mocha stays in front and copies with Cmd+A+Cmd+C; "
+                "if Mocha copies a different way (Edit menu), let me know which."
             )
         return out
 
@@ -293,22 +293,22 @@ def bootstrap_session(
 
         if state == STATE_DISCONNECTED:
             raise AS400Disconnected(
-                "El AS400 no está conectado (el emulador no alcanza el host). "
-                "Conéctate e inicia sesión manualmente en Mocha y vuelve a intentar."
+                "The AS400 isn't connected (the emulator can't reach the host). "
+                "Connect and log in manually in Mocha, then try again."
             )
         if state in _READY_STATES:
             return state
 
         if not _advance_toward_order_screen(driver, state, login_steps, step_wait):
             raise AS400ManualLoginRequired(
-                "No reconozco la pantalla actual del AS400. Inicia sesión manualmente "
-                "hasta la pantalla de búsqueda de orden y vuelve a intentar."
+                "I don't recognize the current AS400 screen. Log in manually "
+                "to the order-search screen, then try again."
             )
         time.sleep(step_wait)
 
     raise AS400ManualLoginRequired(
-        "No llegué a la pantalla de búsqueda de orden tras varios pasos. "
-        "Inicia sesión manualmente y vuelve a intentar."
+        "Couldn't reach the order-search screen after several steps. "
+        "Log in manually, then try again."
     )
 
 
@@ -346,12 +346,12 @@ def capture_order(
     state = classify_screen(driver.copy_screen())
     if state == STATE_DISCONNECTED:
         raise AS400Disconnected(
-            "El AS400 no está conectado. Inicia sesión manualmente en Mocha y reintenta."
+            "The AS400 isn't connected. Log in manually in Mocha, then try again."
         )
     if state not in _READY_STATES:
         raise AS400ManualLoginRequired(
-            "El AS400 no está en la pantalla de búsqueda de orden (sesión no iniciada o "
-            "vista desconocida). Inicia sesión manualmente y reintenta."
+            "The AS400 isn't on the order-search screen (not logged in or an "
+            "unknown view). Log in manually, then try again."
         )
 
     # F6 opens a fresh order search before each new order.
@@ -370,8 +370,8 @@ def capture_order(
     # through pages that will never show END OF ORDER.
     if not _looks_like_order_screen(header):
         raise CaptureError(
-            f"La pantalla no es una consulta de orden (vista incorrecta o la orden "
-            f"{order_number} no existe). Ve a búsqueda de orden (F7 → 3) e intenta de nuevo."
+            f"The screen isn't an order inquiry (wrong view, or order "
+            f"{order_number} doesn't exist). Go to order search (F7 → 3) and try again."
         )
 
     # Switch to the items view (once).
@@ -411,8 +411,8 @@ def capture_order(
             # without an END OF ORDER marker (or the session stalled). Stop here
             # rather than paging blindly and risk skipping/duplicating content.
             raise CaptureError(
-                f"La pantalla del AS400 no avanzó para la orden {order_number} "
-                f"(no apareció '{END_OF_ORDER_MARKER}' ni una página nueva). Captura abortada."
+                f"The AS400 screen didn't advance for order {order_number} "
+                f"(no '{END_OF_ORDER_MARKER}' and no new page appeared). Capture aborted."
             )
 
         pages.append(page)
@@ -420,6 +420,6 @@ def capture_order(
         driver.key("enter")
 
     raise CaptureError(
-        f"'{END_OF_ORDER_MARKER}' no apareció tras {max_pages} páginas para la orden "
-        f"{order_number}. Captura abortada."
+        f"'{END_OF_ORDER_MARKER}' didn't appear after {max_pages} pages for order "
+        f"{order_number}. Capture aborted."
     )
