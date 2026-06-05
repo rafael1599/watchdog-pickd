@@ -115,7 +115,7 @@ def connect():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Error connecting to AS400: {e}"}), 500
     return jsonify(
-        {"ok": True, "state": state, "message": "AS400 listo en la pantalla de búsqueda de orden."}
+        {"ok": True, "state": state, "message": "AS400 ready on the order-search screen."}
     )
 
 
@@ -348,23 +348,23 @@ async function doConnect() {
 }
 
 const STATE_LABELS = {
-  disconnected: ['❌ AS400 desconectado (host caído). Inicia sesión manualmente en Mocha.', 'err'],
-  login:        ['🔑 En la pantalla de login. Pulsa Connect AS400 para entrar.', 'warn'],
-  menu:         ['📋 En el menú SALESN. Pulsa Connect AS400 para ir a Order Inquiry.', 'warn'],
-  message:      ['💬 Pantalla "Press Enter to continue". Pulsa Connect AS400 para continuar.', 'warn'],
-  order_search: ['✅ Listo: pantalla de búsqueda de orden.', 'ok'],
-  order_inquiry:['✅ Viendo una orden. Listo para capturar.', 'ok'],
-  unknown:      ['⚠️ Pantalla no reconocida. Inicia sesión manualmente hasta búsqueda de orden.', 'warn'],
+  disconnected: ['❌ AS400 disconnected (host down). Log in manually in Mocha.', 'err'],
+  login:        ['🔑 On the login screen. Press Connect AS400 to log in.', 'warn'],
+  menu:         ['📋 On the SALESN menu. Press Connect AS400 to go to Order Inquiry.', 'warn'],
+  message:      ['💬 "Press Enter to continue" screen. Press Connect AS400 to continue.', 'warn'],
+  order_search: ['✅ Ready: order-search screen.', 'ok'],
+  order_inquiry:['✅ Viewing an order. Ready to capture.', 'ok'],
+  unknown:      ['⚠️ Unrecognized screen. Log in manually to the order-search screen.', 'warn'],
 };
 
 async function doStatus() {
   const btn = document.getElementById('stat'); btn.disabled = true;
-  msg('Verificando estado del AS400…', 'warn');
+  msg('Checking AS400 status…', 'warn');
   try {
     const r = await fetch('/api/status', {method:'POST'});
     const data = await r.json();
-    if (!r.ok) { msg(data.error || 'Error leyendo la pantalla.', 'err'); }
-    else { const [label, cls] = STATE_LABELS[data.state] || [`Estado: ${data.state}`, 'muted'];
+    if (!r.ok) { msg(data.error || 'Error reading the screen.', 'err'); }
+    else { const [label, cls] = STATE_LABELS[data.state] || [`State: ${data.state}`, 'muted'];
            msg(label, cls); }
   } catch(e) { msg('Network error: '+e, 'err'); }
   finally { btn.disabled = false; }
