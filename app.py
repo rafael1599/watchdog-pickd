@@ -76,6 +76,7 @@ def _add_order(raw_text: str) -> dict:
             "order_number": preview["order_number"],
             "customer": preview["customer"],
             "item_count": preview["item_count"],
+            "total_units": preview["total_units"],
             "shipping_address": preview.get("shipping_address"),
             "order_comments": preview.get("order_comments"),
             "items": preview["items"],
@@ -305,6 +306,7 @@ function card(o) {
         <span>Order <b>#${o.order_number ?? '—'}</b></span>
         <span>Customer <b>${o.customer}</b></span>
         <span>Items <b>${o.item_count}</b></span>
+        <span>Total units <b>${o.total_units ?? '—'}</b></span>
       </div>
       ${ship}${notes}
       ${status}
@@ -394,7 +396,7 @@ async function doCapture() {
                                             body: JSON.stringify({order_number: num})});
     const data = await r.json();
     if (!r.ok) { msg(data.error || 'Error capturing.', 'err'); }
-    else { msg(`Captured order #${data.order_number ?? '—'} (${data.item_count} items).`, 'ok');
+    else { msg(`Captured order #${data.order_number ?? '—'} (${data.item_count} items, ${data.total_units} units).`, 'ok');
            document.getElementById('num').value=''; }
   } catch(e) { msg('Network error: '+e, 'err'); }
   finally { btn.disabled = false; await load(); document.getElementById('num').focus(); }

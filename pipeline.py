@@ -38,7 +38,8 @@ def preview_order(text: str) -> dict:
     return {
         "order_number": data.get("order_number"),
         "customer": data.get("customer_name") or "Unknown",
-        "item_count": len(items),
+        "item_count": len(items),  # number of distinct line items / SKUs
+        "total_units": sum(int(i.get("qty") or 0) for i in items),  # sum of quantities
         "is_last_page": data.get("is_last_page", False),
         "order_comments": data.get("order_comments"),
         "shipping_address": data.get("shipping_address"),
