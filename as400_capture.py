@@ -105,6 +105,11 @@ def classify_screen(text: str) -> str:
     return STATE_UNKNOWN
 
 
+def _norm_screen(text: str) -> str:
+    """Whitespace-stripped, upper-cased screen text, for change detection."""
+    return re.sub(r"\s+", "", (text or "").upper())
+
+
 def _has_end_marker(text: str) -> bool:
     """Whitespace-insensitive match for the END OF ORDER marker.
 
@@ -312,6 +317,8 @@ def capture_order(
     driver,
     page_wait: float = 0.8,
     max_pages: int = 25,
+    poll_interval: float = 0.3,
+    refresh_timeout: float = 5.0,
 ) -> str:
     """
     Capture a full order from the AS400 screen into one text blob.
@@ -325,6 +332,11 @@ def capture_order(
 
     Returns the concatenated text of the header page + all item pages.
     Raises CaptureError if END OF ORDER is not seen within max_pages.
+
+    Paging waits for the screen to ACTUALLY change before deciding what to do.
+    A fixed sleep alone is racy: if the 5250 screen hasn't refreshed yet after an
+    ENTER, copy_screen() returns the previous page (no END OF ORDER), the loop
+    presses ENTER again, and the genuinely-new page is skipped — losing its items.
     """
     driver.focus()
 
@@ -365,21 +377,46 @@ def capture_order(
     # Switch to the items view (once).
     driver.key("f5")
 
+    # The last page we acted on. We only page forward once the screen differs from
+    # this, so a not-yet-refreshed (stale) copy never triggers a second ENTER.
+    prev_norm = _norm_screen(header)
+
     for i in range(1, max_pages + 1):
         time.sleep(page_wait)
         page = driver.copy_screen()
-        pages.append(page)
+
+        # Wait for the screen to actually advance before trusting it. If it's still
+        # showing the previous page, keep polling instead of paging again.
+        waited = 0.0
+        while _norm_screen(page) == prev_norm and waited < refresh_timeout:
+            time.sleep(poll_interval)
+            waited += poll_interval
+            page = driver.copy_screen()
+
+        stale = _norm_screen(page) == prev_norm
         found = _has_end_marker(page)
         log.info(
-            "AS400 items page %d: %d chars, end_marker=%s | tail=%r",
+            "AS400 items page %d: %d chars, end_marker=%s, stale=%s | tail=%r",
             i,
             len(page),
             found,
+            stale,
             page[-60:].replace("\n", "\\n"),
         )
         if found:
             log.info("END OF ORDER found on page %d — stopping.", i)
-            return "\n".join(pages)
+            return "\n".join(pages + [page])
+        if stale:
+            # Screen never changed within the timeout: the order likely ended
+            # without an END OF ORDER marker (or the session stalled). Stop here
+            # rather than paging blindly and risk skipping/duplicating content.
+            raise CaptureError(
+                f"La pantalla del AS400 no avanzó para la orden {order_number} "
+                f"(no apareció '{END_OF_ORDER_MARKER}' ni una página nueva). Captura abortada."
+            )
+
+        pages.append(page)
+        prev_norm = _norm_screen(page)
         driver.key("enter")
 
     raise CaptureError(
