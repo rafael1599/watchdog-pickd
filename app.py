@@ -16,7 +16,9 @@ The capture layer only works on macOS. Sending requires the Supabase env vars (.
 """
 
 import logging
+import subprocess
 import threading
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -196,6 +198,43 @@ def remove(oid: int):
     return jsonify({"ok": True})
 
 
+@app.post("/api/update")
+def update():
+    """Pull the latest code, refresh deps and restart the LaunchAgents.
+
+    Runs scripts/update.sh detached in a NEW SESSION: the script restarts the
+    app's own LaunchAgent (which kills this process), so it must outlive us. The
+    launcher then reopens the UI automatically. We return immediately — the work
+    continues in the background and finishes a few seconds later.
+    """
+    repo = Path(__file__).resolve().parent
+    script = repo / "scripts" / "update.sh"
+    if not script.exists():
+        return jsonify({"error": "update.sh not found."}), 500
+
+    logs = repo / "logs"
+    logs.mkdir(exist_ok=True)
+    try:
+        log_file = open(logs / "update.log", "a")  # noqa: SIM115 — child keeps this fd
+        subprocess.Popen(
+            ["/bin/bash", str(script)],
+            cwd=str(repo),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except Exception as e:
+        return jsonify({"error": f"Could not start update: {e}"}), 500
+
+    return jsonify(
+        {
+            "ok": True,
+            "message": "Updating in the background (~30s)… the app will restart "
+            "and reopen automatically.",
+        }
+    )
+
+
 INDEX_HTML = """
 <!doctype html>
 <html lang="en">
@@ -232,6 +271,7 @@ INDEX_HTML = """
     <button id="conn" class="secondary" onclick="doConnect()">Connect AS400</button>
     <button id="stat" class="secondary" onclick="doStatus()">Check AS400</button>
     <button id="peek" class="secondary" onclick="doPeek()">Peek screen</button>
+    <button id="upd" class="secondary" style="margin-left:auto;" onclick="doUpdate()">⟳ Update</button>
   </div>
   <pre id="screen" style="display:none; background:#111; color:#0f0; padding:.8rem;
        border-radius:8px; overflow:auto; font-size:.75rem; line-height:1.15;"></pre>
@@ -371,6 +411,21 @@ async function doSend(id) {
 async function doRemove(id) {
   await fetch(`/api/orders/${id}`, {method:'DELETE'});
   await load();
+}
+
+async function doUpdate() {
+  if (!confirm('Update the app to the latest version?\\nIt will pull the new code, install libraries and restart — the window reopens automatically.')) return;
+  const btn = document.getElementById('upd'); btn.disabled = true;
+  msg('Updating… pulling code and installing libraries. The app will restart and reopen shortly.', 'warn');
+  try {
+    const r = await fetch('/api/update', {method:'POST'});
+    const data = await r.json();
+    msg(r.ok ? (data.message || 'Updating…') : (data.error || 'Error updating.'), r.ok ? 'ok' : 'err');
+    if (!r.ok) btn.disabled = false;
+  } catch(e) {
+    // The app may have already restarted mid-request — that's expected.
+    msg('Update in progress — the app is restarting and will reopen automatically.', 'warn');
+  }
 }
 
 load();
