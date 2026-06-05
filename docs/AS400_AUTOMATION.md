@@ -160,6 +160,23 @@ Marcados por quién los resuelve y prioridad.
   al loop. Recuperación manual sugerida: **F7 → 3** para volver a búsqueda de orden.
 - **Órdenes enviadas ocultas**: en la UI, las órdenes ya enviadas se mueven a una sección
   colapsable "✓ Sent to PickD (n)" para no saturar la lista de pendientes.
+- **Verificación de estado antes de interactuar** (`classify_screen`): antes de teclear nada,
+  el sistema lee la pantalla y la clasifica en `disconnected` / `login` / `menu` / `message` /
+  `order_search` / `order_inquiry` / `unknown`. Esto resuelve el bug de "Connect AS400 dice
+  conectado cuando el host está caído": `bootstrap_session` ya no dispara el macro a ciegas —
+  verifica el estado en cada paso y avanza por el flujo confirmado:
+  - host caído (`Cannot connect to host … port 23`) → error claro, **no teclea** (`/api/connect` → 503).
+  - ya logueado (búsqueda/inquiry) → no repite nada, retorna listo.
+  - sign-on → corre el macro de login; **Message Display** → ENTER; **menú SALESN** → teclea `3`
+    (Order Inquiry); tras cada paso re-lee y **confirma** que llegó a búsqueda de orden.
+  - pantalla desconocida o no alcanzada → pide **login manual** (`/api/connect` → 409).
+  `capture_order` hace el mismo pre-check antes de teclear el número. UI: botón **Check AS400**
+  (`/api/status`) para verificar el estado a demanda sin disparar acciones.
+  - Marcadores confirmados con `Peek` real (todos en tests): `SIGN ON`/`PASSWORD` (login),
+    `SALESN OPTIONS`/`READY FOR OPTION` (menú — ojo: el menú lista "03. Order Inquiry", por eso
+    se chequea **antes** que el match de pantalla de orden), `PRESS ENTER TO CONTINUE` (message),
+    y `ORDER INQUIRY` (búsqueda vacía, encabezado y páginas de ítems — todas llevan ese título,
+    así que las tres cuentan como estado "listo"). `END OF ORDER` corta la paginación.
 
 ### Backlog de captura (pendiente, requiere ejemplos de pantallas)
 - Auto-recuperación: si la vista es incorrecta, pulsar **F7 → 3** automáticamente y reintentar.
