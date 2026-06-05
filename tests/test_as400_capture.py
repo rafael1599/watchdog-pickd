@@ -161,9 +161,90 @@ def test_stops_with_spaced_out_marker():
 
 
 def test_raises_when_marker_never_appears():
-    driver = FakeDriver([READY, "ORDER INQUIRY"] + ["ITEMS NO MARKER"] * 50)
+    # Distinct pages so the loop keeps advancing until it hits the max_pages cap.
+    driver = FakeDriver([READY, "ORDER INQUIRY"] + [f"ITEMS PAGE {n}" for n in range(50)])
     with pytest.raises(CaptureError):
         capture_order("999", driver, page_wait=0, max_pages=5)
+
+
+class LaggyTerminalDriver:
+    """Models a 5250 terminal: copy_screen() returns the CURRENT page, which only
+    changes after F5/ENTER. With lag>0 the screen stays stale for `lag` reads after
+    a transition, simulating a not-yet-refreshed screen (the source of skipped
+    items when the old loop paged forward on a stale copy)."""
+
+    def __init__(self, header, item_pages, lag=0, precheck=READY):
+        self.header = header
+        self.item_pages = list(item_pages)
+        self.lag = lag
+        self.precheck = precheck
+        self._did_precheck = False
+        self.cur = header
+        self._pending = None
+        self._stale_left = 0
+        self.item_idx = -1
+        self.keys = []
+        self.typed = None
+
+    def focus(self):
+        pass
+
+    def launch(self):
+        pass
+
+    def type_text(self, t):
+        self.typed = t
+
+    def key(self, name):
+        name = name.lower()
+        self.keys.append(name)
+        if name == "f5":
+            self.item_idx = 0
+            self._transition(self.item_pages[0])
+        elif name == "enter":
+            self.item_idx += 1
+            nxt = (
+                self.item_pages[self.item_idx] if self.item_idx < len(self.item_pages) else self.cur
+            )
+            self._transition(nxt)
+
+    def _transition(self, new):
+        self._pending = new
+        self._stale_left = self.lag
+
+    def copy_screen(self):
+        if not self._did_precheck:
+            self._did_precheck = True
+            return self.precheck
+        if self._pending is not None:
+            if self._stale_left > 0:
+                self._stale_left -= 1
+                return self.cur  # stale: previous page still on screen
+            self.cur = self._pending
+            self._pending = None
+        return self.cur
+
+
+def test_paging_waits_for_refresh_so_no_items_are_skipped():
+    # Two item pages; the screen lags one read behind on each transition. The old
+    # loop would copy the stale page, see no marker, and ENTER again — skipping the
+    # second page. The fixed loop waits for the real page before paging.
+    items1 = "  O R D E R   I N Q U I R Y\n Order Number: 880009\n ITEM ONE\n ITEM TWO"
+    items2 = "  O R D E R   I N Q U I R Y\n Order Number: 880009\n ITEM THREE\n END OF ORDER"
+    driver = LaggyTerminalDriver(ORDER_HEADER_SCREEN, [items1, items2], lag=1)
+    text = capture_order("880009", driver, page_wait=0, poll_interval=0.001, refresh_timeout=0.05)
+
+    assert "ITEM ONE" in text and "ITEM TWO" in text
+    assert "ITEM THREE" in text  # the page that used to get skipped
+    assert _has_end_marker(text)
+    assert driver.keys == ["f6", "f5", "enter"]  # exactly one ENTER for two pages
+
+
+def test_paging_raises_when_screen_never_advances():
+    items1 = "  O R D E R   I N Q U I R Y\n Order Number: 880009\n ITEM ONE"  # no marker
+    driver = LaggyTerminalDriver(ORDER_HEADER_SCREEN, [items1, items1], lag=100)
+    with pytest.raises(CaptureError):
+        capture_order("880009", driver, page_wait=0, poll_interval=0.001, refresh_timeout=0.01)
 
 
 def test_rejects_wrong_view_without_looping():
