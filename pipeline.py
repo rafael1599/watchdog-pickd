@@ -13,6 +13,7 @@ import logging
 from extractor import compute_hash
 from parser import parse_order
 from supabase_client import (
+    _to_cart_items,
     append_to_order,
     check_duplicate,
     combine_into_order,
@@ -45,6 +46,25 @@ def preview_order(text: str) -> dict:
         "shipping_address": data.get("shipping_address"),
         "items": items,
     }
+
+
+def resolve_order_items(text: str) -> list:
+    """Resolve a captured order's items to pick locations/stock — READ-ONLY.
+
+    Reuses the exact resolver that 'Send to PickD' uses (`_to_cart_items`): it
+    reads sku_metadata / inventory / active picking lists and assigns the best
+    location per SKU, but creates and reserves NOTHING. Used to preview an order's
+    detail (locations, distribution, problem flags) before it is sent.
+
+    Each returned item carries: sku, raw_sku, pickingQty, item_name, description,
+    warehouse, location, location_hint, sublocation, distribution, unit_price,
+    sku_not_found, insufficient_stock, available_qty.
+    """
+    data = parse_order(text)
+    items = data.get("items", [])
+    if not items:
+        return []
+    return _to_cart_items(get_client(), items)
 
 
 def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
