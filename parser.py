@@ -84,32 +84,46 @@ def parse_items(text: str) -> List[Dict]:
     lines = text.split("\n")
 
     # Pattern to match item lines:
-    # (qty_ord) (qty_ship) (stock# with spaces up to single letter W/H) (W/H) (description) (unit_price) (extend_price)
+    #   qty_ord  qty_ship  <dept> <number> <color><variant?>  W/H  description  unit  extend
     #
-    # The Stock# portion ends when we hit a single uppercase letter (the W/H code)
-    # followed by a space and the description text.
+    # The Stock# is captured CANONICALLY: a 2-digit dept, a 4-digit number, and a
+    # 2-letter color. Some PDFs append an extra finish/variant letter glued to the
+    # color (e.g. '03 3768 BLD' where the canonical SKU is '03-3768BL'); that suffix
+    # is captured separately so it never pollutes the SKU. The W/H is the next single
+    # letter, keeping the description out of the SKU.
     item_pattern = re.compile(
-        r"^\s*(\d+)\s+(\d+)\s+"  # qty_ord, qty_ship
-        r"([\d]{2}\s[\d]{4}\s?\w*)\s+"  # stock number (e.g., '03 3684 BR' or '03 3684 BLT')
-        r"([A-Z])\s+"  # warehouse code (single letter like N)
-        r"(.+?)\s+"  # description (non-greedy)
-        r"([\d,]*\.\d{2})\s+"  # unit price (allow ".00" with no leading digits)
-        r"([\d,]*\.\d{2})\s*$"  # extended price (allow ".00" with no leading digits)
+        r"^\s*(\d+)\s+(\d+)\s+"  # 1 qty_ord, 2 qty_ship
+        r"(\d{2})\s?(\d{4})\s?"  # 3 dept, 4 number
+        r"([A-Z]{2})([A-Z]*)\s+"  # 5 color (canonical, 2 letters), 6 finish/variant suffix
+        r"([A-Z])\s+"  # 7 warehouse code (single letter like N)
+        r"(.+?)\s+"  # 8 description (non-greedy)
+        r"([\d,]*\.\d{2})\s+"  # 9 unit price (allow ".00" with no leading digits)
+        r"([\d,]*\.\d{2})\s*$"  # 10 extended price
     )
 
     for line in lines:
         match = item_pattern.match(line)
         if match:
             qty_ordered = int(match.group(1))
-            raw_sku = match.group(3).strip()
-            warehouse = match.group(4).strip()
-            description = match.group(5).strip()
-            unit_price = float(match.group(6).replace(",", ""))
-            extend_price = float(match.group(7).replace(",", ""))
+            dept, number, color, variant = (
+                match.group(3),
+                match.group(4),
+                match.group(5),
+                match.group(6),
+            )
+            warehouse = match.group(7).strip()
+            description = match.group(8).strip()
+            unit_price = float(match.group(9).replace(",", ""))
+            extend_price = float(match.group(10).replace(",", ""))
+
+            # Canonical SKU = dept + number + 2-letter color. Any extra finish/variant
+            # letters the PDF glues onto the color are NOT part of the canonical SKU.
+            canonical_sku = f"{dept}{number}{color}"
+            raw_sku = f"{dept} {number} {color}{variant}".strip()
 
             items.append(
                 {
-                    "sku": normalize_sku(raw_sku),
+                    "sku": normalize_sku(canonical_sku),
                     "qty": qty_ordered,  # Use ordered qty (backorders qty_ship=0 still need user decision)
                     "qty_ordered": qty_ordered,
                     "raw_sku": raw_sku,
@@ -179,7 +193,9 @@ def _extract_ship_to_lines(text: str) -> list:
         # table / end marker / a new page's inquiry title.
         if re.match(r"\s*(Terms:|Sales ID:|Credit Hold:|Order Date:|Order Comments:)", line):
             break
-        if re.search(r"END\s+OF\s+ORDER|Quant|Stock\s*#|I\s*N\s*Q\s*U\s*I\s*R\s*Y", line, re.IGNORECASE):
+        if re.search(
+            r"END\s+OF\s+ORDER|Quant|Stock\s*#|I\s*N\s*Q\s*U\s*I\s*R\s*Y", line, re.IGNORECASE
+        ):
             break
 
         right = re.sub(r"\s+", " ", line[ship_col:]).strip()
@@ -204,27 +220,57 @@ def parse_shipping_address(text: str) -> Optional[str]:
 # Canonical USPS abbreviations, mirroring PickD's parseUSAddress so a watcher
 # import and a manual paste produce the same normalized_address (dedup key).
 _STREET_SUFFIXES = {
-    "STREET": "ST", "STR": "ST", "ST": "ST",
-    "AVENUE": "AVE", "AVEN": "AVE", "AV": "AVE", "AVE": "AVE",
-    "BOULEVARD": "BLVD", "BLVD": "BLVD",
-    "ROAD": "RD", "RD": "RD",
-    "DRIVE": "DR", "DRV": "DR", "DR": "DR",
-    "LANE": "LN", "LN": "LN",
-    "COURT": "CT", "CT": "CT",
-    "CIRCLE": "CIR", "CIR": "CIR",
-    "PLACE": "PL", "PL": "PL",
-    "TERRACE": "TER", "TER": "TER",
-    "PARKWAY": "PKWY", "PKWY": "PKWY",
-    "HIGHWAY": "HWY", "HWY": "HWY",
-    "TRAIL": "TRL", "TRL": "TRL",
-    "SQUARE": "SQ", "SQ": "SQ",
+    "STREET": "ST",
+    "STR": "ST",
+    "ST": "ST",
+    "AVENUE": "AVE",
+    "AVEN": "AVE",
+    "AV": "AVE",
+    "AVE": "AVE",
+    "BOULEVARD": "BLVD",
+    "BLVD": "BLVD",
+    "ROAD": "RD",
+    "RD": "RD",
+    "DRIVE": "DR",
+    "DRV": "DR",
+    "DR": "DR",
+    "LANE": "LN",
+    "LN": "LN",
+    "COURT": "CT",
+    "CT": "CT",
+    "CIRCLE": "CIR",
+    "CIR": "CIR",
+    "PLACE": "PL",
+    "PL": "PL",
+    "TERRACE": "TER",
+    "TER": "TER",
+    "PARKWAY": "PKWY",
+    "PKWY": "PKWY",
+    "HIGHWAY": "HWY",
+    "HWY": "HWY",
+    "TRAIL": "TRL",
+    "TRL": "TRL",
+    "SQUARE": "SQ",
+    "SQ": "SQ",
     "WAY": "WAY",
 }
 _DIRECTIONALS = {
-    "NORTH": "N", "SOUTH": "S", "EAST": "E", "WEST": "W",
-    "NORTHEAST": "NE", "NORTHWEST": "NW", "SOUTHEAST": "SE", "SOUTHWEST": "SW",
-    "N": "N", "S": "S", "E": "E", "W": "W",
-    "NE": "NE", "NW": "NW", "SE": "SE", "SW": "SW",
+    "NORTH": "N",
+    "SOUTH": "S",
+    "EAST": "E",
+    "WEST": "W",
+    "NORTHEAST": "NE",
+    "NORTHWEST": "NW",
+    "SOUTHEAST": "SE",
+    "SOUTHWEST": "SW",
+    "N": "N",
+    "S": "S",
+    "E": "E",
+    "W": "W",
+    "NE": "NE",
+    "NW": "NW",
+    "SE": "SE",
+    "SW": "SW",
 }
 _UNIT_DESIGNATORS = {"APT", "STE", "SUITE", "UNIT", "FL", "FLOOR", "BLDG", "RM", "DEPT", "#"}
 
