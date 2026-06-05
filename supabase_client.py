@@ -429,19 +429,12 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
     for item in parsed_items:
         normalized_pdf_sku = item["sku"]
 
-        # Try finding exact normalized match first
+        # Exact match on the normalized SKU. `parse_items` already yields the
+        # canonical SKU (dept + number + 2-letter color) and keeps any finish/
+        # variant suffix out of it, so no suffix-stripping fallback is needed here.
+        # (A blind 'strip trailing T' fallback was also unsafe: it could mangle a
+        # real 2-letter color that ends in T, e.g. 'WT'/'GT'.)
         db_sku = sku_map.get(normalized_pdf_sku)
-
-        # Fuzzy Fallback: Many PDF SKUs have extra suffixes like 'T' or 'PALLET'
-        # e.g., '033994BLT' (PDF) vs '03-3994BL' (DB)
-        if not db_sku:
-            # Try removing common suffixes
-            for suffix in ["T", "PALLET"]:
-                if normalized_pdf_sku.endswith(suffix):
-                    stripped = normalized_pdf_sku[: -len(suffix)]
-                    if stripped in sku_map:
-                        db_sku = sku_map[stripped]
-                        break
 
         not_found = db_sku is None
         found_db_skus.append(db_sku) if db_sku else None
