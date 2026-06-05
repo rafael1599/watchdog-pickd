@@ -25,10 +25,13 @@ load_dotenv()  # must run before importing modules that read env at import time
 from flask import Flask, abort, jsonify, render_template_string, request  # noqa: E402
 
 from as400_capture import (  # noqa: E402
+    AS400Disconnected,
+    AS400ManualLoginRequired,
     CaptureError,
     MochaDriver,
     bootstrap_session,
     capture_order,
+    classify_screen,
 )
 from pipeline import preview_order, process_order_text  # noqa: E402
 
@@ -52,6 +55,7 @@ def _guard_localhost_only():
     origin = request.headers.get("Origin")
     if origin and origin not in _ALLOWED_ORIGINS:
         abort(403)
+
 
 # In-memory queue of captured orders for this session.
 _orders: dict[int, dict] = {}
@@ -99,12 +103,30 @@ def list_orders():
 
 @app.post("/api/connect")
 def connect():
-    """Launch the AS400 emulator and run the login macro, all from the UI."""
+    """Launch the AS400 emulator and log in — verifying state, not assuming it."""
     try:
-        bootstrap_session(MochaDriver())
+        state = bootstrap_session(MochaDriver())
+    except AS400Disconnected as e:
+        return jsonify({"ok": False, "state": "disconnected", "error": str(e)}), 503
+    except AS400ManualLoginRequired as e:
+        return jsonify({"ok": False, "state": "needs_login", "error": str(e)}), 409
     except Exception as e:
-        return jsonify({"error": f"Error connecting to AS400: {e}"}), 500
-    return jsonify({"ok": True, "message": "AS400 connected and logged in."})
+        return jsonify({"ok": False, "error": f"Error connecting to AS400: {e}"}), 500
+    return jsonify(
+        {"ok": True, "state": state, "message": "AS400 listo en la pantalla de búsqueda de orden."}
+    )
+
+
+@app.post("/api/status")
+def status():
+    """Read the current Mocha screen and classify it, without driving anything."""
+    try:
+        text = MochaDriver().copy_screen()
+    except CaptureError as e:
+        return jsonify({"error": str(e)}), 422
+    except Exception as e:
+        return jsonify({"error": f"Error reading screen: {e}"}), 500
+    return jsonify({"state": classify_screen(text)})
 
 
 @app.post("/api/peek")
@@ -128,6 +150,10 @@ def capture():
 
     try:
         raw_text = capture_order(order_number, MochaDriver())
+    except AS400Disconnected as e:
+        return jsonify({"error": str(e), "state": "disconnected"}), 503
+    except AS400ManualLoginRequired as e:
+        return jsonify({"error": str(e), "state": "needs_login"}), 409
     except CaptureError as e:
         return jsonify({"error": str(e)}), 422
     except Exception as e:  # AppleScript / clipboard / environment failures
@@ -204,6 +230,7 @@ INDEX_HTML = """
   <h1>📦 AS400 → PickD</h1>
   <div class="row">
     <button id="conn" class="secondary" onclick="doConnect()">Connect AS400</button>
+    <button id="stat" class="secondary" onclick="doStatus()">Check AS400</button>
     <button id="peek" class="secondary" onclick="doPeek()">Peek screen</button>
   </div>
   <pre id="screen" style="display:none; background:#111; color:#0f0; padding:.8rem;
@@ -278,6 +305,29 @@ async function doConnect() {
     msg(r.ok ? (data.message || 'Connected.') : (data.error||'Error connecting.'), r.ok?'ok':'err');
   } catch(e) { msg('Network error: '+e, 'err'); }
   finally { btn.disabled = false; document.getElementById('num').focus(); }
+}
+
+const STATE_LABELS = {
+  disconnected: ['❌ AS400 desconectado (host caído). Inicia sesión manualmente en Mocha.', 'err'],
+  login:        ['🔑 En la pantalla de login. Pulsa Connect AS400 para entrar.', 'warn'],
+  menu:         ['📋 En el menú SALESN. Pulsa Connect AS400 para ir a Order Inquiry.', 'warn'],
+  message:      ['💬 Pantalla "Press Enter to continue". Pulsa Connect AS400 para continuar.', 'warn'],
+  order_search: ['✅ Listo: pantalla de búsqueda de orden.', 'ok'],
+  order_inquiry:['✅ Viendo una orden. Listo para capturar.', 'ok'],
+  unknown:      ['⚠️ Pantalla no reconocida. Inicia sesión manualmente hasta búsqueda de orden.', 'warn'],
+};
+
+async function doStatus() {
+  const btn = document.getElementById('stat'); btn.disabled = true;
+  msg('Verificando estado del AS400…', 'warn');
+  try {
+    const r = await fetch('/api/status', {method:'POST'});
+    const data = await r.json();
+    if (!r.ok) { msg(data.error || 'Error leyendo la pantalla.', 'err'); }
+    else { const [label, cls] = STATE_LABELS[data.state] || [`Estado: ${data.state}`, 'muted'];
+           msg(label, cls); }
+  } catch(e) { msg('Network error: '+e, 'err'); }
+  finally { btn.disabled = false; }
 }
 
 async function doPeek() {

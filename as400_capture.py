@@ -42,6 +42,69 @@ DEFAULT_LOGIN_STEPS = [
 ]
 
 
+# --- AS400 screen states -------------------------------------------------
+# We read and classify the emulator screen BEFORE driving it, so we never type
+# into a dead/unknown view (e.g. the host being down) and never falsely report
+# "connected". Markers are whitespace-insensitive (5250 captures space out text).
+STATE_DISCONNECTED = "disconnected"  # Mocha can't reach the host / session ended
+STATE_LOGIN = "login"  # AS400 sign-on screen
+STATE_MENU = "menu"  # SALESN options menu (pick 3 = Order Inquiry)
+STATE_MESSAGE = "message"  # transient "Message Display / Press Enter to continue"
+STATE_ORDER_SEARCH = "order_search"  # logged in, ready to type an order number
+STATE_ORDER_INQUIRY = "order_inquiry"  # viewing an order
+STATE_UNKNOWN = "unknown"  # unrecognized → ask the user to log in manually
+
+# Whitespace-stripped, upper-cased markers. The disconnected set is the strongest
+# signal (the user reported "Cannot connect to host ... , port 23"). The others are
+# taken from real `Peek screen` captures of the login flow.
+DISCONNECTED_MARKERS = (
+    "CANNOTCONNECT",
+    "CONNECTIONREFUSED",
+    "CONNECTIONTIMEDOUT",
+    "CONNECTIONCLOSED",
+    "PORT23",
+    "DISCONNECTED",
+    "NOTCONNECTED",
+    "SESSIONENDED",
+    "HOSTUNREACHABLE",
+)
+LOGIN_MARKERS = ("SIGNON", "PASSWORD")
+# The SALESN options menu lists "03. Order Inquiry" — so it MUST be matched before
+# the order-screen substring checks, or the menu would look like an order view.
+MENU_MARKERS = ("SALESNOPTIONS", "READYFOROPTION")
+MESSAGE_MARKERS = ("PRESSENTERTOCONTINUE",)
+
+# States from which a capture can start (logged in, on an order view).
+_READY_STATES = (STATE_ORDER_SEARCH, STATE_ORDER_INQUIRY)
+
+
+def classify_screen(text: str) -> str:
+    """Best-effort classification of the current AS400 screen.
+
+    Whitespace-insensitive. Order of checks matters: disconnected first (strongest
+    signal); then login / menu / message (the SALESN menu literally contains the
+    text "Order Inquiry", so it must win over the order-screen checks below);
+    finally the actual order views. Anything else is UNKNOWN, which callers treat
+    as "needs manual login".
+    """
+    norm = re.sub(r"\s+", "", (text or "").upper())
+    if not norm:
+        return STATE_UNKNOWN
+    if any(m in norm for m in DISCONNECTED_MARKERS):
+        return STATE_DISCONNECTED
+    if any(m in norm for m in LOGIN_MARKERS):
+        return STATE_LOGIN
+    if any(m in norm for m in MENU_MARKERS):
+        return STATE_MENU
+    if any(m in norm for m in MESSAGE_MARKERS):
+        return STATE_MESSAGE
+    if "ORDERINQUIRY" in norm:
+        return STATE_ORDER_INQUIRY
+    if "ORDERNUMBER" in norm:
+        return STATE_ORDER_SEARCH
+    return STATE_UNKNOWN
+
+
 def _has_end_marker(text: str) -> bool:
     """Whitespace-insensitive match for the END OF ORDER marker.
 
@@ -52,18 +115,24 @@ def _has_end_marker(text: str) -> bool:
 
 
 def _looks_like_order_screen(text: str) -> bool:
-    """True if the captured text looks like an ORDER INQUIRY screen.
+    """True if the captured text looks like an order view (search or inquiry).
 
     Used to bail out (instead of looping) when we're on a different AS400 view
-    (e.g. a menu) or the order doesn't exist. Whitespace-insensitive so the
-    spaced-out 'O R D E R  I N Q U I R Y' title still matches.
+    (e.g. a menu) or the order doesn't exist.
     """
-    norm = re.sub(r"\s+", "", text.upper())
-    return "ORDERINQUIRY" in norm or "ORDERNUMBER" in norm
+    return classify_screen(text) in _READY_STATES
 
 
 class CaptureError(Exception):
     """Raised when a capture cannot complete (e.g. END OF ORDER never appears)."""
+
+
+class AS400Disconnected(CaptureError):
+    """The emulator isn't connected to the host (server down / session ended)."""
+
+
+class AS400ManualLoginRequired(CaptureError):
+    """The screen is unrecognized or not logged in — a human must log in first."""
 
 
 class MochaDriver:
@@ -76,15 +145,11 @@ class MochaDriver:
         # Resolve at instantiation (request time) so a .env loaded after import
         # is still honored.
         self.app_name = app_name or os.getenv("MOCHA_APP_NAME", "Mocha TN5250")
-        self.launch_target = (
-            launch_target or os.getenv("AS400_LAUNCH_TARGET") or self.app_name
-        )
+        self.launch_target = launch_target or os.getenv("AS400_LAUNCH_TARGET") or self.app_name
         # If the launch target is a bundle id, use it to activate the app reliably
         # (sandboxed apps can't be resolved by name via `tell application "<name>"`).
         bundle_re = r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$"
-        self.bundle_id = (
-            self.launch_target if re.match(bundle_re, self.launch_target) else None
-        )
+        self.bundle_id = self.launch_target if re.match(bundle_re, self.launch_target) else None
 
     def _osascript(self, script: str):
         subprocess.run(["osascript", "-e", script], check=True)
@@ -173,20 +238,73 @@ def run_login(driver, login_steps=DEFAULT_LOGIN_STEPS, step_wait: float = 0.6):
         time.sleep(step_wait)
 
 
+def _advance_toward_order_screen(driver, state, login_steps, step_wait) -> bool:
+    """Take the known keystroke for `state` to move one step toward the order screen.
+
+    Confirmed login flow (see docs §3.1): sign-on → Message Display → SALESN menu
+    → Order Inquiry. Returns True if it acted, False if the state has no known move
+    (caller then asks for manual login).
+    """
+    if state == STATE_LOGIN:
+        run_login(driver, login_steps=login_steps, step_wait=step_wait)
+    elif state == STATE_MENU:
+        driver.type_text("3")  # 03. Order Inquiry
+        time.sleep(step_wait)
+        driver.key("enter")
+    elif state == STATE_MESSAGE:
+        driver.key("enter")  # "Press Enter to continue"
+    else:
+        return False
+    return True
+
+
 def bootstrap_session(
     driver,
     launch_wait: float = LAUNCH_WAIT,
     login_steps=DEFAULT_LOGIN_STEPS,
     step_wait: float = 0.6,
+    max_steps: int = 6,
 ):
-    """Open the emulator and log in, leaving the session at the order-search screen.
+    """Open the emulator and ensure we end logged in at the order screen.
 
-    Sequence: launch → wait for the app → focus → run the login macro.
+    Unlike a blind macro replay, this VERIFIES the screen at every step so it
+    never falsely reports success. It reads the screen, then drives one confirmed
+    keystroke toward the order view, repeating until ready:
+      - host down      → AS400Disconnected (never type into a dead screen)
+      - already in     → return the state without re-typing anything
+      - sign-on / menu / Message Display → take the known step (login macro,
+        pick 3, or Press Enter), re-read, and continue
+      - unrecognized   → AS400ManualLoginRequired (ask for manual login)
+
+    Returns the final screen state (STATE_ORDER_SEARCH or STATE_ORDER_INQUIRY).
     """
     driver.launch()
     time.sleep(launch_wait)
     driver.focus()
-    run_login(driver, login_steps=login_steps, step_wait=step_wait)
+
+    for _ in range(max_steps):
+        state = classify_screen(driver.copy_screen())
+        log.info("AS400 connect: screen state=%s", state)
+
+        if state == STATE_DISCONNECTED:
+            raise AS400Disconnected(
+                "El AS400 no está conectado (el emulador no alcanza el host). "
+                "Conéctate e inicia sesión manualmente en Mocha y vuelve a intentar."
+            )
+        if state in _READY_STATES:
+            return state
+
+        if not _advance_toward_order_screen(driver, state, login_steps, step_wait):
+            raise AS400ManualLoginRequired(
+                "No reconozco la pantalla actual del AS400. Inicia sesión manualmente "
+                "hasta la pantalla de búsqueda de orden y vuelve a intentar."
+            )
+        time.sleep(step_wait)
+
+    raise AS400ManualLoginRequired(
+        "No llegué a la pantalla de búsqueda de orden tras varios pasos. "
+        "Inicia sesión manualmente y vuelve a intentar."
+    )
 
 
 def capture_order(
@@ -210,6 +328,20 @@ def capture_order(
     """
     driver.focus()
 
+    # Verify the screen BEFORE driving it: never type an order number into a
+    # disconnected or unrecognized view (that's how a dead session silently
+    # swallowed keystrokes and still looked "fine").
+    state = classify_screen(driver.copy_screen())
+    if state == STATE_DISCONNECTED:
+        raise AS400Disconnected(
+            "El AS400 no está conectado. Inicia sesión manualmente en Mocha y reintenta."
+        )
+    if state not in _READY_STATES:
+        raise AS400ManualLoginRequired(
+            "El AS400 no está en la pantalla de búsqueda de orden (sesión no iniciada o "
+            "vista desconocida). Inicia sesión manualmente y reintenta."
+        )
+
     # F6 opens a fresh order search before each new order.
     driver.key("f6")
     time.sleep(page_wait)
@@ -221,9 +353,9 @@ def capture_order(
     pages = [header]
     log.info("AS400 header captured: %d chars", len(header))
 
-    # Guard: if this isn't an ORDER INQUIRY screen we're on the wrong view (a menu,
-    # etc.) or the order doesn't exist. Bail out now instead of pressing F5 and
-    # looping through pages that will never show END OF ORDER.
+    # Guard: if this isn't an order view we're on the wrong screen (a menu, etc.)
+    # or the order doesn't exist. Bail out now instead of pressing F5 and looping
+    # through pages that will never show END OF ORDER.
     if not _looks_like_order_screen(header):
         raise CaptureError(
             f"La pantalla no es una consulta de orden (vista incorrecta o la orden "

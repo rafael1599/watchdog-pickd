@@ -7,7 +7,67 @@ flow and the multi-page accumulation without driving Mocha.
 
 import pytest
 
-from as400_capture import CaptureError, _has_end_marker, capture_order, run_login
+from as400_capture import (
+    STATE_DISCONNECTED,
+    STATE_LOGIN,
+    STATE_MENU,
+    STATE_MESSAGE,
+    STATE_ORDER_INQUIRY,
+    STATE_ORDER_SEARCH,
+    STATE_UNKNOWN,
+    AS400Disconnected,
+    AS400ManualLoginRequired,
+    CaptureError,
+    _has_end_marker,
+    bootstrap_session,
+    capture_order,
+    classify_screen,
+    run_login,
+)
+
+# A logged-in "order search" screen, used as the pre-capture check screen.
+READY = "O R D E R   N U M B E R: ______"
+
+# Real captures from the login flow (see docs §3.1), used to lock classify_screen.
+SIGN_ON_SCREEN = """                                   Sign On
+                                               System  . . . . . :   S104DPPM
+                User  . . . . . . . . . . . . . .
+                Password  . . . . . . . . . . . .
+                Program/procedure . . . . . . . .
+                                        (C) COPYRIGHT IBM CORP. 1980, 1999."""
+
+MESSAGE_SCREEN = """                               Message Display                                XP
+ SYS-7300     also routed to W1 from jobname - XP150044       Time- 20:02:55
+  The 3 option was taken to this message
+                          Press Enter to continue"""
+
+MENU_SCREEN = """ COMMAND                      SALESN Options                                 XP
+  01. Customer Inquiry
+  02. Stock File Inquiry
+  03. Order Inquiry
+  04. Accounts Receivable Inquiry
+ Ready for option number or command"""
+
+# Empty order-search screen (after picking 3 from the menu).
+ORDER_SEARCH_SCREEN = """                            O R D E R   I N Q U I R Y
+ Order Number:                              Account Number:
+ Alpha Search:                                     Invoice:"""
+
+# Header page after typing an order number.
+ORDER_HEADER_SCREEN = """                            O R D E R   I N Q U I R Y
+ Order Number: 880009                       Account Number: 0003574 00
+ Bill BIKES AND MORE                   Ship BIKES AND MORE
+      2133 NW 6TH STREET                    2133 NW 6TH STREET
+ Order Total          453.95
+                                   Cmd5            Cmd6                 Cmd7
+                                    DETAILS         RETURN TO SELECT     EXIT"""
+
+# Items page after F5, with the END OF ORDER marker.
+ORDER_ITEMS_END_SCREEN = """                            O R D E R   I N Q U I R Y
+ Order Number: 880009                       Account Number: 0003574 00
+ Quant  Quant  Stock #   W/H   Description                       Unit    Extend
+     1      1  03 4068 BK  F   EXPLORER A2 17 2025 GLOSS BLAC  388.95    388.95
+                                END OF ORDER                             388.95"""
 
 
 class FakeDriver:
@@ -42,8 +102,10 @@ class FakeDriver:
 
 
 def test_single_item_page_stops_immediately():
-    # header, then one items page already containing END OF ORDER
-    driver = FakeDriver(["O R D E R  I N Q U I R Y\nCUSTOMER HEADER", "ITEM 1\nITEM 2\nEND OF ORDER"])
+    # pre-check ready screen, header, then one items page with END OF ORDER
+    driver = FakeDriver(
+        [READY, "O R D E R  I N Q U I R Y\nCUSTOMER HEADER", "ITEM 1\nITEM 2\nEND OF ORDER"]
+    )
     text = capture_order("880005", driver, page_wait=0)
 
     assert driver.focused
@@ -57,6 +119,7 @@ def test_single_item_page_stops_immediately():
 def test_multi_page_pages_with_enter_until_marker():
     driver = FakeDriver(
         [
+            READY,  # pre-capture check
             "O R D E R  I N Q U I R Y\nCUSTOMER HEADER",  # page 1 (header)
             "ITEM 1\nITEM 2",  # items page 1 (no marker)
             "ITEM 3\nITEM 4",  # items page 2 (no marker)
@@ -67,12 +130,18 @@ def test_multi_page_pages_with_enter_until_marker():
 
     # F6 (new search), F5 once, then ENTER between item pages (2 ENTERs for 3 pages)
     assert driver.keys == ["f6", "f5", "enter", "enter"]
-    for chunk in ["O R D E R  I N Q U I R Y\nCUSTOMER HEADER", "ITEM 1", "ITEM 3", "ITEM 5", "END OF ORDER"]:
+    for chunk in [
+        "O R D E R  I N Q U I R Y\nCUSTOMER HEADER",
+        "ITEM 1",
+        "ITEM 3",
+        "ITEM 5",
+        "END OF ORDER",
+    ]:
         assert chunk in text
 
 
 def test_marker_is_case_insensitive():
-    driver = FakeDriver(["ORDER INQUIRY", "item\nend of order"])
+    driver = FakeDriver([READY, "ORDER INQUIRY", "item\nend of order"])
     text = capture_order("1", driver, page_wait=0)
     assert "end of order" in text
     assert driver.keys == ["f6", "f5"]
@@ -86,23 +155,41 @@ def test_marker_ignores_extra_whitespace():
 
 
 def test_stops_with_spaced_out_marker():
-    driver = FakeDriver(["ORDER INQUIRY", "ITEM 1", "E N D   O F   O R D E R"])
+    driver = FakeDriver([READY, "ORDER INQUIRY", "ITEM 1", "E N D   O F   O R D E R"])
     capture_order("7", driver, page_wait=0)
     assert driver.keys == ["f6", "f5", "enter"]  # F6 search, F5 items, one ENTER, then stop
 
 
 def test_raises_when_marker_never_appears():
-    driver = FakeDriver(["ORDER INQUIRY"] + ["ITEMS NO MARKER"] * 50)
+    driver = FakeDriver([READY, "ORDER INQUIRY"] + ["ITEMS NO MARKER"] * 50)
     with pytest.raises(CaptureError):
         capture_order("999", driver, page_wait=0, max_pages=5)
 
 
 def test_rejects_wrong_view_without_looping():
-    # On a non-order screen (e.g. a menu): bail out after the header, never press F5.
-    driver = FakeDriver(["MAIN MENU\n1. Inventory\n2. Customers\n3. Selection"])
+    # Ready at pre-check, but after typing we land on a menu (order doesn't exist):
+    # bail out after the header, never press F5.
+    driver = FakeDriver([READY, "MAIN MENU\n1. Inventory\n2. Customers\n3. Selection"])
     with pytest.raises(CaptureError):
         capture_order("880013", driver, page_wait=0)
     assert driver.keys == ["f6"]  # F6 only; no F5, no ENTER loop
+
+
+def test_capture_aborts_before_typing_when_disconnected():
+    # Pre-check sees a dead session → raise immediately, never touch the keyboard.
+    driver = FakeDriver(["Cannot connect to host 47.22.32.213 , port 23"])
+    with pytest.raises(AS400Disconnected):
+        capture_order("880013", driver, page_wait=0)
+    assert driver.keys == []
+    assert driver.typed is None
+
+
+def test_capture_aborts_before_typing_when_not_logged_in():
+    driver = FakeDriver(["Sign On\nUser . . .\nPassword . . ."])
+    with pytest.raises(AS400ManualLoginRequired):
+        capture_order("880013", driver, page_wait=0)
+    assert driver.keys == []
+    assert driver.typed is None
 
 
 def test_login_macro_replays_steps_in_order():
@@ -124,3 +211,138 @@ def test_login_supports_custom_steps_and_wait():
     driver = FakeDriver()
     run_login(driver, login_steps=[("text", "USER"), ("wait", 0), ("key", "enter")], step_wait=0)
     assert driver.actions == [("text", "USER"), ("key", "enter")]
+
+
+# --- classify_screen ----------------------------------------------------------
+
+
+def test_classify_disconnected_from_real_error():
+    # The exact message the user reported when the host is down.
+    assert classify_screen("Cannot connect to host 47.22.32.213 , port 23") == STATE_DISCONNECTED
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Connection refused", "Session ended", "DISCONNECTED", "the connection timed out"],
+)
+def test_classify_disconnected_variants(text):
+    assert classify_screen(text) == STATE_DISCONNECTED
+
+
+def test_classify_order_screens():
+    assert classify_screen("O R D E R  I N Q U I R Y") == STATE_ORDER_INQUIRY
+    assert classify_screen("ORDER NUMBER: ____") == STATE_ORDER_SEARCH
+
+
+def test_classify_login_and_unknown():
+    assert classify_screen("Sign On\nPassword . . .") == STATE_LOGIN
+    assert classify_screen("MAIN MENU\n1. Inventory") == STATE_UNKNOWN
+    assert classify_screen("") == STATE_UNKNOWN
+
+
+def test_classify_real_login_flow_screens():
+    assert classify_screen(SIGN_ON_SCREEN) == STATE_LOGIN
+    assert classify_screen(MESSAGE_SCREEN) == STATE_MESSAGE
+    # The menu lists "03. Order Inquiry" but must NOT be read as an order view.
+    assert classify_screen(MENU_SCREEN) == STATE_MENU
+
+
+def test_classify_real_order_screens_are_ready():
+    # All three real ORDER INQUIRY screens (empty search, header, items) are ready.
+    assert classify_screen(ORDER_SEARCH_SCREEN) == STATE_ORDER_INQUIRY
+    assert classify_screen(ORDER_HEADER_SCREEN) == STATE_ORDER_INQUIRY
+    assert classify_screen(ORDER_ITEMS_END_SCREEN) == STATE_ORDER_INQUIRY
+    # The items page carries the stop marker.
+    assert _has_end_marker(ORDER_ITEMS_END_SCREEN)
+
+
+def test_capture_full_flow_with_real_screens():
+    # pre-check (search) → type number → header → F5 → items page with END OF ORDER.
+    driver = FakeDriver([ORDER_SEARCH_SCREEN, ORDER_HEADER_SCREEN, ORDER_ITEMS_END_SCREEN])
+    text = capture_order("880009", driver, page_wait=0)
+    assert driver.typed == "880009"
+    assert driver.keys == ["f6", "f5"]  # fresh search, switch to items, marker on first page
+    assert "EXPLORER A2 17 2025 GLOSS BLAC" in text
+    assert _has_end_marker(text)
+
+
+def test_classify_disconnected_wins_over_stale_order_text():
+    # A dead session showing leftover order text must still read as disconnected.
+    assert classify_screen("ORDER NUMBER\nCannot connect to host, port 23") == STATE_DISCONNECTED
+
+
+# --- bootstrap_session (connect) ---------------------------------------------
+
+
+class StatefulDriver(FakeDriver):
+    """FakeDriver where copy_screen() always returns the same current screen."""
+
+    def __init__(self, screen):
+        super().__init__()
+        self.screen = screen
+
+    def copy_screen(self):
+        return self.screen
+
+
+def test_bootstrap_raises_when_disconnected_without_typing():
+    driver = StatefulDriver("Cannot connect to host 47.22.32.213 , port 23")
+    with pytest.raises(AS400Disconnected):
+        bootstrap_session(driver, launch_wait=0, step_wait=0)
+    assert driver.actions == []  # never replayed the login macro into a dead screen
+
+
+def test_bootstrap_skips_login_when_already_logged_in():
+    driver = StatefulDriver("ORDER NUMBER: ____")
+    state = bootstrap_session(driver, launch_wait=0, step_wait=0)
+    assert state == STATE_ORDER_SEARCH
+    assert driver.actions == []  # no re-login
+
+
+def test_bootstrap_unknown_screen_requires_manual_login():
+    driver = StatefulDriver("MAIN MENU\n1. Inventory\n2. Customers")
+    with pytest.raises(AS400ManualLoginRequired):
+        bootstrap_session(driver, launch_wait=0, step_wait=0)
+    assert driver.actions == []
+
+
+def test_bootstrap_runs_login_then_verifies_order_screen():
+    # Login screen first, then the macro lands us on the order-search screen.
+    screens = iter(["Sign On\nPassword", "ORDER NUMBER: ____"])
+    driver = FakeDriver()
+    driver.copy_screen = lambda: next(screens)
+    state = bootstrap_session(driver, launch_wait=0, step_wait=0)
+    assert state == STATE_ORDER_SEARCH
+    # The login macro WAS replayed (we were on the sign-on screen).
+    assert ("text", "ROMAN") in driver.actions
+
+
+def test_bootstrap_raises_if_login_does_not_reach_order_screen():
+    screens = iter(["Sign On\nPassword", "MAIN MENU"])
+    driver = FakeDriver()
+    driver.copy_screen = lambda: next(screens)
+    with pytest.raises(AS400ManualLoginRequired):
+        bootstrap_session(driver, launch_wait=0, step_wait=0)
+
+
+def test_bootstrap_navigates_full_login_flow():
+    # sign-on → Message Display → SALESN menu → order search, each step verified.
+    screens = iter([SIGN_ON_SCREEN, MESSAGE_SCREEN, MENU_SCREEN, READY])
+    driver = FakeDriver()
+    driver.copy_screen = lambda: next(screens)
+    state = bootstrap_session(driver, launch_wait=0, step_wait=0)
+    assert state == STATE_ORDER_SEARCH
+    # Login macro ran, the Message Display was dismissed, and "3" picked Order Inquiry.
+    assert ("text", "ROMAN") in driver.actions
+    assert ("text", "3") in driver.actions
+
+
+def test_bootstrap_navigates_from_menu_only():
+    # Already past login, sitting on the SALESN menu: just pick 3 → order search.
+    screens = iter([MENU_SCREEN, READY])
+    driver = FakeDriver()
+    driver.copy_screen = lambda: next(screens)
+    state = bootstrap_session(driver, launch_wait=0, step_wait=0)
+    assert state == STATE_ORDER_SEARCH
+    assert ("text", "ROMAN") not in driver.actions  # no re-login
+    assert driver.actions == [("text", "3"), ("key", "enter")]
