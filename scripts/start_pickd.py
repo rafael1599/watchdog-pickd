@@ -44,19 +44,53 @@ def _server_is_up() -> bool:
         return False
 
 
+def _free_port(port: int = 5000) -> None:
+    """Kill any process still listening on the app port before we start a new one.
+
+    A stale/hung app.py left on the port blocks the new server from binding — the
+    browser then loads a dead server forever (the blank-window symptom). Clearing it
+    first guarantees the fresh app owns the port.
+    """
+    try:
+        out = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}"], capture_output=True, text=True, check=False
+        ).stdout
+        pids = [p for p in out.split() if p.strip()]
+        for pid in pids:
+            subprocess.run(["kill", "-9", pid], check=False)
+        if pids:
+            print(f"start_pickd: freed port {port} (killed {pids})", flush=True)
+            time.sleep(1)
+    except Exception as e:
+        print(f"start_pickd: could not free port {port}: {e}", flush=True)
+
+
 def main():
     # 1. Launch the AS400 emulator (by bundle id; ignore if already open).
     subprocess.run(["open", "-b", _launch_target()], check=False)
 
-    # 2. Start the web app in the background using the venv python.
+    # 2. Free the port from any previous instance, then start the web app.
+    _free_port()
     app_proc = subprocess.Popen([_venv_python(), str(REPO / "app.py")], cwd=str(REPO))
 
-    # 3. Wait until the server answers (up to ~20s), then open it in Safari.
-    for _ in range(40):
+    # 3. Wait until the server actually answers (up to ~60s — the app imports
+    # supabase/flask, which can be slow on a cold start), THEN open Safari. Opening
+    # before it's ready is what leaves a blank, never-loading window.
+    up = False
+    for _ in range(120):
         if _server_is_up():
+            up = True
             break
         time.sleep(0.5)
-    subprocess.run(["open", "-a", "Safari", URL], check=False)
+    if up:
+        subprocess.run(["open", "-a", "Safari", URL], check=False)
+        print(f"start_pickd: app is up, opened {URL}", flush=True)
+    else:
+        print(
+            f"start_pickd: app did NOT answer on {URL} within 60s — not opening a "
+            "blank window. Check logs/app-stderr.log.",
+            flush=True,
+        )
 
     # 4. Keep this launcher tied to the app process (so the LaunchAgent tracks it).
     app_proc.wait()
