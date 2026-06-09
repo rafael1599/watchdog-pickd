@@ -22,6 +22,7 @@ PDF_TEXT = " Order Number: 880009 \n some pdf body"
 @pytest.fixture(autouse=True)
 def tmp_store(tmp_path, monkeypatch):
     monkeypatch.setenv("SCANNED_STORE_PATH", str(tmp_path / "scanned.json"))
+    monkeypatch.setenv("SCAN_CURSOR_PATH", str(tmp_path / "scan_cursor"))
 
 
 # --- watcher PDF routing -----------------------------------------------------
@@ -74,8 +75,10 @@ def test_process_pdf_falls_back_to_pdf_when_not_cached(monkeypatch):
 
 
 @pytest.fixture
-def client():
+def client(tmp_path, monkeypatch):
+    monkeypatch.setattr(appmod, "ARCHIVE_PATH", tmp_path / "archived.json")
     appmod._orders.clear()
+    appmod._archive.clear()
     appmod._next_id = 1
     appmod.app.testing = True
     return appmod.app.test_client()
@@ -137,3 +140,18 @@ def test_load_scanned_adds_to_pending(client):
 def test_load_scanned_missing_is_404(client):
     r = client.post("/api/scanned/999999/load", headers=HDR)
     assert r.status_code == 404
+
+
+def test_archive_scanned_moves_to_archive_and_keeps_cursor(client):
+    scanned_store.put("880112", CAPTURE_TEXT, {"order_number": "880112"}, source="auto_scan")
+    appmod._archive.clear()
+    cursor_before = scanned_store.next_scan_number(880112)
+
+    r = client.post("/api/scanned/880112/archive", headers=HDR)
+    assert r.status_code == 200
+    # Gone from the scanned cache, now in the archive, and NOT left in pending.
+    assert scanned_store.get("880112") is None
+    assert len(appmod._archive) == 1
+    assert not appmod._orders
+    # Removing it must not rewind the scan cursor.
+    assert scanned_store.next_scan_number(880112) == cursor_before

@@ -3,6 +3,7 @@
 .archived_orders.json
 .scanned_orders.json
 .scanned_orders.json.tmp
+.scan_cursor
 __pycache__/
 *.pdf
 .DS_Store

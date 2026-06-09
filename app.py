@@ -400,6 +400,31 @@ def load_scanned(order_number: str):
     return jsonify({**_public(entry), "from_cache": True})
 
 
+@app.post("/api/scanned/<order_number>/archive")
+def archive_scanned(order_number: str):
+    """Archive an auto-scanned order directly (without loading it to pending first).
+
+    Moves it into the persisted archive and removes it from the scanned cache. The
+    scan cursor is NOT rewound, so the scanner won't re-capture this number.
+    """
+    cached = scanned_store.get(order_number)
+    if not cached:
+        return jsonify({"error": "Scanned order not found."}), 404
+    # Build the full entry (parse + summary) by reusing _add_order, then move it
+    # straight into the archive instead of leaving it in the pending queue.
+    entry = _add_order(cached["raw_text"])
+    with _lock:
+        e = _orders.pop(entry["id"], None)
+        aid = uuid.uuid4().hex
+        arch = {k: v for k, v in e.items() if k not in ("id", "sent", "result")}
+        arch["aid"] = aid
+        arch["archived_at"] = datetime.now(timezone.utc).isoformat()
+        _archive[aid] = arch
+        _persist_archive()
+    scanned_store.delete(order_number)
+    return jsonify({"ok": True})
+
+
 @app.post("/api/update")
 def update():
     """Pull the latest code, refresh deps and restart the LaunchAgents.
@@ -705,6 +730,7 @@ function scanCard(s) {
       <div class="muted">🤖 Auto-scanned ${fmtDate(s.scanned_at)}</div>
       <div class="actions">
         <button class="secondary" onclick="doLoadScanned('${s.order_number}')">Load to review</button>
+        <button class="secondary" onclick="doArchiveScanned('${s.order_number}')">Archive</button>
       </div>
     </div>`;
 }
@@ -838,6 +864,12 @@ async function doRestore(aid) {
 async function doLoadScanned(num) {
   const r = await fetch(`/api/scanned/${num}/load`, {method:'POST'});
   msg(r.ok ? `Order #${num} loaded for review.` : 'Could not load scanned order.', r.ok ? 'ok' : 'err');
+  await load();
+}
+
+async function doArchiveScanned(num) {
+  const r = await fetch(`/api/scanned/${num}/archive`, {method:'POST'});
+  msg(r.ok ? `Order #${num} archived.` : 'Could not archive scanned order.', r.ok ? 'ok' : 'err');
   await load();
 }
 
