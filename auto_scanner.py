@@ -36,7 +36,7 @@ from as400_capture import (
 
 log = logging.getLogger("pickd-auto-scanner")
 
-SCAN_INTERVAL_SEC = float(os.getenv("SCAN_INTERVAL_SEC", "300"))  # 5 minutes
+SCAN_INTERVAL_SEC = float(os.getenv("SCAN_INTERVAL_SEC", "1200"))  # 20 minutes
 # Wait a bit after startup before the first cycle, so the UI loads and the operator
 # sees it before the scanner takes over the Mocha keyboard.
 SCAN_INITIAL_DELAY_SEC = float(os.getenv("SCAN_INITIAL_DELAY_SEC", "20"))
