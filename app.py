@@ -77,6 +77,7 @@ def _add_order(raw_text: str) -> dict:
             "customer": preview["customer"],
             "item_count": preview["item_count"],
             "total_units": preview["total_units"],
+            "ship_via": preview.get("ship_via"),
             "shipping_address": preview.get("shipping_address"),
             "order_comments": preview.get("order_comments"),
             "items": preview["items"],
@@ -288,6 +289,10 @@ INDEX_HTML = """
     #msg { min-height: 1.2rem; margin-bottom: .8rem; }
     .meta.clickable { cursor: pointer; }
     .meta .chev { color: #9ca3af; font-size: .9rem; }
+    .shipvia { font-size: .8rem; font-weight: 700; letter-spacing: .04em;
+               padding: .05rem .5rem; border-radius: 999px; align-self: center;
+               background: rgba(37,99,235,.12); color: #2563eb;
+               border: 1px solid rgba(37,99,235,.35); }
     /* Read-only detail panel — dark, double-check inspired. */
     .detail { background: #0f0f12; color: #e5e7eb; border-radius: 12px;
               padding: .6rem; margin: .2rem 0 .8rem; }
@@ -367,12 +372,14 @@ function card(o) {
   }
   const ship = o.shipping_address ? `<div class="muted">📍 Ship to: ${o.shipping_address}</div>` : '';
   const notes = o.order_comments ? `<div class="muted">📝 Notes: ${o.order_comments}</div>` : '';
+  const via = o.ship_via ? `<span class="shipvia">🚚 ${o.ship_via}</span>` : '';
   return `<div class="card">
       <div class="meta clickable" onclick="toggleDetail(${o.id})" title="Show pick detail">
         <span>Order <b>#${o.order_number ?? '—'}</b></span>
         <span>Customer <b>${o.customer}</b></span>
         <span>Items <b>${o.item_count}</b></span>
         <span>Total units <b>${o.total_units ?? '—'}</b></span>
+        ${via}
         <span class="chev" id="chev-${o.id}">▾ detail</span>
       </div>
       <div class="detail" id="detail-${o.id}" style="display:none;"></div>

@@ -44,6 +44,7 @@ def preview_order(text: str) -> dict:
         "is_last_page": data.get("is_last_page", False),
         "order_comments": data.get("order_comments"),
         "shipping_address": data.get("shipping_address"),
+        "ship_via": data.get("ship_via"),
         "items": items,
     }
 
