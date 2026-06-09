@@ -33,19 +33,54 @@ fi
 echo "✓ Dependencies up to date."
 
 # 3. Restart the LaunchAgents so the daemons reload the new code.
+#
+# Prefer the modern launchctl API (bootout/bootstrap). The legacy unload+load pair
+# is unreliable on recent macOS: a load issued right after an unload is often
+# rejected as "already loaded", so RunAtLoad never fires again — and the capture
+# app's launcher (start_pickd.py, which reopens the UI in Safari) is never re-run.
+# We bootout, let it settle, then bootstrap; fall back to unload/load on old macOS.
 restart_agent() {
   local label="$1"
   local plist="$HOME/Library/LaunchAgents/$label.plist"
-  if [ -f "$plist" ]; then
-    launchctl unload "$plist" 2>/dev/null || true
-    launchctl load "$plist" 2>/dev/null || true
-    echo "✓ Restarted $label"
-  else
+  local domain="gui/$(id -u)"
+
+  if [ ! -f "$plist" ]; then
     echo "• $label not installed (skipped)"
+    return
   fi
+
+  if launchctl bootout "$domain/$label" 2>/dev/null; then
+    sleep 1  # let the old process fully exit before re-bootstrapping
+  else
+    launchctl unload "$plist" 2>/dev/null || true
+    sleep 1
+  fi
+
+  if ! launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
+    launchctl load "$plist" 2>/dev/null || true
+  fi
+  echo "✓ Restarted $label"
 }
 
 restart_agent "com.antigravity.watchdog-pickd"
 restart_agent "com.antigravity.pickd-app"
+
+# 4. Safety net for the UI: once the capture app answers, open it in Safari. The
+# agent's launcher (start_pickd.py) normally does this, but if it didn't (timing /
+# launchctl quirks) this guarantees the window comes back. `open` focuses the
+# existing tab for the same URL rather than spawning a duplicate, so running it in
+# addition to the launcher is harmless.
+APP_URL="http://127.0.0.1:5000"
+if [ -f "$HOME/Library/LaunchAgents/com.antigravity.pickd-app.plist" ]; then
+  echo "▶ Waiting for the capture app to come back up…"
+  for _ in $(seq 1 30); do
+    if curl -s -o /dev/null --max-time 1 "$APP_URL"; then
+      open -a Safari "$APP_URL" 2>/dev/null || open "$APP_URL" 2>/dev/null || true
+      echo "✓ Opened $APP_URL"
+      break
+    fi
+    sleep 1
+  done
+fi
 
 echo "✅ Update complete — now on $(git rev-parse --short HEAD) ($BRANCH)."
