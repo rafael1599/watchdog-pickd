@@ -341,6 +341,24 @@ def parse_shipping_address_struct(text: str) -> Optional[dict]:
     }
 
 
+def parse_ship_via(text: str) -> Optional[str]:
+    """
+    Extract the shipping carrier from the 'Ship Via' header field, verbatim.
+
+    The header row is fixed-width with several columns, e.g.:
+        '           Ship Via    FEDEX           Shipped From Florida'
+    We take the value right after 'Ship Via' up to the next column gap (2+ spaces),
+    so a multi-word carrier ('UPS GROUND') stays intact while the neighbouring
+    'Shipped From ...' column is not swallowed. Returns None if absent/empty.
+    """
+    match = re.search(r"Ship\s+Via\b[ \t]*(.+)$", text, re.IGNORECASE | re.MULTILINE)
+    if not match:
+        return None
+    # First column only: split on a 2+ space gap (the column separator).
+    value = re.split(r"\s{2,}", match.group(1).strip())[0].strip()
+    return value or None
+
+
 def parse_order(text: str) -> dict:
     """
     Main entry point: parse all data from extracted PDF text.
@@ -366,5 +384,6 @@ def parse_order(text: str) -> dict:
         "order_comments": parse_order_comments(text),
         "shipping_address": parse_shipping_address(text),
         "shipping": parse_shipping_address_struct(text),
+        "ship_via": parse_ship_via(text),
         "raw_text": text,
     }
