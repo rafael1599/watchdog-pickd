@@ -728,14 +728,23 @@ def _log_import(
     items_count: int,
     picking_list_id: str,
 ):
-    """Log the PDF import for audit and duplicate detection."""
-    client.table("pdf_import_log").insert(
-        {
-            "pdf_hash": pdf_hash,
-            "order_number": order_number,
-            "file_name": file_name,
-            "items_count": items_count,
-            "picking_list_id": picking_list_id,
-            "status": "processed",
-        }
-    ).execute()
+    """Log the PDF import for audit and duplicate detection.
+
+    Best-effort: a self-healing re-send (same capture, topping up an existing order
+    with newly-parsed SKUs) re-logs the same pdf_hash. If pdf_hash is unique-
+    constrained that insert raises — swallow it, since the original log row already
+    records the import and the audit trail is non-critical to the operation.
+    """
+    try:
+        client.table("pdf_import_log").insert(
+            {
+                "pdf_hash": pdf_hash,
+                "order_number": order_number,
+                "file_name": file_name,
+                "items_count": items_count,
+                "picking_list_id": picking_list_id,
+                "status": "processed",
+            }
+        ).execute()
+    except Exception as e:
+        log.warning("pdf_import_log insert skipped for hash %s: %s", pdf_hash, e)

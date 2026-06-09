@@ -36,11 +36,23 @@ def preview_order(text: str) -> dict:
     """
     data = parse_order(text)
     items = data.get("items", [])
+
+    # Reconciliation guard: the AS400 header carries the order Sub-Total, which is
+    # the sum of the line items' extended prices. If our parsed lines don't add up
+    # to it, a line was silently dropped or misparsed — surface it BEFORE sending so
+    # an incomplete order is caught at capture time, not discovered downstream.
+    subtotal = data.get("subtotal")
+    parsed_total = round(sum(float(i.get("extend_price") or 0) for i in items), 2)
+    total_mismatch = subtotal is not None and abs(parsed_total - subtotal) > 0.01
+
     return {
         "order_number": data.get("order_number"),
         "customer": data.get("customer_name") or "Unknown",
         "item_count": len(items),  # number of distinct line items / SKUs
         "total_units": sum(int(i.get("qty") or 0) for i in items),  # sum of quantities
+        "subtotal": subtotal,  # order Sub-Total from the header (None if not found)
+        "parsed_total": parsed_total,  # sum of parsed line extends
+        "total_mismatch": total_mismatch,  # True → likely a missing/misparsed line
         "is_last_page": data.get("is_last_page", False),
         "order_comments": data.get("order_comments"),
         "shipping_address": data.get("shipping_address"),
@@ -92,17 +104,14 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
 
     pdf_hash = compute_hash(text)
 
-    # 1. Exact duplicate by content hash
+    # 1. Is this exact content already processed? We do NOT bail here. A re-send of
+    # the identical capture must still be able to TOP UP an existing order with SKUs
+    # that a newer parser now extracts (e.g. after fixing a parse gap). The hash only
+    # guards the create/combine paths below — never the delta-append to an existing
+    # order, and never silently recreates an order whose content was seen before.
     existing_log = check_duplicate(pdf_hash)
-    if existing_log:
-        return _result(
-            "duplicate",
-            order_number=existing_log.get("order_number"),
-            message=(
-                f"Identical content already processed on "
-                f"{existing_log.get('processed_at', 'unknown date')}."
-            ),
-        )
+    is_duplicate_content = existing_log is not None
+    dup_date = existing_log.get("processed_at", "unknown date") if existing_log else None
 
     # 2. Parse
     order_data = parse_order(text)
@@ -116,7 +125,7 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
     result = None
     status = None  # action taken
 
-    # 3. Existing order by number → delta append / reopen
+    # 3. Existing order by number → delta append / reopen (self-healing re-send)
     if order_number:
         existing = find_existing_order(order_number)
         if existing:
@@ -128,11 +137,17 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
             delta_items = get_new_items_delta(existing_items, items, client)
 
             if not delta_items:
+                msg = f"Order #{order_number}: no new SKUs. Nothing to add."
+                if is_duplicate_content:
+                    msg = (
+                        f"Order #{order_number}: identical content already processed "
+                        f"on {dup_date}. No new SKUs to add."
+                    )
                 return _result(
                     "duplicate",
                     order_number=order_number,
                     customer=customer,
-                    message=f"Order #{order_number}: no new SKUs. Nothing to add.",
+                    message=msg,
                 )
 
             if existing_status == "completed":
@@ -150,9 +165,29 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
                     list_id, existing_items, delta_items, order_number, pdf_hash, source_name
                 )
                 status = "appended"
-            else:
+            elif not is_duplicate_content:
                 result = create_order(order_data, pdf_hash, source_name)
                 status = "created"
+            else:
+                # Terminal/other status (e.g. cancelled) AND content already seen —
+                # don't recreate it from a re-send.
+                return _result(
+                    "duplicate",
+                    order_number=order_number,
+                    customer=customer,
+                    message=f"Identical content already processed on {dup_date}.",
+                )
+
+    # 3b. No existing order to append to, but this exact content was already
+    # processed before (e.g. the order was deleted) — report duplicate instead of
+    # silently recreating or combining it.
+    if result is None and is_duplicate_content:
+        return _result(
+            "duplicate",
+            order_number=order_number,
+            customer=customer,
+            message=f"Identical content already processed on {dup_date}.",
+        )
 
     # 4. Auto-combine by customer
     if result is None and order_data.get("customer_name"):

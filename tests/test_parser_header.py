@@ -9,9 +9,32 @@ from parser import (
     parse_customer_name,
     parse_order,
     parse_order_comments,
+    parse_order_subtotal,
     parse_shipping_address,
     parse_shipping_address_struct,
 )
+
+
+def test_parse_subtotal_from_header():
+    text = """ Terms: 28        Cr Lim:        .00   Invoice Comments
+          Sub-Total         4850.35
+     Freight & Misc             .00
+        Order Total         4850.35"""
+    assert parse_order_subtotal(text) == 4850.35
+
+
+def test_parse_subtotal_with_thousands_separator():
+    assert parse_order_subtotal("          Sub-Total      12,345.67") == 12345.67
+
+
+def test_parse_subtotal_falls_back_to_order_total():
+    # Some captures show only 'Order Total' (no separate Sub-Total line).
+    assert parse_order_subtotal("        Order Total          999.00") == 999.00
+
+
+def test_parse_subtotal_absent_returns_none():
+    assert parse_order_subtotal("END OF ORDER   2351.70") is None
+
 
 HEADER = """                            O R D E R   I N Q U I R Y
  Order Number: 880013                       Account Number: 0020045 00

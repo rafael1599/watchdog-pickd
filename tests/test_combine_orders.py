@@ -8,17 +8,16 @@ Tests the logic in supabase_client.py:
 Uses mocks for Supabase client to avoid DB dependency.
 """
 
-import sys
 import os
-import pytest
-from unittest.mock import patch, MagicMock
-from datetime import datetime, timezone, timedelta
+import sys
+from unittest.mock import MagicMock, patch
 
 # Add parent dir to path so we can import modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 
 # ---------- combine_into_order tests (unit, mocked DB) ----------
+
 
 class TestCombineIntoOrder:
     """Test the combine_into_order function logic."""
@@ -55,18 +54,20 @@ class TestCombineIntoOrder:
 
         # Mock Supabase update
         mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [{
-            "id": "uuid-1",
-            "items": [
-                {"sku": "03-3684BL", "pickingQty": 4, "source_order": "878279"},
-                {"sku": "03-3994BR", "pickingQty": 2, "source_order": "878280"},
-            ],
-            "order_number": "878279 / 878280",
-            "combine_meta": {"is_combined": True, "source_orders": []},
-        }]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+            {
+                "id": "uuid-1",
+                "items": [
+                    {"sku": "03-3684BL", "pickingQty": 4, "source_order": "878279"},
+                    {"sku": "03-3994BR", "pickingQty": 2, "source_order": "878280"},
+                ],
+                "order_number": "878279 / 878280",
+                "combine_meta": {"is_combined": True, "source_orders": []},
+            }
+        ]
         mock_client.return_value.table.return_value = mock_table
 
-        result = combine_into_order(target_order, new_order_data, "hash123", "test.pdf")
+        combine_into_order(target_order, new_order_data, "hash123", "test.pdf")
 
         # Verify update was called
         mock_table.update.assert_called_once()
@@ -101,7 +102,9 @@ class TestCombineIntoOrder:
 
         mock_cart.return_value = [{"sku": "03-3994BR", "pickingQty": 2}]
         mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [{"id": "uuid-1"}]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "uuid-1"}
+        ]
         mock_client.return_value.table.return_value = mock_table
 
         combine_into_order(target_order, new_order_data, "hash123", "test.pdf")
@@ -132,7 +135,9 @@ class TestCombineIntoOrder:
 
         mock_cart.return_value = [{"sku": "B", "pickingQty": 1}]
         mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [{"id": "uuid-1"}]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "uuid-1"}
+        ]
         mock_client.return_value.table.return_value = mock_table
 
         combine_into_order(target_order, new_order_data, "hash456", "order2.pdf")
@@ -166,7 +171,9 @@ class TestCombineIntoOrder:
         new_order_data = {"order_number": "878280", "items": [{"sku": "A", "qty": 1}]}
         mock_cart.return_value = [{"sku": "A", "pickingQty": 1}]
         mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [{"id": "uuid-1"}]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "uuid-1"}
+        ]
         mock_client.return_value.table.return_value = mock_table
 
         combine_into_order(target_order, new_order_data, "hash", "f.pdf")
@@ -194,7 +201,9 @@ class TestCombineIntoOrder:
         new_order_data = {"order_number": "878280", "items": [{"sku": "A", "qty": 1}]}
         mock_cart.return_value = [{"sku": "A", "pickingQty": 1}]
         mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [{"id": "uuid-1"}]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "uuid-1"}
+        ]
         mock_client.return_value.table.return_value = mock_table
 
         combine_into_order(target_order, new_order_data, "hash", "f.pdf")
@@ -221,7 +230,9 @@ class TestCombineIntoOrder:
         new_order_data = {"order_number": "878280", "items": [{"sku": "033684BL", "qty": 2}]}
         mock_cart.return_value = [{"sku": "03-3684BL", "pickingQty": 2}]
         mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [{"id": "uuid-1"}]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "uuid-1"}
+        ]
         mock_client.return_value.table.return_value = mock_table
 
         combine_into_order(target_order, new_order_data, "hash", "f.pdf")
@@ -264,7 +275,9 @@ class TestCombineIntoOrder:
         new_order_data = {"order_number": "878281", "items": [{"sku": "C", "qty": 3}]}
         mock_cart.return_value = [{"sku": "C", "pickingQty": 3}]
         mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [{"id": "uuid-1"}]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "uuid-1"}
+        ]
         mock_client.return_value.table.return_value = mock_table
 
         combine_into_order(target_order, new_order_data, "hash3", "order3.pdf")
@@ -279,6 +292,7 @@ class TestCombineIntoOrder:
 
 
 # ---------- find_combinable_order_by_customer tests ----------
+
 
 class TestFindCombinableOrderByCustomer:
     """Test the query logic for finding combinable orders."""
@@ -345,7 +359,7 @@ class TestFindCombinableOrderByCustomer:
 
     @patch("supabase_client.get_client")
     def test_queries_only_combinable_statuses(self, mock_client):
-        from supabase_client import find_combinable_order_by_customer, COMBINABLE_STATUSES
+        from supabase_client import COMBINABLE_STATUSES, find_combinable_order_by_customer
 
         mock_query = MagicMock()
         mock_query.select.return_value = mock_query

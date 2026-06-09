@@ -6,6 +6,7 @@ Fallback:  AI-based extraction (Gemini → OpenAI) for scanned/image PDFs
 """
 
 import hashlib
+
 import pdfplumber
 
 
@@ -33,5 +34,5 @@ def compute_hash(text: str) -> str:
     PDFs (which have different metadata/bytes) from being processed again.
     """
     sha256 = hashlib.sha256()
-    sha256.update(text.encode('utf-8'))
+    sha256.update(text.encode("utf-8"))
     return sha256.hexdigest()
