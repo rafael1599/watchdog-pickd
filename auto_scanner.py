@@ -37,6 +37,9 @@ from as400_capture import (
 log = logging.getLogger("pickd-auto-scanner")
 
 SCAN_INTERVAL_SEC = float(os.getenv("SCAN_INTERVAL_SEC", "300"))  # 5 minutes
+# Wait a bit after startup before the first cycle, so the UI loads and the operator
+# sees it before the scanner takes over the Mocha keyboard.
+SCAN_INITIAL_DELAY_SEC = float(os.getenv("SCAN_INITIAL_DELAY_SEC", "20"))
 # Bound how many orders one cycle may capture, so a big backlog can't hold the
 # keyboard for an unbounded stretch (it resumes next cycle).
 SCAN_MAX_PER_CYCLE = int(os.getenv("SCAN_MAX_PER_CYCLE", "30"))
@@ -126,8 +129,12 @@ def _run_one_cycle() -> None:
 
 def _loop(interval: float) -> None:
     log.info(
-        "auto-scanner started (every %.0fs, from #%s)", interval, scanned_store.next_scan_number()
+        "auto-scanner started (every %.0fs, from #%s) — first cycle in %.0fs",
+        interval,
+        scanned_store.next_scan_number(),
+        SCAN_INITIAL_DELAY_SEC,
     )
+    _stop.wait(SCAN_INITIAL_DELAY_SEC)  # let the UI come up before grabbing Mocha
     while not _stop.is_set():
         try:
             _run_one_cycle()

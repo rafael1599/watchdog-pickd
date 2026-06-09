@@ -119,6 +119,18 @@ def _has_end_marker(text: str) -> bool:
     return "ENDOFORDER" in re.sub(r"\s+", "", text.upper())
 
 
+def _is_invalid_order(text: str) -> bool:
+    """True if AS400 rejected the order number ('Invalid Order Number, REENTER').
+
+    This is the screen for a number that isn't a real order yet — the search screen
+    still shows 'Order Number', so classify_screen would call it a valid order view.
+    We detect the error message explicitly so the auto-scanner stops on it (and
+    retries the same number next cycle) instead of trying to page through nothing.
+    """
+    norm = re.sub(r"\s+", "", text.upper())
+    return "INVALIDORDERNUMBER" in norm or "INVALIDORDER" in norm
+
+
 def _looks_like_order_screen(text: str) -> bool:
     """True if the captured text looks like an order view (search or inquiry).
 
@@ -364,6 +376,16 @@ def capture_order(
     header = driver.copy_screen()
     pages = [header]
     log.info("AS400 header captured: %d chars", len(header))
+
+    # The number isn't a registered order yet: AS400 answers 'Invalid Order Number,
+    # REENTER' on the search screen. That screen still says 'Order Number', so the
+    # generic order-screen check below would pass — detect the rejection explicitly
+    # and stop here (the auto-scanner retries this same number next cycle).
+    if _is_invalid_order(header):
+        raise CaptureError(
+            f"Order {order_number} doesn't exist yet "
+            f"(AS400: 'Invalid Order Number, REENTER')."
+        )
 
     # Guard: if this isn't an order view we're on the wrong screen (a menu, etc.)
     # or the order doesn't exist. Bail out now instead of pressing F5 and looping

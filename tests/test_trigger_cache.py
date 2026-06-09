@@ -109,3 +109,31 @@ def test_capture_drives_and_caches_when_not_cached(client, monkeypatch):
     assert not r.get_json().get("from_cache")
     # The manual capture is now recorded in the cache for next time.
     assert scanned_store.get("880009") is not None
+
+
+# --- /api/scanned visibility + load-to-review --------------------------------
+
+
+def test_list_scanned_returns_summary_without_raw_text(client):
+    scanned_store.put("880112", CAPTURE_TEXT, {"order_number": "880112", "customer": "ACME"})
+    r = client.get("/api/scanned", headers=HDR)
+    assert r.status_code == 200
+    data = r.get_json()
+    assert len(data) == 1
+    assert data[0]["order_number"] == "880112"
+    assert data[0]["customer"] == "ACME"
+    assert "raw_text" not in data[0]
+
+
+def test_load_scanned_adds_to_pending(client):
+    # CAPTURE_TEXT parses to order 880009, so key the cache to match.
+    scanned_store.put("880009", CAPTURE_TEXT, {"order_number": "880009"})
+    r = client.post("/api/scanned/880009/load", headers=HDR)
+    assert r.status_code == 200
+    assert r.get_json()["from_cache"] is True
+    assert any(o["order_number"] == "880009" for o in appmod._orders.values())
+
+
+def test_load_scanned_missing_is_404(client):
+    r = client.post("/api/scanned/999999/load", headers=HDR)
+    assert r.status_code == 404

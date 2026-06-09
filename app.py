@@ -375,6 +375,31 @@ def restore_archived(aid: str):
     return jsonify(_public(entry))
 
 
+@app.get("/api/scanned")
+def list_scanned():
+    """Orders the auto-scanner has captured into the local cache (not yet sent).
+
+    Read-only summary (no raw_text) so the operator can see what the background
+    scanner has picked up. Newest first.
+    """
+    data = scanned_store.load()
+    items = [{k: v for k, v in e.items() if k != "raw_text"} for e in data.values()]
+    items.sort(key=lambda e: e.get("scanned_at") or "", reverse=True)
+    return jsonify(items)
+
+
+@app.post("/api/scanned/<order_number>/load")
+def load_scanned(order_number: str):
+    """Load an auto-scanned order into the pending queue for review and sending."""
+    cached = scanned_store.get(order_number)
+    if not cached:
+        return jsonify({"error": "Scanned order not found."}), 404
+    entry = _add_order(cached["raw_text"])
+    with _lock:
+        entry["from_cache"] = True
+    return jsonify({**_public(entry), "from_cache": True})
+
+
 @app.post("/api/update")
 def update():
     """Pull the latest code, refresh deps and restart the LaunchAgents.
@@ -520,8 +545,10 @@ INDEX_HTML = """
 const msg = (t, cls='muted') => { const m=document.getElementById('msg'); m.className=cls; m.textContent=t; };
 
 async function load() {
-  const [ro, ra] = await Promise.all([fetch('/api/orders'), fetch('/api/archived')]);
-  render(await ro.json(), await ra.json());
+  const [ro, ra, rs] = await Promise.all([
+    fetch('/api/orders'), fetch('/api/archived'), fetch('/api/scanned')
+  ]);
+  render(await ro.json(), await ra.json(), await rs.json());
 }
 
 function card(o) {
@@ -664,7 +691,25 @@ async function toggleDetail(id) {
   }
 }
 
-function render(orders, archived) {
+function scanCard(s) {
+  const via = s.ship_via ? `<span class="shipvia">🚚 ${s.ship_via}</span>` : '';
+  const mm = s.total_mismatch ? '<span class="badge low">TOTAL ≠</span>' : '';
+  return `<div class="card">
+      <div class="meta">
+        <span>Order <b>#${s.order_number ?? '—'}</b>${mm}</span>
+        <span>Customer <b>${s.customer ?? '—'}</b></span>
+        <span>Items <b>${s.item_count ?? '—'}</b></span>
+        <span>Units <b>${s.total_units ?? '—'}</b></span>
+        ${via}
+      </div>
+      <div class="muted">🤖 Auto-scanned ${fmtDate(s.scanned_at)}</div>
+      <div class="actions">
+        <button class="secondary" onclick="doLoadScanned('${s.order_number}')">Load to review</button>
+      </div>
+    </div>`;
+}
+
+function render(orders, archived, scanned) {
   const list = document.getElementById('list');
   const active = orders.filter(o => !o.sent);
   const sent = orders.filter(o => o.sent);
@@ -674,6 +719,14 @@ function render(orders, archived) {
     html += '<p class="muted">No pending orders. Capture one above.</p>';
   } else {
     html += active.map(card).join('');
+  }
+  // Auto-scanned orders the background scanner has cached (not sent yet). Shown so
+  // the operator can see scanner progress and pull any order in for review/sending.
+  if (scanned && scanned.length) {
+    html += `<details style="margin-top:1rem;" open>
+      <summary class="muted" style="cursor:pointer;">🤖 Auto-scanned, not sent (${scanned.length})</summary>
+      <div style="margin-top:.6rem;">${scanned.map(scanCard).join('')}</div>
+    </details>`;
   }
   // Sent orders are hidden in a collapsed section so they don't clutter the list.
   if (sent.length) {
@@ -782,6 +835,12 @@ async function doRestore(aid) {
   await load();
 }
 
+async function doLoadScanned(num) {
+  const r = await fetch(`/api/scanned/${num}/load`, {method:'POST'});
+  msg(r.ok ? `Order #${num} loaded for review.` : 'Could not load scanned order.', r.ok ? 'ok' : 'err');
+  await load();
+}
+
 async function doUpdate() {
   if (!confirm('Update the app to the latest version?\\nIt will pull the new code, install libraries and restart — the window reopens automatically.')) return;
   const btn = document.getElementById('upd'); btn.disabled = true;
@@ -798,6 +857,8 @@ async function doUpdate() {
 }
 
 load();
+// Live refresh so auto-scanned orders and statuses appear without a manual reload.
+setInterval(load, 8000);
 </script>
 </body>
 </html>
@@ -807,4 +868,7 @@ load();
 if __name__ == "__main__":
     _load_archive()
     start_auto_scanner()
-    app.run(host="127.0.0.1", port=PORT, debug=False)
+    # threaded=True so UI requests are served promptly even while the auto-scanner's
+    # background thread is busy driving Mocha (otherwise the page hangs blank until
+    # the scan cycle finishes).
+    app.run(host="127.0.0.1", port=PORT, debug=False, threaded=True)
