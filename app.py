@@ -15,9 +15,12 @@ Flow:
 The capture layer only works on macOS. Sending requires the Supabase env vars (.env).
 """
 
+import json
 import logging
 import subprocess
 import threading
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -64,6 +67,73 @@ _orders: dict[int, dict] = {}
 _next_id = 1
 _lock = threading.Lock()
 
+# Archived orders the operator chose NOT to send. Unlike the pending queue these
+# are persisted to a local JSON file so they survive an app restart. Keyed by a
+# stable archive id (aid). The file is gitignored — it is local working state.
+ARCHIVE_PATH = Path(__file__).resolve().parent / ".archived_orders.json"
+_archive: dict[str, dict] = {}
+
+
+def _load_archive() -> None:
+    """Load archived orders from disk into memory (best-effort)."""
+    global _archive
+    try:
+        if ARCHIVE_PATH.exists():
+            data = json.loads(ARCHIVE_PATH.read_text(encoding="utf-8"))
+            _archive = {e["aid"]: e for e in data if e.get("aid")}
+    except Exception as e:
+        logging.warning("Could not load archive: %s", e)
+        _archive = {}
+
+
+def _persist_archive() -> None:
+    """Write the archive to disk (best-effort; never raises to the request)."""
+    try:
+        ARCHIVE_PATH.write_text(
+            json.dumps(list(_archive.values()), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logging.warning("Could not save archive: %s", e)
+
+
+def _compare_items(archived_items: list, new_items: list) -> dict:
+    """Diff an archived order's items against a fresh capture's, by SKU→qty.
+
+    Used when re-capturing an order whose number is already archived: tells the
+    operator whether the new scan is identical or what changed, so they can decide
+    whether to pull the archived copy back out or keep the fresh one.
+    """
+
+    def by_sku(items):
+        m = {}
+        for it in items:
+            sku = it.get("sku") or it.get("raw_sku") or "?"
+            qty = int(it.get("qty") or it.get("pickingQty") or 0)
+            m[sku] = m.get(sku, 0) + qty
+        return m
+
+    old, new = by_sku(archived_items), by_sku(new_items)
+    added = [s for s in new if s not in old]
+    removed = [s for s in old if s not in new]
+    changed = [s for s in old if s in new and old[s] != new[s]]
+    identical = not (added or removed or changed)
+
+    parts = []
+    if added:
+        parts.append(f"{len(added)} SKU nuevo(s)")
+    if removed:
+        parts.append(f"{len(removed)} faltante(s)")
+    if changed:
+        parts.append(f"{len(changed)} cantidad(es) distinta(s)")
+    return {"identical": identical, "summary": "idéntica" if identical else ", ".join(parts)}
+
+
+def _find_archived_by_number(order_number) -> dict | None:
+    if not order_number:
+        return None
+    return next((a for a in _archive.values() if a.get("order_number") == order_number), None)
+
 
 def _add_order(raw_text: str) -> dict:
     global _next_id
@@ -71,6 +141,18 @@ def _add_order(raw_text: str) -> dict:
     with _lock:
         oid = _next_id
         _next_id += 1
+        # If this order number is already archived, attach a non-blocking warning
+        # plus a content comparison so the operator can decide what to do.
+        match = _find_archived_by_number(preview["order_number"])
+        archived_match = None
+        if match:
+            cmp = _compare_items(match.get("items", []), preview["items"])
+            archived_match = {
+                "aid": match["aid"],
+                "archived_at": match.get("archived_at"),
+                "identical": cmp["identical"],
+                "summary": cmp["summary"],
+            }
         entry = {
             "id": oid,
             "order_number": preview["order_number"],
@@ -84,6 +166,7 @@ def _add_order(raw_text: str) -> dict:
             "shipping_address": preview.get("shipping_address"),
             "order_comments": preview.get("order_comments"),
             "items": preview["items"],
+            "archived_match": archived_match,
             "raw_text": raw_text,
             "sent": False,
             "result": None,
@@ -225,6 +308,40 @@ def remove(oid: int):
     return jsonify({"ok": True})
 
 
+@app.post("/api/orders/<int:oid>/archive")
+def archive(oid: int):
+    """Move a pending order into the persisted local archive (do not send it)."""
+    with _lock:
+        entry = _orders.pop(oid, None)
+        if not entry:
+            return jsonify({"error": "Order not found."}), 404
+        aid = uuid.uuid4().hex
+        arch = {k: v for k, v in entry.items() if k not in ("id", "sent", "result")}
+        arch["aid"] = aid
+        arch["archived_at"] = datetime.now(timezone.utc).isoformat()
+        _archive[aid] = arch
+        _persist_archive()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/archived")
+def list_archived():
+    with _lock:
+        return jsonify([_public(e) for e in _archive.values()])
+
+
+@app.post("/api/archived/<aid>/restore")
+def restore_archived(aid: str):
+    """Pull an archived order back into the pending queue."""
+    with _lock:
+        arch = _archive.pop(aid, None)
+        if not arch:
+            return jsonify({"error": "Archived order not found."}), 404
+        _persist_archive()
+    entry = _add_order(arch["raw_text"])
+    return jsonify(_public(entry))
+
+
 @app.post("/api/update")
 def update():
     """Pull the latest code, refresh deps and restart the LaunchAgents.
@@ -291,6 +408,11 @@ INDEX_HTML = """
     .mismatch { background: rgba(217,119,6,.12); border: 1px solid rgba(217,119,6,.5);
                 color: #b45309; border-radius: 8px; padding: .5rem .7rem; margin: .2rem 0 .7rem;
                 font-size: .85rem; font-weight: 600; }
+    .archived-note { background: rgba(37,99,235,.1); border: 1px solid rgba(37,99,235,.4);
+                color: #1d4ed8; border-radius: 8px; padding: .5rem .7rem; margin: .2rem 0 .7rem;
+                font-size: .83rem; }
+    .linkbtn { background: none; color: #1d4ed8; text-decoration: underline; padding: 0 .2rem;
+               font-size: .83rem; font-weight: 700; }
     .actions { display: flex; gap: .5rem; }
     #msg { min-height: 1.2rem; margin-bottom: .8rem; }
     .meta.clickable { cursor: pointer; }
@@ -365,8 +487,8 @@ INDEX_HTML = """
 const msg = (t, cls='muted') => { const m=document.getElementById('msg'); m.className=cls; m.textContent=t; };
 
 async function load() {
-  const r = await fetch('/api/orders');
-  render(await r.json());
+  const [ro, ra] = await Promise.all([fetch('/api/orders'), fetch('/api/archived')]);
+  render(await ro.json(), await ra.json());
 }
 
 function card(o) {
@@ -385,6 +507,16 @@ function card(o) {
   const mismatch = o.total_mismatch
     ? `<div class="mismatch">⚠ El total no cuadra: parseado ${money(o.parsed_total)} vs orden ${money(o.subtotal)} — pueden faltar items. Revisa el detalle antes de enviar.</div>`
     : '';
+  // This order number already has an archived copy — warn and offer to pull it out,
+  // showing whether the fresh scan is identical or what changed.
+  const am = o.archived_match;
+  const archNote = am
+    ? `<div class="archived-note">📦 Ya hay una versión <b>archivada</b> de #${o.order_number} (${fmtDate(am.archived_at)}). `
+      + (am.identical
+          ? '✓ El nuevo escaneo es idéntico.'
+          : `⚠ Difiere del nuevo escaneo: ${am.summary}.`)
+      + ` <button class="linkbtn" onclick="doRestore('${am.aid}')">Sacar del archivo</button></div>`
+    : '';
   return `<div class="card">
       <div class="meta clickable" onclick="toggleDetail(${o.id})" title="Show pick detail">
         <span>Order <b>#${o.order_number ?? '—'}</b></span>
@@ -396,11 +528,38 @@ function card(o) {
       </div>
       <div class="detail" id="detail-${o.id}" style="display:none;"></div>
       ${mismatch}
+      ${archNote}
       ${ship}${notes}
       ${status}
       <div class="actions">
         <button class="send" ${o.sent?'disabled':''} onclick="doSend(${o.id})">${o.sent?'Sent ✓':'Send to PickD'}</button>
+        ${o.sent?'':`<button class="secondary" onclick="doArchive(${o.id})">Archive</button>`}
         <button class="secondary" onclick="doRemove(${o.id})">Remove</button>
+      </div>
+    </div>`;
+}
+
+function fmtDate(s) {
+  if (!s) return '';
+  const d = new Date(s);
+  return isNaN(d) ? s : d.toLocaleString();
+}
+
+function archCard(a) {
+  const via = a.ship_via ? `<span class="shipvia">🚚 ${a.ship_via}</span>` : '';
+  const ship = a.shipping_address ? `<div class="muted">📍 Ship to: ${a.shipping_address}</div>` : '';
+  return `<div class="card">
+      <div class="meta">
+        <span>Order <b>#${a.order_number ?? '—'}</b></span>
+        <span>Customer <b>${a.customer}</b></span>
+        <span>Items <b>${a.item_count}</b></span>
+        <span>Total units <b>${a.total_units ?? '—'}</b></span>
+        ${via}
+      </div>
+      <div class="muted">📦 Archivada ${fmtDate(a.archived_at)}</div>
+      ${ship}
+      <div class="actions">
+        <button class="secondary" onclick="doRestore('${a.aid}')">Restaurar a pendientes</button>
       </div>
     </div>`;
 }
@@ -472,7 +631,7 @@ async function toggleDetail(id) {
   }
 }
 
-function render(orders) {
+function render(orders, archived) {
   const list = document.getElementById('list');
   const active = orders.filter(o => !o.sent);
   const sent = orders.filter(o => o.sent);
@@ -488,6 +647,13 @@ function render(orders) {
     html += `<details style="margin-top:1rem;">
       <summary class="muted" style="cursor:pointer;">✓ Sent to PickD (${sent.length})</summary>
       <div style="margin-top:.6rem;">${sent.map(card).join('')}</div>
+    </details>`;
+  }
+  // Archived orders persist locally across restarts; collapsed by default.
+  if (archived && archived.length) {
+    html += `<details style="margin-top:1rem;">
+      <summary class="muted" style="cursor:pointer;">📦 Archived (${archived.length})</summary>
+      <div style="margin-top:.6rem;">${archived.map(archCard).join('')}</div>
     </details>`;
   }
   list.innerHTML = html;
@@ -570,6 +736,18 @@ async function doRemove(id) {
   await load();
 }
 
+async function doArchive(id) {
+  const r = await fetch(`/api/orders/${id}/archive`, {method:'POST'});
+  msg(r.ok ? 'Order archived (saved locally).' : 'Could not archive.', r.ok ? 'ok' : 'err');
+  await load();
+}
+
+async function doRestore(aid) {
+  const r = await fetch(`/api/archived/${aid}/restore`, {method:'POST'});
+  msg(r.ok ? 'Restored to pending.' : 'Could not restore.', r.ok ? 'ok' : 'err');
+  await load();
+}
+
 async function doUpdate() {
   if (!confirm('Update the app to the latest version?\\nIt will pull the new code, install libraries and restart — the window reopens automatically.')) return;
   const btn = document.getElementById('upd'); btn.disabled = true;
@@ -593,4 +771,5 @@ load();
 
 
 if __name__ == "__main__":
+    _load_archive()
     app.run(host="127.0.0.1", port=PORT, debug=False)
