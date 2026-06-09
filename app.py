@@ -29,6 +29,8 @@ load_dotenv()  # must run before importing modules that read env at import time
 
 from flask import Flask, abort, jsonify, render_template_string, request  # noqa: E402
 
+import auto_scanner  # noqa: E402
+import scanned_store  # noqa: E402
 from as400_capture import (  # noqa: E402
     AS400Disconnected,
     AS400ManualLoginRequired,
@@ -38,6 +40,7 @@ from as400_capture import (  # noqa: E402
     capture_order,
     classify_screen,
 )
+from auto_scanner import capture_lock, manual_waiting, start_auto_scanner  # noqa: E402
 from pipeline import preview_order, process_order_text, resolve_order_items  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
@@ -238,8 +241,22 @@ def capture():
     if not order_number:
         return jsonify({"error": "Missing order number."}), 400
 
+    # If the auto-scanner already captured this order, reuse the cached AS400 text
+    # instead of driving Mocha again (faster, and works even if the session is busy).
+    cached = scanned_store.get(order_number)
+    if cached:
+        entry = _add_order(cached["raw_text"])
+        with _lock:
+            entry["from_cache"] = True
+        return jsonify({**_public(entry), "from_cache": True})
+
+    # Not cached → drive Mocha. Take priority over the auto-scanner: announce we're
+    # waiting (so an in-flight scan cycle yields), then hold the shared capture lock.
+    manual_waiting.set()
     try:
-        raw_text = capture_order(order_number, MochaDriver())
+        with capture_lock:
+            manual_waiting.clear()
+            raw_text = capture_order(order_number, MochaDriver())
     except AS400Disconnected as e:
         return jsonify({"error": str(e), "state": "disconnected"}), 503
     except AS400ManualLoginRequired as e:
@@ -248,6 +265,20 @@ def capture():
         return jsonify({"error": str(e)}), 422
     except Exception as e:  # AppleScript / clipboard / environment failures
         return jsonify({"error": f"Error capturing from AS400: {e}"}), 500
+    finally:
+        manual_waiting.clear()
+
+    # Record the manual capture in the scanned cache too, so a later PDF/recapture
+    # of the same number reuses it instead of re-driving Mocha.
+    try:
+        scanned_store.put(
+            order_number,
+            raw_text,
+            auto_scanner._meta_from_preview(preview_order(raw_text)),
+            source="manual_capture",
+        )
+    except Exception as e:
+        logging.warning("Could not cache manual capture #%s: %s", order_number, e)
 
     entry = _add_order(raw_text)
     return jsonify(_public(entry))
@@ -717,7 +748,8 @@ async function doCapture() {
                                             body: JSON.stringify({order_number: num})});
     const data = await r.json();
     if (!r.ok) { msg(data.error || 'Error capturing.', 'err'); }
-    else { msg(`Captured order #${data.order_number ?? '—'} (${data.item_count} items, ${data.total_units} units).`, 'ok');
+    else { const fc = data.from_cache ? ' · ya escaneada por el auto-scan' : '';
+           msg(`Captured order #${data.order_number ?? '—'} (${data.item_count} items, ${data.total_units} units)${fc}.`, 'ok');
            document.getElementById('num').value=''; }
   } catch(e) { msg('Network error: '+e, 'err'); }
   finally { btn.disabled = false; await load(); document.getElementById('num').focus(); }
@@ -772,4 +804,5 @@ load();
 
 if __name__ == "__main__":
     _load_archive()
+    start_auto_scanner()
     app.run(host="127.0.0.1", port=PORT, debug=False)

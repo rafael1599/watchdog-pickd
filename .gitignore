@@ -1,6 +1,8 @@
 .env
 .negative_counter
 .archived_orders.json
+.scanned_orders.json
+.scanned_orders.json.tmp
 __pycache__/
 *.pdf
 .DS_Store

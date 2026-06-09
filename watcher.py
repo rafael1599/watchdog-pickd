@@ -25,7 +25,9 @@ from dotenv import load_dotenv
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+import scanned_store
 from extractor import extract_text
+from parser import parse_order_number
 from pipeline import process_order_text
 
 load_dotenv()
@@ -71,8 +73,19 @@ def process_pdf(pdf_path: str):
         # 1. Extract text from the PDF
         text = extract_text(pdf_path)
 
-        # 2. Run the shared ingestion pipeline (parse → Supabase)
-        result = process_order_text(text, source_name=file_name)
+        # 2. Prefer a cached AS400 capture of this order over the PDF. The auto-
+        # scanner captures straight from AS400 (the complete, source-of-truth text);
+        # the PDF parse is the lossier path. If the dropped PDF's order number is
+        # already in the scanned cache, send THAT capture instead.
+        order_number = parse_order_number(text)
+        cached = scanned_store.get(order_number) if order_number else None
+        if cached:
+            log.info(
+                f"   📦 Order #{order_number} found in scanned cache — sending the AS400 capture."
+            )
+            result = process_order_text(cached["raw_text"], source_name=f"scanned:{order_number}")
+        else:
+            result = process_order_text(text, source_name=file_name)
         status = result["status"]
 
         # 3. Route the file based on the outcome
