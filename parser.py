@@ -84,17 +84,20 @@ def parse_items(text: str) -> List[Dict]:
     lines = text.split("\n")
 
     # Pattern to match item lines:
-    #   qty_ord  qty_ship  <dept> <number> <color><variant?>  W/H  description  unit  extend
+    #   qty_ord  qty_ship  <dept> <number> [<color><variant?>]  W/H  description  unit  extend
     #
-    # The Stock# is captured CANONICALLY: a 2-digit dept, a 4-digit number, and a
-    # 2-letter color. Some PDFs append an extra finish/variant letter glued to the
-    # color (e.g. '03 3768 BLD' where the canonical SKU is '03-3768BL'); that suffix
-    # is captured separately so it never pollutes the SKU. The W/H is the next single
-    # letter, keeping the description out of the SKU.
+    # The Stock# is captured CANONICALLY: a 2-digit dept, a 4-digit number, and an
+    # OPTIONAL 2-letter color. Bikes carry a color (e.g. '03 3927 BK'); parts and
+    # generic stock have none (e.g. '01 0449', '12 2502', '66 1200') and go straight
+    # from the number to the W/H column — those must still be captured. Some PDFs
+    # append an extra finish/variant letter glued to the color (e.g. '03 3768 BLD'
+    # where the canonical SKU is '03-3768BL'); that suffix is captured separately so
+    # it never pollutes the SKU. The W/H is the next single letter, keeping the
+    # description out of the SKU.
     item_pattern = re.compile(
         r"^\s*(\d+)\s+(\d+)\s+"  # 1 qty_ord, 2 qty_ship
-        r"(\d{2})\s?(\d{4})\s?"  # 3 dept, 4 number
-        r"([A-Z]{2})([A-Z]*)\s+"  # 5 color (canonical, 2 letters), 6 finish/variant suffix
+        r"(\d{2})\s?(\d{4})\s+"  # 3 dept, 4 number (column gap)
+        r"(?:([A-Z]{2})([A-Z]*)\s+)?"  # 5 color (optional, 2 letters), 6 finish/variant suffix
         r"([A-Z])\s+"  # 7 warehouse code (single letter like N)
         r"(.+?)\s+"  # 8 description (non-greedy)
         r"([\d,]*\.\d{2})\s+"  # 9 unit price (allow ".00" with no leading digits)
@@ -105,11 +108,12 @@ def parse_items(text: str) -> List[Dict]:
         match = item_pattern.match(line)
         if match:
             qty_ordered = int(match.group(1))
+            # color/variant are optional (parts have no color code) → default to "".
             dept, number, color, variant = (
                 match.group(3),
                 match.group(4),
-                match.group(5),
-                match.group(6),
+                match.group(5) or "",
+                match.group(6) or "",
             )
             warehouse = match.group(7).strip()
             description = match.group(8).strip()

@@ -61,6 +61,54 @@ def test_zero_padded_prices():
     assert it["unit_price"] == 0.0
 
 
+def test_part_without_color_code_is_parsed():
+    # Reported bug (order 880092): parts/generic stock have NO 2-letter color code,
+    # they go straight from the number to the W/H column. The mandatory-color regex
+    # dropped them, so a 13-item order only imported its 7 colored bikes.
+    it = _one("     1      1  01 0449     N   S/D ALLEGRO A3 15 INK           268.95    268.95")
+    assert it["sku"] == "010449"
+    assert it["raw_sku"] == "01 0449"
+    assert it["warehouse"] == "N"
+    assert it["description"] == "S/D ALLEGRO A3 15 INK"
+    assert it["qty"] == 1
+    assert it["unit_price"] == 268.95
+
+
+def test_misc_warehouse_parts_without_color():
+    it = _one("     1      1  12 2502     N   HANDLEBAR COMMUTER 2008 BLACK     5.95      5.95")
+    assert it["sku"] == "122502"
+    assert it["description"] == "HANDLEBAR COMMUTER 2008 BLACK"
+
+    it = _one("     1      1  66 1200     N   HANDLEBAR CYCLERITE 2PC          12.95     12.95")
+    assert it["sku"] == "661200"
+    assert it["description"] == "HANDLEBAR CYCLERITE 2PC"
+
+
+def test_full_order_880092_imports_all_13_lines():
+    # The exact AS400 capture that only imported 7 of 13 lines.
+    text = """     1      1  01 0449     N   S/D ALLEGRO A3 15 INK           268.95    268.95
+     1      1  01 0450     N   S/D CODA S3       21 INK        268.95    268.95
+     1      1  01 0453     N   S/D ALLEGRO A3 ST 14            268.95    268.95
+     1      1  01 0465     N   S/D ALLEGRO A3 15 INK           285.95    285.95
+     1      1  03 3927 BK  N   CODA S2 21 2025 GLOSS BLACK     428.95    428.95
+     1      1  03 3928 BL  N   CODA S2 21 2025 NAVY PEARL      428.95    428.95
+     1      1  03 3930 BL  N   CODA S2 23 2025 NAVY PEARL      428.95    428.95
+     1      1  03 4275 GN  N   RENEGADE A1 LTD 58 2025 MASH    680.95    680.95
+     1      1  03 4276 BK  N   RENEGADE A1 LTD 61 2025 BLACK   680.95    680.95
+     1      1  03 4537 GY  N   ALLEGRO A2 17 2025 FLINT        544.95    544.95
+     1      1  03 4541 GY  N   ALLEGRO A2 21 2025 FLINT        544.95    544.95
+     1      1  12 2502     N   HANDLEBAR COMMUTER 2008 BLACK     5.95      5.95
+     1      1  66 1200     N   HANDLEBAR CYCLERITE 2PC          12.95     12.95"""
+    items = parse_items(text)
+    assert len(items) == 13
+    skus = [it["sku"] for it in items]
+    assert skus == [
+        "010449", "010450", "010453", "010465",
+        "033927BK", "033928BL", "033930BL", "034275GN",
+        "034276BK", "034537GY", "034541GY", "122502", "661200",
+    ]
+
+
 def test_non_item_lines_are_ignored():
     text = """ Quant  Quant  Stock #   W/H   Description                       Unit    Extend
  Order Number: 880009
