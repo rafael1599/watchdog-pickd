@@ -19,6 +19,7 @@ from as400_capture import (
     AS400ManualLoginRequired,
     CaptureError,
     _has_end_marker,
+    _is_invalid_order,
     bootstrap_session,
     capture_order,
     classify_screen,
@@ -254,6 +255,27 @@ def test_rejects_wrong_view_without_looping():
     with pytest.raises(CaptureError):
         capture_order("880013", driver, page_wait=0)
     assert driver.keys == ["f6"]  # F6 only; no F5, no ENTER loop
+
+
+# Search screen showing the rejection for a not-yet-registered order number.
+INVALID_ORDER_SCREEN = """                            O R D E R   I N Q U I R Y
+ Order Number:                              Account Number:
+ Invalid Order Number, REENTER"""
+
+
+def test_is_invalid_order_detects_message():
+    assert _is_invalid_order(INVALID_ORDER_SCREEN)
+    assert _is_invalid_order("...  I n v a l i d  O r d e r  N u m b e r , REENTER")
+    assert not _is_invalid_order(ORDER_HEADER_SCREEN)
+
+
+def test_invalid_order_number_stops_without_paging():
+    # After typing a number that isn't a real order yet, AS400 shows 'Invalid Order
+    # Number, REENTER'. Capture must stop (so the scanner retries it later), never F5.
+    driver = FakeDriver([READY, INVALID_ORDER_SCREEN])
+    with pytest.raises(CaptureError):
+        capture_order("999999", driver, page_wait=0)
+    assert driver.keys == ["f6"]  # fresh search only; no F5/ENTER paging
 
 
 def test_capture_aborts_before_typing_when_disconnected():
