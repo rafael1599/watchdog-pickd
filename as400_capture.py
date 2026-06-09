@@ -383,8 +383,7 @@ def capture_order(
     # and stop here (the auto-scanner retries this same number next cycle).
     if _is_invalid_order(header):
         raise CaptureError(
-            f"Order {order_number} doesn't exist yet "
-            f"(AS400: 'Invalid Order Number, REENTER')."
+            f"Order {order_number} doesn't exist yet (AS400: 'Invalid Order Number, REENTER')."
         )
 
     # Guard: if this isn't an order view we're on the wrong screen (a menu, etc.)

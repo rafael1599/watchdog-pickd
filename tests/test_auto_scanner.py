@@ -19,6 +19,7 @@ from as400_capture import AS400Disconnected, CaptureError  # noqa: E402
 @pytest.fixture(autouse=True)
 def tmp_store(tmp_path, monkeypatch):
     monkeypatch.setenv("SCANNED_STORE_PATH", str(tmp_path / "scanned.json"))
+    monkeypatch.setenv("SCAN_CURSOR_PATH", str(tmp_path / "scan_cursor"))
 
 
 def _preview(text):
