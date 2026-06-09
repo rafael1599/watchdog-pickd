@@ -15,6 +15,8 @@ Flow:
 The capture layer only works on macOS. Sending requires the Supabase env vars (.env).
 """
 
+from __future__ import annotations  # PEP 563: keep "dict | None" annotations working on Python 3.9
+
 import json
 import logging
 import subprocess

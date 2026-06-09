@@ -24,6 +24,8 @@ Shape:
     }
 """
 
+from __future__ import annotations  # PEP 563: keep "dict | None" annotations working on Python 3.9
+
 import json
 import logging
 import os
