@@ -43,6 +43,22 @@ def parse_account_number(text: str) -> Optional[str]:
     return None
 
 
+def parse_order_subtotal(text: str) -> Optional[float]:
+    """
+    Extract the order Sub-Total from the header, e.g. 'Sub-Total   4850.35'.
+
+    The Sub-Total is the sum of the line items' extended prices (before freight),
+    so it is the reconciliation anchor: if our parsed items don't add up to it, a
+    line was dropped or misparsed. We prefer 'Sub-Total'; if absent we fall back to
+    'Order Total' (equal when there is no freight). Returns None if neither is found.
+    """
+    for label in (r"Sub-?Total", r"Order\s+Total"):
+        m = re.search(rf"{label}\s+([\d,]*\.\d{{2}})", text, re.IGNORECASE)
+        if m:
+            return float(m.group(1).replace(",", ""))
+    return None
+
+
 def parse_customer_name(text: str) -> Optional[str]:
     """
     Extract the customer (Bill-to) name from the 'Bill' line.
@@ -384,6 +400,7 @@ def parse_order(text: str) -> dict:
         "account_number": parse_account_number(text),
         "customer_name": parse_customer_name(text),
         "items": parse_items(text),
+        "subtotal": parse_order_subtotal(text),
         "is_last_page": has_end_of_order(text),
         "order_comments": parse_order_comments(text),
         "shipping_address": parse_shipping_address(text),

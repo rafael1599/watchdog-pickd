@@ -77,6 +77,9 @@ def _add_order(raw_text: str) -> dict:
             "customer": preview["customer"],
             "item_count": preview["item_count"],
             "total_units": preview["total_units"],
+            "subtotal": preview.get("subtotal"),
+            "parsed_total": preview.get("parsed_total"),
+            "total_mismatch": preview.get("total_mismatch", False),
             "ship_via": preview.get("ship_via"),
             "shipping_address": preview.get("shipping_address"),
             "order_comments": preview.get("order_comments"),
@@ -285,6 +288,9 @@ INDEX_HTML = """
     .meta b { font-size: 1.1rem; }
     .muted { color: #6b7280; font-size: .85rem; }
     .ok { color: #16a34a; } .warn { color: #d97706; } .err { color: #dc2626; }
+    .mismatch { background: rgba(217,119,6,.12); border: 1px solid rgba(217,119,6,.5);
+                color: #b45309; border-radius: 8px; padding: .5rem .7rem; margin: .2rem 0 .7rem;
+                font-size: .85rem; font-weight: 600; }
     .actions { display: flex; gap: .5rem; }
     #msg { min-height: 1.2rem; margin-bottom: .8rem; }
     .meta.clickable { cursor: pointer; }
@@ -373,6 +379,12 @@ function card(o) {
   const ship = o.shipping_address ? `<div class="muted">📍 Ship to: ${o.shipping_address}</div>` : '';
   const notes = o.order_comments ? `<div class="muted">📝 Notes: ${o.order_comments}</div>` : '';
   const via = o.ship_via ? `<span class="shipvia">🚚 ${o.ship_via}</span>` : '';
+  // Reconciliation: parsed line total vs the order Sub-Total. A mismatch means a
+  // line was likely dropped/misparsed — warn loudly but still allow sending.
+  const money = n => '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  const mismatch = o.total_mismatch
+    ? `<div class="mismatch">⚠ El total no cuadra: parseado ${money(o.parsed_total)} vs orden ${money(o.subtotal)} — pueden faltar items. Revisa el detalle antes de enviar.</div>`
+    : '';
   return `<div class="card">
       <div class="meta clickable" onclick="toggleDetail(${o.id})" title="Show pick detail">
         <span>Order <b>#${o.order_number ?? '—'}</b></span>
@@ -383,6 +395,7 @@ function card(o) {
         <span class="chev" id="chev-${o.id}">▾ detail</span>
       </div>
       <div class="detail" id="detail-${o.id}" style="display:none;"></div>
+      ${mismatch}
       ${ship}${notes}
       ${status}
       <div class="actions">
