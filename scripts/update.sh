@@ -105,7 +105,7 @@ restart_agent "com.antigravity.pickd-app" free_port
 
 # 5. Verify the app is really serving, then open it. We open ONLY once the server
 # answers — opening a not-yet-ready server is what produces the endless blank page.
-say "▶ [5/5] Waiting for the capture app to answer on $APP_URL…"
+say "▶ [5/5] Waiting for the capture app to answer on ${APP_URL} ..."
 if [ -f "$HOME/Library/LaunchAgents/com.antigravity.pickd-app.plist" ]; then
   up=""
   for i in $(seq 1 60); do

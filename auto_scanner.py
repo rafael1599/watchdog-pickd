@@ -17,6 +17,9 @@ Only the threaded runner touches macOS/Mocha; `run_scan_cycle` is pure (takes a
 driver + injectable capture/preview fns) and is unit-tested with a fake driver.
 """
 
+# PEP 563: defer annotations so "X | None" hints work on Python 3.9 (Bay 2 Mac).
+from __future__ import annotations
+
 import logging
 import os
 import threading
