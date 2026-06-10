@@ -77,6 +77,9 @@ def test_process_pdf_falls_back_to_pdf_when_not_cached(monkeypatch):
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(appmod, "ARCHIVE_PATH", tmp_path / "archived.json")
+    # Default: nothing exists in PickD (no network). Tests override as needed.
+    monkeypatch.setattr(appmod, "find_orders_in_pickd", lambda nums: set())
+    appmod._pickd_check.update({"at": 0.0, "found": set()})
     appmod._orders.clear()
     appmod._archive.clear()
     appmod._next_id = 1
@@ -168,6 +171,60 @@ def test_manual_capture_of_junk_is_not_cached(client, monkeypatch):
     monkeypatch.setattr(appmod, "MochaDriver", lambda *a, **k: object())
     client.post("/api/capture", json={"order_number": "999999"}, headers=HDR)
     assert scanned_store.get("999999") is None  # junk never re-enters the cache
+
+
+# --- already-in-PickD filtering -----------------------------------------------
+
+
+def test_candidate_already_in_pickd_is_flagged_and_persisted(client, monkeypatch):
+    scanned_store.put("880112", CAPTURE_112, {"order_number": "880112"}, source="auto_scan")
+    monkeypatch.setattr(appmod, "find_orders_in_pickd", lambda nums: set(nums))
+    data = client.get("/api/orders", headers=HDR).get_json()
+    o = next(o for o in data if o["order_number"] == "880112")
+    assert o["in_pickd"] is True
+    # Persisted in the cache (survives a restart) and the capture is NOT deleted.
+    cached = scanned_store.get("880112")
+    assert cached is not None and cached.get("in_pickd") is True
+
+
+def test_in_pickd_flag_survives_restart_without_rechecking(client, monkeypatch):
+    scanned_store.put(
+        "880112", CAPTURE_112, {"order_number": "880112", "in_pickd": True}, source="auto_scan"
+    )
+
+    def boom(nums):
+        raise AssertionError("flagged orders must not be re-checked")
+
+    monkeypatch.setattr(appmod, "find_orders_in_pickd", boom)
+    data = client.get("/api/orders", headers=HDR).get_json()
+    o = next(o for o in data if o["order_number"] == "880112")
+    assert o["in_pickd"] is True
+
+
+def test_existence_check_is_throttled(client, monkeypatch):
+    scanned_store.put("880112", CAPTURE_112, {"order_number": "880112"}, source="auto_scan")
+    calls = {"n": 0}
+
+    def counting(nums):
+        calls["n"] += 1
+        return set()
+
+    monkeypatch.setattr(appmod, "find_orders_in_pickd", counting)
+    for _ in range(3):  # simulate the UI's 8s polling
+        client.get("/api/orders", headers=HDR)
+    assert calls["n"] == 1  # one query per TTL window, not per refresh
+
+
+def test_check_failure_keeps_candidates_visible(client, monkeypatch):
+    scanned_store.put("880112", CAPTURE_112, {"order_number": "880112"}, source="auto_scan")
+
+    def fail(nums):
+        raise RuntimeError("supabase unreachable")
+
+    monkeypatch.setattr(appmod, "find_orders_in_pickd", fail)
+    data = client.get("/api/orders", headers=HDR).get_json()
+    o = next(o for o in data if o["order_number"] == "880112")
+    assert not o.get("in_pickd")  # fail-open: never hide candidates on errors
 
 
 def test_send_drops_order_from_cache(client, monkeypatch):

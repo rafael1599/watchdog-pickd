@@ -19,8 +19,10 @@ from __future__ import annotations  # PEP 563: keep "dict | None" annotations wo
 
 import json
 import logging
+import os
 import subprocess
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +46,7 @@ from as400_capture import (  # noqa: E402
 )
 from auto_scanner import capture_lock, manual_waiting, start_auto_scanner  # noqa: E402
 from pipeline import preview_order, process_order_text, resolve_order_items  # noqa: E402
+from supabase_client import find_orders_in_pickd  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
 
@@ -228,13 +231,57 @@ def _sync_scanned_into_orders() -> None:
             entry["cache_key"] = cache_key
             entry["scanned_at"] = e.get("scanned_at")
             entry["source"] = e.get("source", "auto_scan")
+            entry["in_pickd"] = bool(e.get("in_pickd"))
         existing.add(entry["order_number"])
         materialized.add(cache_key)
+
+
+# Throttle for the batched "does it already exist in PickD?" check, so the UI's
+# periodic refresh doesn't query Supabase every 8s. One tiny query per TTL.
+PICKD_CHECK_TTL_SEC = float(os.getenv("PICKD_CHECK_TTL_SEC", "60"))
+_pickd_check = {"at": 0.0, "found": set()}
+
+
+def _refresh_pickd_status() -> None:
+    """Mark candidates that already exist in PickD (batched + throttled).
+
+    Orders reach PickD by other paths too (PDF drop, another machine), so a
+    candidate sitting in this list may already be there — noise the operator
+    asked to filter out. find_orders_in_pickd applies the same membership rule
+    as the send pipeline (exact or inside a combined "A / B" number). Matches
+    are flagged in_pickd (persisted in the scanned cache, so the flag survives
+    a restart) and the UI moves them to a collapsed section. Nothing is deleted.
+    """
+    with _lock:
+        pending = {
+            o["order_number"]: o
+            for o in _orders.values()
+            if o.get("order_number") and not o["sent"] and not o.get("in_pickd")
+        }
+    if not pending:
+        return
+    now = time.time()
+    if now - _pickd_check["at"] < PICKD_CHECK_TTL_SEC:
+        found = _pickd_check["found"]
+    else:
+        try:
+            found = find_orders_in_pickd(list(pending))
+        except Exception as e:
+            logging.warning("PickD existence check failed: %s", e)
+            return
+        _pickd_check["at"] = now
+        _pickd_check["found"] = found
+    for num, entry in pending.items():
+        if num in found:
+            with _lock:
+                entry["in_pickd"] = True
+            scanned_store.update_meta(num, in_pickd=True)
 
 
 @app.get("/api/orders")
 def list_orders():
     _sync_scanned_into_orders()
+    _refresh_pickd_status()
     with _lock:
         # Newest first (by id, which increments as orders are added).
         ordered = sorted(_orders.values(), key=lambda o: o["id"], reverse=True)
@@ -756,7 +803,10 @@ document.addEventListener('click', closeMenus);
 
 function render(orders, archived) {
   const list = document.getElementById('list');
-  const active = orders.filter(o => !o.sent);
+  // Candidates = not sent AND not already living in PickD. Orders detected in the
+  // DB (sent by PDF / another path) are noise here — they collapse below.
+  const active = orders.filter(o => !o.sent && !o.in_pickd);
+  const inPickd = orders.filter(o => !o.sent && o.in_pickd);
   const sent = orders.filter(o => o.sent);
 
   let html = '';
@@ -766,6 +816,14 @@ function render(orders, archived) {
     // Auto-scanned and manual captures are one unified list — each is a full,
     // sendable card (no separate "load to review" step) and deduped by order #.
     html += active.map(card).join('');
+  }
+  // Already in PickD (arrived via PDF or elsewhere) — kept locally, out of the way.
+  // Cards keep their Send button: re-sending appends any missing SKUs (delta).
+  if (inPickd.length) {
+    html += `<details style="margin-top:1rem;">
+      <summary class="muted" style="cursor:pointer;">✓ Already in PickD (${inPickd.length})</summary>
+      <div style="margin-top:.6rem;">${inPickd.map(card).join('')}</div>
+    </details>`;
   }
   // Sent orders are hidden in a collapsed section so they don't clutter the list.
   if (sent.length) {

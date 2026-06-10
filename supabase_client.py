@@ -63,10 +63,25 @@ def check_duplicate(pdf_hash: str) -> Optional[dict]:
     return None
 
 
+def split_order_numbers(db_order_number: Optional[str]) -> list:
+    """Split a picking_lists.order_number into its member numbers.
+
+    Combined orders in PickD store their numbers joined with ' / '
+    (e.g. "880106 / 880107"). A single order yields a one-element list.
+    """
+    return [s.strip() for s in (db_order_number or "").split(" / ") if s.strip()]
+
+
 def find_existing_order(order_number: str) -> Optional[dict]:
     """
     Find an existing picking list by order number.
     Returns the most recent one (could be active or completed).
+
+    Matches the number EXACTLY or as a member of a combined order
+    ("880106 / 880107") — an eq-only lookup misses combined membership, which
+    let a re-send of 880107 slip past the existing-order path. The LIKE narrows
+    server-side; membership is verified client-side via split_order_numbers so a
+    substring like '1880107' can't false-positive.
     """
     client = get_client()
     result = (
@@ -79,7 +94,52 @@ def find_existing_order(order_number: str) -> Optional[dict]:
     )
     if result.data and len(result.data) > 0:
         return result.data[0]
+
+    result = (
+        client.table("picking_lists")
+        .select("*")
+        .like("order_number", f"%{order_number}%")
+        .order("updated_at", desc=True)
+        .limit(10)
+        .execute()
+    )
+    for row in result.data or []:
+        if str(order_number) in split_order_numbers(row.get("order_number")):
+            return row
     return None
+
+
+# How far back the batched existence check looks. The scanner only walks recent
+# numbers, so a short window keeps the query tiny (one column, ~100-200 rows).
+PICKD_RECENT_DAYS = int(os.getenv("PICKD_RECENT_DAYS", "14"))
+
+
+def find_orders_in_pickd(numbers: list) -> set:
+    """Return the subset of `numbers` that already exist in PickD (one query).
+
+    Pulls only order_number+status for recent picking_lists and matches each
+    candidate exactly OR as a member of a combined order — the same membership
+    rule as find_existing_order, so the send pipeline and the watcher UI agree
+    on what "already in PickD" means. Cancelled orders don't count (a cancelled
+    order is re-orderable, so its number stays a valid candidate).
+    """
+    wanted = {str(n) for n in numbers if n}
+    if not wanted:
+        return set()
+    client = get_client()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=PICKD_RECENT_DAYS)).isoformat()
+    result = (
+        client.table("picking_lists")
+        .select("order_number, status")
+        .gte("created_at", cutoff)
+        .execute()
+    )
+    present = set()
+    for row in result.data or []:
+        if row.get("status") == "cancelled":
+            continue
+        present.update(split_order_numbers(row.get("order_number")))
+    return wanted & present
 
 
 def create_order(order_data: dict, pdf_hash: str, file_name: str) -> dict:

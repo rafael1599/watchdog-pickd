@@ -129,6 +129,16 @@ def put(order_number, raw_text: str, meta: dict | None = None, source: str = "au
     return entry
 
 
+def update_meta(order_number, **meta) -> None:
+    """Merge extra fields into a cached entry (e.g. in_pickd=True). No-op if absent."""
+    key = str(order_number)
+    with _lock:
+        data = load()
+        if key in data:
+            data[key].update(meta)
+            _save(data)
+
+
 def delete(order_number) -> None:
     """Remove an order from the cache (e.g. after archiving it). Does NOT rewind the
     cursor, so the scanner won't re-capture the removed number."""
