@@ -38,8 +38,21 @@ El watcher se instala automaticamente como LaunchAgent en macOS (`com.antigravit
 ./scripts/update.sh main   # o una rama especifica
 ```
 
-Hace `git pull` (fast-forward), reinstala dependencias en el venv y reinicia los
+Hace `git pull` (fast-forward), reinstala dependencias en el venv, **aplica las
+migraciones de esquema** (`migrations.py`, idempotente) y reinicia los
 LaunchAgents (`com.antigravity.watchdog-pickd` y `com.antigravity.pickd-app`).
+El botón "⟳ Update app" de la UI dispara el mismo script.
+
+### Migraciones de esquema (`migrations.py`)
+
+El watcher escribe columnas en la tabla compartida `picking_lists` de PickD (ej.
+`source_order_date`). PostgREST **descarta silenciosamente** columnas inexistentes
+en los inserts, así que la columna debe existir o el dato se pierde sin error.
+`migrations.py` aplica el DDL requerido (`ADD COLUMN IF NOT EXISTS`, idempotente)
+vía una conexión directa a Postgres (`SUPABASE_DB_URL`). El service role key NO
+sirve para DDL (PostgREST no expone DDL). Corre en `update.sh` después del `git
+pull`; si `SUPABASE_DB_URL` no está seteada, se omite sin fallar. Coexiste con la
+migración propia de PickD (ambas usan `IF NOT EXISTS`).
 
 ## Estructura
 
@@ -57,6 +70,8 @@ LaunchAgents (`com.antigravity.watchdog-pickd` y `com.antigravity.pickd-app`).
 - `SUPABASE_SERVICE_ROLE_KEY` — Service role key (bypass RLS)
 - `PDF_IMPORT_USER_ID` — User ID para asociar imports
 - `WATCH_PATH` — Carpeta a monitorear (default: `./inbox`)
+- `SUPABASE_DB_URL` — Connection string directo a Postgres (URI), solo para aplicar
+  migraciones de esquema en el update. Opcional; si falta, el paso se omite.
 
 ## Linting
 
