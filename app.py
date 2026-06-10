@@ -194,25 +194,42 @@ def _sync_scanned_into_orders() -> None:
     """Materialize auto-scanned cache entries as full, sendable orders.
 
     The auto-scanner stores captures in scanned_store; we surface each as a normal
-    order card (no separate 'load to review' step). Deduped by order_number so a
-    manual capture (also stored in the cache) never shows twice. Sent/archived/
-    removed orders are deleted from the cache, so they don't re-appear here.
+    order card (no separate 'load to review' step). Deduped by order_number AND by
+    cache key, so a manual capture never shows twice. Sent/archived/removed orders
+    are deleted from the cache, so they don't re-appear here.
+
+    Junk guard: a cache entry whose raw_text doesn't parse to a real order (no
+    order number or zero items — e.g. an 'Invalid Order Number, REENTER' screen
+    cached by an older scanner) is PURGED from the cache instead of surfaced.
+    Without this, its parsed order_number is None, the dedup-by-number never
+    matches, and every refresh re-adds another empty 'Order #—' card.
     """
     cache = scanned_store.load()
     with _lock:
         existing = {o["order_number"] for o in _orders.values() if o.get("order_number")}
-    for order_number, e in cache.items():
-        if order_number in existing:
+        materialized = {o.get("cache_key") for o in _orders.values() if o.get("cache_key")}
+    for cache_key, e in cache.items():
+        if cache_key in existing or cache_key in materialized:
             continue
         raw = e.get("raw_text")
         if not raw:
+            scanned_store.delete(cache_key)
             continue
         entry = _add_order(raw)
+        if not entry.get("order_number") or not (entry.get("item_count") or 0):
+            # Junk capture: drop it from both the session list and the cache.
+            with _lock:
+                _orders.pop(entry["id"], None)
+            scanned_store.delete(cache_key)
+            logging.warning("Purged junk scanned entry %s (no order number/items)", cache_key)
+            continue
         with _lock:
             entry["from_cache"] = True
+            entry["cache_key"] = cache_key
             entry["scanned_at"] = e.get("scanned_at")
             entry["source"] = e.get("source", "auto_scan")
-        existing.add(order_number)
+        existing.add(entry["order_number"])
+        materialized.add(cache_key)
 
 
 @app.get("/api/orders")
@@ -299,14 +316,12 @@ def capture():
         manual_waiting.clear()
 
     # Record the manual capture in the scanned cache too, so a later PDF/recapture
-    # of the same number reuses it instead of re-driving Mocha.
+    # of the same number reuses it instead of re-driving Mocha. Only cache REAL
+    # orders: junk text (e.g. an error screen) would resurface as empty cards.
     try:
-        scanned_store.put(
-            order_number,
-            raw_text,
-            auto_scanner._meta_from_preview(preview_order(raw_text)),
-            source="manual_capture",
-        )
+        meta = auto_scanner._meta_from_preview(preview_order(raw_text))
+        if meta.get("order_number") and (meta.get("item_count") or 0):
+            scanned_store.put(order_number, raw_text, meta, source="manual_capture")
     except Exception as e:
         logging.warning("Could not cache manual capture #%s: %s", order_number, e)
 

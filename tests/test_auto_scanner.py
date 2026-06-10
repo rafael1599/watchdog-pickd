@@ -45,6 +45,22 @@ def test_step_captures_and_advances():
     assert scanned_store.next_scan_number(880112) == 880113
 
 
+def test_step_unparseable_capture_is_not_cached():
+    # A capture that "succeeds" but parses to no order/items (e.g. an error screen
+    # that slipped past the guards) must NOT be cached — junk in the cache floods
+    # the UI with empty cards. Treated as not_found so the number is retried.
+    def cap(n, driver):
+        return "O R D E R   I N Q U I R Y\nInvalid Order Number, REENTER"
+
+    def junk_preview(text):
+        return {"order_number": None, "item_count": 0, "total_units": 0}
+
+    r = auto_scanner.run_scan_step(None, start=880112, capture_fn=cap, preview_fn=junk_preview)
+    assert r["action"] == "not_found"
+    assert scanned_store.get("880112") is None
+    assert scanned_store.next_scan_number(880112) == 880112
+
+
 def test_step_not_found_does_not_advance():
     def cap(n, driver):
         raise OrderNotFound(f"order {n} doesn't exist yet")

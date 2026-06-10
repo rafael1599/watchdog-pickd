@@ -131,6 +131,12 @@ def run_scan_step(
         return {"action": "incomplete", "number": str(n)}
 
     meta = _meta_from_preview(preview_fn(text))
+    # Never cache junk: a real capture must parse to an order with items. The
+    # 'Invalid Order Number, REENTER' screen (and any other non-order text) parses
+    # to no number / no items — caching it floods the UI with empty 'Order #—'
+    # cards. Treat it as not_found so the same number is retried later.
+    if not meta.get("order_number") or not (meta.get("item_count") or 0):
+        return {"action": "not_found", "number": str(n)}
     scanned_store.put(n, text, meta, source="auto_scan")
     return {"action": "captured", "number": str(n)}
 
