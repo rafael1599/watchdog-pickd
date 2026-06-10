@@ -190,10 +190,38 @@ def index():
     return render_template_string(INDEX_HTML)
 
 
+def _sync_scanned_into_orders() -> None:
+    """Materialize auto-scanned cache entries as full, sendable orders.
+
+    The auto-scanner stores captures in scanned_store; we surface each as a normal
+    order card (no separate 'load to review' step). Deduped by order_number so a
+    manual capture (also stored in the cache) never shows twice. Sent/archived/
+    removed orders are deleted from the cache, so they don't re-appear here.
+    """
+    cache = scanned_store.load()
+    with _lock:
+        existing = {o["order_number"] for o in _orders.values() if o.get("order_number")}
+    for order_number, e in cache.items():
+        if order_number in existing:
+            continue
+        raw = e.get("raw_text")
+        if not raw:
+            continue
+        entry = _add_order(raw)
+        with _lock:
+            entry["from_cache"] = True
+            entry["scanned_at"] = e.get("scanned_at")
+            entry["source"] = e.get("source", "auto_scan")
+        existing.add(order_number)
+
+
 @app.get("/api/orders")
 def list_orders():
+    _sync_scanned_into_orders()
     with _lock:
-        return jsonify([_public(o) for o in _orders.values()])
+        # Newest first (by id, which increments as orders are added).
+        ordered = sorted(_orders.values(), key=lambda o: o["id"], reverse=True)
+        return jsonify([_public(o) for o in ordered])
 
 
 @app.post("/api/connect")
@@ -309,6 +337,10 @@ def send(oid: int):
             "combined",
             "duplicate",
         )
+    # Once sent, drop it from the scanned cache so it doesn't re-appear as a fresh
+    # sendable order after an app restart (the entry stays in-session under "Sent").
+    if entry["sent"] and entry.get("order_number"):
+        scanned_store.delete(entry["order_number"])
     return jsonify({**_public(entry), "result": result})
 
 
@@ -337,7 +369,10 @@ def order_detail(oid: int):
 @app.delete("/api/orders/<int:oid>")
 def remove(oid: int):
     with _lock:
-        _orders.pop(oid, None)
+        entry = _orders.pop(oid, None)
+    # Also drop it from the scanned cache, or _sync would just re-add it next load.
+    if entry and entry.get("order_number"):
+        scanned_store.delete(entry["order_number"])
     return jsonify({"ok": True})
 
 
@@ -354,6 +389,9 @@ def archive(oid: int):
         arch["archived_at"] = datetime.now(timezone.utc).isoformat()
         _archive[aid] = arch
         _persist_archive()
+    # Remove from the scanned cache so it doesn't re-sync as a sendable order.
+    if entry.get("order_number"):
+        scanned_store.delete(entry["order_number"])
     return jsonify({"ok": True})
 
 
@@ -373,56 +411,6 @@ def restore_archived(aid: str):
         _persist_archive()
     entry = _add_order(arch["raw_text"])
     return jsonify(_public(entry))
-
-
-@app.get("/api/scanned")
-def list_scanned():
-    """Orders the auto-scanner has captured into the local cache (not yet sent).
-
-    Read-only summary (no raw_text) so the operator can see what the background
-    scanner has picked up. Newest first.
-    """
-    data = scanned_store.load()
-    items = [{k: v for k, v in e.items() if k != "raw_text"} for e in data.values()]
-    items.sort(key=lambda e: e.get("scanned_at") or "", reverse=True)
-    return jsonify(items)
-
-
-@app.post("/api/scanned/<order_number>/load")
-def load_scanned(order_number: str):
-    """Load an auto-scanned order into the pending queue for review and sending."""
-    cached = scanned_store.get(order_number)
-    if not cached:
-        return jsonify({"error": "Scanned order not found."}), 404
-    entry = _add_order(cached["raw_text"])
-    with _lock:
-        entry["from_cache"] = True
-    return jsonify({**_public(entry), "from_cache": True})
-
-
-@app.post("/api/scanned/<order_number>/archive")
-def archive_scanned(order_number: str):
-    """Archive an auto-scanned order directly (without loading it to pending first).
-
-    Moves it into the persisted archive and removes it from the scanned cache. The
-    scan cursor is NOT rewound, so the scanner won't re-capture this number.
-    """
-    cached = scanned_store.get(order_number)
-    if not cached:
-        return jsonify({"error": "Scanned order not found."}), 404
-    # Build the full entry (parse + summary) by reusing _add_order, then move it
-    # straight into the archive instead of leaving it in the pending queue.
-    entry = _add_order(cached["raw_text"])
-    with _lock:
-        e = _orders.pop(entry["id"], None)
-        aid = uuid.uuid4().hex
-        arch = {k: v for k, v in e.items() if k not in ("id", "sent", "result")}
-        arch["aid"] = aid
-        arch["archived_at"] = datetime.now(timezone.utc).isoformat()
-        _archive[aid] = arch
-        _persist_archive()
-    scanned_store.delete(order_number)
-    return jsonify({"ok": True})
 
 
 @app.post("/api/update")
@@ -570,10 +558,8 @@ INDEX_HTML = """
 const msg = (t, cls='muted') => { const m=document.getElementById('msg'); m.className=cls; m.textContent=t; };
 
 async function load() {
-  const [ro, ra, rs] = await Promise.all([
-    fetch('/api/orders'), fetch('/api/archived'), fetch('/api/scanned')
-  ]);
-  render(await ro.json(), await ra.json(), await rs.json());
+  const [ro, ra] = await Promise.all([fetch('/api/orders'), fetch('/api/archived')]);
+  render(await ro.json(), await ra.json());
 }
 
 function card(o) {
@@ -716,43 +702,18 @@ async function toggleDetail(id) {
   }
 }
 
-function scanCard(s) {
-  const via = s.ship_via ? `<span class="shipvia">🚚 ${s.ship_via}</span>` : '';
-  const mm = s.total_mismatch ? '<span class="badge low">TOTAL ≠</span>' : '';
-  return `<div class="card">
-      <div class="meta">
-        <span>Order <b>#${s.order_number ?? '—'}</b>${mm}</span>
-        <span>Customer <b>${s.customer ?? '—'}</b></span>
-        <span>Items <b>${s.item_count ?? '—'}</b></span>
-        <span>Units <b>${s.total_units ?? '—'}</b></span>
-        ${via}
-      </div>
-      <div class="muted">🤖 Auto-scanned ${fmtDate(s.scanned_at)}</div>
-      <div class="actions">
-        <button class="secondary" onclick="doLoadScanned('${s.order_number}')">Load to review</button>
-        <button class="secondary" onclick="doArchiveScanned('${s.order_number}')">Archive</button>
-      </div>
-    </div>`;
-}
-
-function render(orders, archived, scanned) {
+function render(orders, archived) {
   const list = document.getElementById('list');
   const active = orders.filter(o => !o.sent);
   const sent = orders.filter(o => o.sent);
 
   let html = '';
   if (!active.length) {
-    html += '<p class="muted">No pending orders. Capture one above.</p>';
+    html += '<p class="muted">No orders yet. The scanner adds them automatically, or capture one above.</p>';
   } else {
+    // Auto-scanned and manual captures are one unified list — each is a full,
+    // sendable card (no separate "load to review" step) and deduped by order #.
     html += active.map(card).join('');
-  }
-  // Auto-scanned orders the background scanner has cached (not sent yet). Shown so
-  // the operator can see scanner progress and pull any order in for review/sending.
-  if (scanned && scanned.length) {
-    html += `<details style="margin-top:1rem;" open>
-      <summary class="muted" style="cursor:pointer;">🤖 Auto-scanned, not sent (${scanned.length})</summary>
-      <div style="margin-top:.6rem;">${scanned.map(scanCard).join('')}</div>
-    </details>`;
   }
   // Sent orders are hidden in a collapsed section so they don't clutter the list.
   if (sent.length) {
@@ -858,18 +819,6 @@ async function doArchive(id) {
 async function doRestore(aid) {
   const r = await fetch(`/api/archived/${aid}/restore`, {method:'POST'});
   msg(r.ok ? 'Restored to pending.' : 'Could not restore.', r.ok ? 'ok' : 'err');
-  await load();
-}
-
-async function doLoadScanned(num) {
-  const r = await fetch(`/api/scanned/${num}/load`, {method:'POST'});
-  msg(r.ok ? `Order #${num} loaded for review.` : 'Could not load scanned order.', r.ok ? 'ok' : 'err');
-  await load();
-}
-
-async function doArchiveScanned(num) {
-  const r = await fetch(`/api/scanned/${num}/archive`, {method:'POST'});
-  msg(r.ok ? `Order #${num} archived.` : 'Could not archive scanned order.', r.ok ? 'ok' : 'err');
   await load();
 }
 
