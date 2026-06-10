@@ -31,7 +31,7 @@ APP_PORT=5000
 DOMAIN="gui/$(id -u)"
 
 BRANCH="${1:-$(git rev-parse --abbrev-ref HEAD)}"
-say "▶ [1/5] Updating Watchdog PickD on branch '$BRANCH'…"
+say "▶ [1/6] Updating Watchdog PickD on branch '$BRANCH'…"
 
 # 1. Pull the latest code (fast-forward only; aborts if local work would conflict).
 if ! git pull --ff-only origin "$BRANCH"; then
@@ -40,7 +40,7 @@ if ! git pull --ff-only origin "$BRANCH"; then
 fi
 
 # 2. Refresh dependencies inside the venv (creating it if missing).
-say "▶ [2/5] Refreshing dependencies…"
+say "▶ [2/6] Refreshing dependencies…"
 if [ ! -d venv ]; then
   say "  creating virtualenv…"
   python3 -m venv venv
@@ -48,6 +48,16 @@ fi
 ./venv/bin/python3 -m pip install --quiet --upgrade pip
 ./venv/bin/python3 -m pip install --quiet -r requirements.txt
 say "✓ Dependencies up to date."
+
+# 3. Apply the DB schema the watcher depends on (e.g. picking_lists.source_order_date).
+# Idempotent (ADD COLUMN IF NOT EXISTS) and non-fatal: skips cleanly when
+# SUPABASE_DB_URL is unset, and a DB hiccup must never block the app update.
+say "▶ [3/6] Applying DB schema migrations…"
+if mig_out="$(./venv/bin/python3 migrations.py 2>&1)"; then
+  say "  ${mig_out}"
+else
+  say "⚠ Migration step failed (non-fatal): ${mig_out}"
+fi
 
 # Kill any process still listening on the app port. A stale/hung app.py left on
 # :5000 is exactly what makes the new window load forever and show blank — the new
@@ -94,18 +104,18 @@ restart_agent() {
   say "✓ Restarted $label"
 }
 
-# 3. Restart the PDF watcher.
-say "▶ [3/5] Restarting the PDF watcher…"
+# 4. Restart the PDF watcher.
+say "▶ [4/6] Restarting the PDF watcher…"
 restart_agent "com.antigravity.watchdog-pickd"
 
-# 4. Restart the capture app — freeing the port between stop and start so the new
+# 5. Restart the capture app — freeing the port between stop and start so the new
 # server can actually bind.
-say "▶ [4/5] Restarting the capture app…"
+say "▶ [5/6] Restarting the capture app…"
 restart_agent "com.antigravity.pickd-app" free_port
 
-# 5. Verify the app is really serving, then open it. We open ONLY once the server
+# 6. Verify the app is really serving, then open it. We open ONLY once the server
 # answers — opening a not-yet-ready server is what produces the endless blank page.
-say "▶ [5/5] Waiting for the capture app to answer on ${APP_URL} ..."
+say "▶ [6/6] Waiting for the capture app to answer on ${APP_URL} ..."
 if [ -f "$HOME/Library/LaunchAgents/com.antigravity.pickd-app.plist" ]; then
   up=""
   for i in $(seq 1 60); do
