@@ -1,7 +1,7 @@
-"""Tests for the auto-scanner's per-cycle catch-up logic (run_scan_cycle).
+"""Tests for the auto-scanner's single-step logic (run_scan_step) + helpers.
 
-Pure logic only: a fake capture_fn decides which order numbers "exist", and a stub
-preview_fn avoids the Supabase/pipeline import. No Mocha, no DB.
+Pure logic only: a fake capture_fn decides which order numbers "exist" / how they
+fail, and a stub preview_fn avoids the Supabase/pipeline import. No Mocha, no DB.
 """
 
 import os
@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import auto_scanner  # noqa: E402
 import scanned_store  # noqa: E402
-from as400_capture import AS400Disconnected, CaptureError  # noqa: E402
+from as400_capture import AS400Disconnected, CaptureError, OrderNotFound  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -34,60 +34,64 @@ def _preview(text):
     }
 
 
-def _capture_for(existing):
+def test_step_captures_and_advances():
     def cap(n, driver):
-        if str(n) in existing:
-            return f"ORDER {n} END OF ORDER"
-        raise CaptureError(f"order {n} doesn't exist")
+        return f"ORDER {n} END OF ORDER"
 
-    return cap
-
-
-def test_catches_up_then_stops_at_gap():
-    cap = _capture_for({"880112", "880113", "880114"})
-    r = auto_scanner.run_scan_cycle(None, start=880112, capture_fn=cap, preview_fn=_preview)
-    assert r["scanned"] == ["880112", "880113", "880114"]
-    assert r["stopped"] == "no_more_orders"
-    # The cursor holds at the first missing number, retried next cycle.
-    assert scanned_store.next_scan_number(880112) == 880115
+    r = auto_scanner.run_scan_step(None, start=880112, capture_fn=cap, preview_fn=_preview)
+    assert r == {"action": "captured", "number": "880112"}
+    assert scanned_store.get("880112") is not None
+    # Cursor advanced so the next step targets the following number.
+    assert scanned_store.next_scan_number(880112) == 880113
 
 
-def test_does_not_advance_when_first_is_missing():
-    cap = _capture_for(set())
-    r = auto_scanner.run_scan_cycle(None, start=880112, capture_fn=cap, preview_fn=_preview)
-    assert r["scanned"] == []
-    assert scanned_store.next_scan_number(880112) == 880112
+def test_step_not_found_does_not_advance():
+    def cap(n, driver):
+        raise OrderNotFound(f"order {n} doesn't exist yet")
+
+    r = auto_scanner.run_scan_step(None, start=880112, capture_fn=cap, preview_fn=_preview)
+    assert r["action"] == "not_found"
+    assert scanned_store.get("880112") is None
+    assert scanned_store.next_scan_number(880112) == 880112  # retried next time
 
 
-def test_respects_max_per_cycle():
-    cap = _capture_for({str(n) for n in range(880112, 880200)})
-    r = auto_scanner.run_scan_cycle(
-        None, start=880112, max_per_cycle=3, capture_fn=cap, preview_fn=_preview
-    )
-    assert r["scanned"] == ["880112", "880113", "880114"]
-    assert r["stopped"] == "max_per_cycle"
+def test_step_incomplete_does_not_advance():
+    def cap(n, driver):
+        raise CaptureError("screen didn't advance / no END OF ORDER")
+
+    r = auto_scanner.run_scan_step(None, start=880112, capture_fn=cap, preview_fn=_preview)
+    assert r["action"] == "incomplete"
+    assert scanned_store.get("880112") is None
+    assert scanned_store.next_scan_number(880112) == 880112  # same number retried
 
 
-def test_yields_to_manual():
-    cap = _capture_for({str(n) for n in range(880112, 880200)})
-    calls = {"n": 0}
-
-    def should_continue():
-        calls["n"] += 1
-        return calls["n"] <= 2  # let two orders through, then a manual capture waits
-
-    r = auto_scanner.run_scan_cycle(
-        None, start=880112, capture_fn=cap, preview_fn=_preview, should_continue=should_continue
-    )
-    assert r["stopped"] == "yield_to_manual"
-    assert r["scanned"] == ["880112", "880113"]
-
-
-def test_stops_on_disconnect_without_advancing():
+def test_step_unavailable_on_disconnect():
     def cap(n, driver):
         raise AS400Disconnected("host down")
 
-    r = auto_scanner.run_scan_cycle(None, start=880112, capture_fn=cap, preview_fn=_preview)
-    assert r["stopped"] == "as400_unavailable"
-    assert r["scanned"] == []
+    r = auto_scanner.run_scan_step(None, start=880112, capture_fn=cap, preview_fn=_preview)
+    assert r["action"] == "unavailable"
     assert scanned_store.next_scan_number(880112) == 880112
+
+
+def test_wait_per_action():
+    assert auto_scanner._wait_for("captured") == auto_scanner.FOUND_NEXT_DELAY_SEC
+    assert auto_scanner._wait_for("not_found") == auto_scanner.NOT_FOUND_WAIT_SEC
+    assert auto_scanner._wait_for("incomplete") == auto_scanner.INCOMPLETE_RETRY_SEC
+    assert auto_scanner._wait_for("unavailable") == auto_scanner.UNAVAILABLE_WAIT_SEC
+
+
+def test_system_idle_seconds_parses_hididletime(monkeypatch):
+    class _R:
+        stdout = '  "HIDIdleTime" = 7500000000\n  "other" = 1'
+
+    monkeypatch.setattr(auto_scanner.subprocess, "run", lambda *a, **k: _R())
+    assert auto_scanner.system_idle_seconds() == pytest.approx(7.5, abs=0.01)
+
+
+def test_system_idle_seconds_unknown_is_large(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError("ioreg not found")
+
+    monkeypatch.setattr(auto_scanner.subprocess, "run", boom)
+    assert auto_scanner.system_idle_seconds() > 1e6  # treat as idle when unknown
