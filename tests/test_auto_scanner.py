@@ -176,3 +176,29 @@ def test_step_incomplete_empty_capture_still_retried():
 
 def test_wait_for_empty_skipped_moves_on_quickly():
     assert auto_scanner._wait_for("empty_skipped") == auto_scanner.FOUND_NEXT_DELAY_SEC
+
+
+# --- AS400 health beacon (UI dot) -----------------------------------------------
+
+
+def test_health_unknown_before_any_signal(monkeypatch):
+    monkeypatch.setitem(auto_scanner._as400_health, "ok", None)
+    monkeypatch.setitem(auto_scanner._as400_health, "at", 0.0)
+    assert auto_scanner.as400_health()["state"] == "unknown"
+
+
+def test_health_ok_after_recent_success(monkeypatch):
+    auto_scanner.note_as400(True)
+    assert auto_scanner.as400_health()["state"] == "ok"
+    auto_scanner.note_as400(False)
+    assert auto_scanner.as400_health()["state"] == "err"
+
+
+def test_health_degrades_to_unknown_when_stale(monkeypatch):
+    import time
+
+    auto_scanner.note_as400(True)
+    monkeypatch.setitem(
+        auto_scanner._as400_health, "at", time.time() - auto_scanner.AS400_HEALTH_MAX_AGE_SEC - 1
+    )
+    assert auto_scanner.as400_health()["state"] == "unknown"

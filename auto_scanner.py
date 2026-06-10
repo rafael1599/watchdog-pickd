@@ -67,6 +67,37 @@ manual_waiting = threading.Event()
 _stop = threading.Event()
 _thread: threading.Thread | None = None
 
+# ── AS400 health beacon ──────────────────────────────────────────────────────
+# The UI status dot used to turn green ONLY after a manual Connect/Check click —
+# it stayed gray while the auto-scanner was happily capturing orders. Every AS400
+# interaction (scanner step, manual capture, connect) now records whether the
+# host responded; the UI polls this instead of requiring a manual check.
+# A signal older than the max age (default 30 min — the scanner can legitimately
+# sit 20 min between not-found retries) degrades to "unknown" (gray).
+AS400_HEALTH_MAX_AGE_SEC = float(os.getenv("AS400_HEALTH_MAX_AGE_SEC", "1800"))
+_as400_health = {"at": 0.0, "ok": None}
+
+
+def note_as400(ok: bool) -> None:
+    """Record the outcome of the latest AS400 interaction (thread-safe enough:
+    two atomic dict writes; readers tolerate either ordering)."""
+    import time
+
+    _as400_health["ok"] = ok
+    _as400_health["at"] = time.time()
+
+
+def as400_health() -> dict:
+    """{"state": "ok"|"err"|"unknown", "age_sec": float|None} for the UI dot."""
+    import time
+
+    if _as400_health["ok"] is None:
+        return {"state": "unknown", "age_sec": None}
+    age = time.time() - _as400_health["at"]
+    if age > AS400_HEALTH_MAX_AGE_SEC:
+        return {"state": "unknown", "age_sec": age}
+    return {"state": "ok" if _as400_health["ok"] else "err", "age_sec": age}
+
 
 def system_idle_seconds() -> float:
     """Seconds since the last mouse/keyboard input (macOS HIDIdleTime).
@@ -192,11 +223,15 @@ def _loop() -> None:
             res = run_scan_step(driver)
             action = res["action"]
             wait = _wait_for(action)
+            # Health beacon: every non-unavailable step means AS400 answered
+            # (a not_found is still a response — "invalid order number").
+            note_as400(action != "unavailable")
             if action == "unavailable":
                 # Try to (re)connect; if it works, retry promptly next iteration.
                 try:
                     bootstrap_session(driver)
                     wait = FOUND_NEXT_DELAY_SEC
+                    note_as400(True)
                 except Exception as e:
                     log.info("auto-scan: AS400 not ready (%s)", e)
             elif action == "captured":
