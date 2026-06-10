@@ -394,14 +394,24 @@ def connect():
     try:
         state = bootstrap_session(MochaDriver())
     except AS400Disconnected as e:
+        auto_scanner.note_as400(False)
         return jsonify({"ok": False, "state": "disconnected", "error": str(e)}), 503
     except AS400ManualLoginRequired as e:
+        auto_scanner.note_as400(False)
         return jsonify({"ok": False, "state": "needs_login", "error": str(e)}), 409
     except Exception as e:
         return jsonify({"ok": False, "error": f"Error connecting to AS400: {e}"}), 500
+    auto_scanner.note_as400(True)
     return jsonify(
         {"ok": True, "state": state, "message": "AS400 ready on the order-search screen."}
     )
+
+
+@app.get("/api/as400")
+def as400_status():
+    """AS400 health for the UI dot — fed by the scanner and manual captures, so
+    the dot turns green from real activity instead of requiring a manual check."""
+    return jsonify(auto_scanner.as400_health())
 
 
 @app.post("/api/status")
@@ -439,11 +449,16 @@ def capture():
         with capture_lock:
             manual_waiting.clear()
             raw_text = capture_order(order_number, MochaDriver())
+        auto_scanner.note_as400(True)
     except AS400Disconnected as e:
+        auto_scanner.note_as400(False)
         return jsonify({"error": str(e), "state": "disconnected"}), 503
     except AS400ManualLoginRequired as e:
+        auto_scanner.note_as400(False)
         return jsonify({"error": str(e), "state": "needs_login"}), 409
     except CaptureError as e:
+        # A stalled capture still means the host answered.
+        auto_scanner.note_as400(True)
         return jsonify({"error": str(e)}), 422
     except Exception as e:  # AppleScript / clipboard / environment failures
         return jsonify({"error": f"Error capturing from AS400: {e}"}), 500
@@ -822,6 +837,21 @@ async function load() {
   const [ro, ra] = await Promise.all([fetch('/api/orders'), fetch('/api/archived')]);
   render(await ro.json(), await ra.json());
   refreshVerification();  // keep the red counter live on each load
+  refreshAs400Dot();      // dot goes green from real scanner/capture activity
+}
+
+// The dot used to stay gray until a MANUAL Connect/Check click, even while the
+// auto-scanner was capturing orders fine. Now it reflects the server-side health
+// beacon (fed by every AS400 interaction). 'unknown' (no signal / stale) keeps
+// whatever the last manual action set — default gray.
+async function refreshAs400Dot() {
+  try {
+    const r = await fetch('/api/as400');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.state === 'ok') setDot('ok');
+    else if (d.state === 'err') setDot('err');
+  } catch(e) { /* network blip — leave the dot as-is */ }
 }
 
 async function refreshVerification() {
