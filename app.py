@@ -670,11 +670,17 @@ INDEX_HTML = """
     /* Minimal card: the whole card is tappable to reveal the items. */
     .card.tappable { cursor: pointer; transition: border-color .15s; }
     .card.tappable:hover { border-color: #9ca3af; }
-    .chead { display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap; }
+    .chead { display: flex; align-items: baseline; gap: .4rem .8rem; flex-wrap: wrap; }
     .onum { font-size: 1.45rem; font-weight: 900; letter-spacing: .02em; }
-    .ocust { font-size: .95rem; font-weight: 600; color: #374151; flex: 1; min-width: 0;
-             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* The customer name WRAPS instead of ellipsizing away — inside the half-width
+       lanes the old nowrap+ellipsis crushed it to nothing. */
+    .ocust { font-size: .95rem; font-weight: 600; color: #374151; flex: 1 1 12ch;
+             min-width: 0; line-height: 1.25; overflow-wrap: anywhere; }
     .ostats { font-size: .8rem; font-weight: 700; color: #6b7280; white-space: nowrap; }
+    /* Inside a lane there's half the width: compact the number/stats so the
+       customer keeps room. */
+    .lane .onum { font-size: 1.15rem; }
+    .lane .ostats { font-size: .72rem; }
     .chev { color: #9ca3af; font-size: .85rem; }
     .badge.amber { font-size: .65rem; font-weight: 800; letter-spacing: .06em;
                    padding: .1rem .4rem; border-radius: 6px;
@@ -713,7 +719,9 @@ INDEX_HTML = """
     /* Two lanes: FedEx (left, purple) and Truck (right, emerald) — same palette
        as PickD's Verification Board (FDX purple / TRK emerald). Stacks on phones. */
     .lanes { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; align-items: start; }
-    @media (max-width: 760px) { .lanes { grid-template-columns: 1fr; } }
+    /* Below ~1000px two lanes leave no room for the customer name — stack them.
+       (Safari at 50% of the MacBook screen lands here.) */
+    @media (max-width: 1000px) { .lanes { grid-template-columns: 1fr; } }
     .lane { border-radius: 12px; padding: .6rem; }
     .lane-fedex { background: rgba(168,85,247,.08); border: 1px solid rgba(168,85,247,.25); }
     .lane-truck { background: rgba(16,185,129,.07); border: 1px solid rgba(16,185,129,.22); }
