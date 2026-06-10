@@ -9,6 +9,7 @@ This is the single source of truth for "turn order text into a PickD picking lis
 """
 
 import logging
+from typing import Optional
 
 from extractor import compute_hash
 from parser import parse_order
@@ -28,6 +29,33 @@ from supabase_client import (
 
 log = logging.getLogger("pickd-pipeline")
 
+# Carrier hints in the AS400 'Ship Via' field that map to a shipping class. These
+# are LOCAL-ONLY (used to colour the UI); PickD keeps its own auto-classification.
+_FEDEX_HINTS = ("FEDEX", "FDX")
+_REGULAR_HINTS = ("UPS", "TRUCK", "TRK", "FREIGHT", "ABF", "LTL", "GROUND FREIGHT")
+
+# Verification-board heuristic fallback: an order of 5+ total units is "regular"
+# (palletized / big), fewer is small-parcel "fedex". We lack per-SKU weights
+# locally, so only the units rule applies.
+HEURISTIC_REGULAR_UNITS = 5
+
+
+def classify_shipping(ship_via: Optional[str], total_units: int) -> str:
+    """Classify an order as 'fedex' or 'regular' for local UI colouring.
+
+    Uses BOTH the 'Ship Via' carrier (when it clearly names one) and the
+    verification-board units heuristic as a fallback:
+      (a) ship_via contains a FedEx hint → 'fedex'; a freight/LTL/UPS hint → 'regular'.
+      (b) otherwise total_units >= 5 → 'regular', else 'fedex'.
+    """
+    via = (ship_via or "").upper()
+    if via:
+        if any(h in via for h in _FEDEX_HINTS):
+            return "fedex"
+        if any(h in via for h in _REGULAR_HINTS):
+            return "regular"
+    return "regular" if (total_units or 0) >= HEURISTIC_REGULAR_UNITS else "fedex"
+
 
 def preview_order(text: str) -> dict:
     """
@@ -45,11 +73,13 @@ def preview_order(text: str) -> dict:
     parsed_total = round(sum(float(i.get("extend_price") or 0) for i in items), 2)
     total_mismatch = subtotal is not None and abs(parsed_total - subtotal) > 0.01
 
+    total_units = sum(int(i.get("qty") or 0) for i in items)
+
     return {
         "order_number": data.get("order_number"),
         "customer": data.get("customer_name") or "Unknown",
         "item_count": len(items),  # number of distinct line items / SKUs
-        "total_units": sum(int(i.get("qty") or 0) for i in items),  # sum of quantities
+        "total_units": total_units,  # sum of quantities
         "subtotal": subtotal,  # order Sub-Total from the header (None if not found)
         "parsed_total": parsed_total,  # sum of parsed line extends
         "total_mismatch": total_mismatch,  # True → likely a missing/misparsed line
@@ -57,6 +87,9 @@ def preview_order(text: str) -> dict:
         "order_comments": data.get("order_comments"),
         "shipping_address": data.get("shipping_address"),
         "ship_via": data.get("ship_via"),
+        "order_date": data.get("order_date"),  # AS400 'Order Date' as ISO YYYY-MM-DD
+        # Local-only shipping class for UI colouring (NOT written to PickD).
+        "shipping_type": classify_shipping(data.get("ship_via"), total_units),
         "items": items,
     }
 

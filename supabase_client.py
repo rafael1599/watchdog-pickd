@@ -190,6 +190,12 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str) -> dict:
     if order_comments:
         insert_data["notes"] = order_comments
 
+    # AS400 'Order Date' → source_order_date (additive date column on picking_lists).
+    # Only written when present; omitted otherwise so PostgREST leaves it NULL.
+    order_date = order_data.get("order_date")
+    if order_date:
+        insert_data["source_order_date"] = order_date
+
     result = client.table("picking_lists").insert(insert_data).execute()
     picking_list = result.data[0]
 
@@ -453,6 +459,72 @@ def combine_into_order(
     _log_import(client, pdf_hash, new_order_number, file_name, len(cart_items), target_id)
 
     return result.data[0]
+
+
+# Statuses that count as "in verification" (the PickD double-check pipeline).
+# 'completed' and 'cancelled' are terminal and excluded; 'reopened' orders are
+# back in the editing loop, so they count as in-verification too.
+VERIFICATION_STATUSES = [
+    "active",
+    "ready_to_double_check",
+    "double_checking",
+    "needs_correction",
+    "reopened",
+]
+
+
+def get_verification_count() -> int:
+    """Number of picking_lists currently in verification (see VERIFICATION_STATUSES).
+
+    Goes UP when an order is sent into the queue and DOWN when one is completed
+    or cancelled.
+    """
+    client = get_client()
+    result = (
+        client.table("picking_lists")
+        .select("id", count="exact")
+        .in_("status", VERIFICATION_STATUSES)
+        .execute()
+    )
+    if getattr(result, "count", None) is not None:
+        return result.count
+    return len(result.data or [])
+
+
+def get_verification_board() -> dict:
+    """Read-only snapshot of recent verification orders grouped by status.
+
+    One query over the last ~14 days. Each entry carries a minimal shape:
+    order_number, customer, status, shipping_type, items (count).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+    client = get_client()
+    result = (
+        client.table("picking_lists")
+        .select("order_number, status, shipping_type, items, customers(name), updated_at")
+        .in_("status", VERIFICATION_STATUSES)
+        .gte("updated_at", cutoff)
+        .order("updated_at", desc=True)
+        .execute()
+    )
+
+    board: dict[str, list] = {s: [] for s in VERIFICATION_STATUSES}
+    for row in result.data or []:
+        status = row.get("status")
+        if status not in board:
+            board[status] = []
+        customer = row.get("customers") or {}
+        board[status].append(
+            {
+                "order_number": row.get("order_number"),
+                "customer": (customer.get("name") if isinstance(customer, dict) else None)
+                or "Unknown",
+                "status": status,
+                "shipping_type": row.get("shipping_type"),
+                "items": len(row.get("items") or []),
+            }
+        )
+    return board
 
 
 def _to_cart_items(client: Client, parsed_items: list) -> list:

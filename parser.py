@@ -11,6 +11,7 @@ Handles the specific format of the order inquiry PDFs:
 """
 
 import re
+from datetime import datetime
 from typing import Dict, List, Optional
 
 
@@ -361,6 +362,27 @@ def parse_shipping_address_struct(text: str) -> Optional[dict]:
     }
 
 
+def parse_order_date(text: str) -> Optional[str]:
+    """
+    Extract the AS400 'Order Date' from the header and return it as an ISO date
+    string ('YYYY-MM-DD'), or None if absent/unparseable.
+
+    The header carries it as 6-digit MMDDYY, e.g.:
+        'Order Date: 060226 P/O: SO1608'  →  month=06, day=02, year=2026
+    The 2-digit year is interpreted as 2000-2099 (these are current AS400 orders).
+    Invalid month/day combinations (e.g. month 13, day 00) return None.
+    """
+    match = re.search(r"Order\s+Date:\s*(\d{6})\b", text, re.IGNORECASE)
+    if not match:
+        return None
+    raw = match.group(1)
+    month, day, year = int(raw[0:2]), int(raw[2:4]), 2000 + int(raw[4:6])
+    try:
+        return datetime(year, month, day).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
 def parse_ship_via(text: str) -> Optional[str]:
     """
     Extract the shipping carrier from the 'Ship Via' header field, verbatim.
@@ -392,6 +414,8 @@ def parse_order(text: str) -> dict:
             'is_last_page': bool,
             'order_comments': str | None,
             'shipping_address': str | None,
+            'ship_via': str | None,
+            'order_date': str | None,   # ISO 'YYYY-MM-DD' from the AS400 header
             'raw_text': str
         }
     """
@@ -406,5 +430,6 @@ def parse_order(text: str) -> dict:
         "shipping_address": parse_shipping_address(text),
         "shipping": parse_shipping_address_struct(text),
         "ship_via": parse_ship_via(text),
+        "order_date": parse_order_date(text),
         "raw_text": text,
     }

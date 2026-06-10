@@ -24,7 +24,7 @@ import subprocess
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -46,7 +46,11 @@ from as400_capture import (  # noqa: E402
 )
 from auto_scanner import capture_lock, manual_waiting, start_auto_scanner  # noqa: E402
 from pipeline import preview_order, process_order_text, resolve_order_items  # noqa: E402
-from supabase_client import find_orders_in_pickd  # noqa: E402
+from supabase_client import (  # noqa: E402
+    find_orders_in_pickd,
+    get_verification_board,
+    get_verification_count,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
 
@@ -80,6 +84,37 @@ _lock = threading.Lock()
 # stable archive id (aid). The file is gitignored — it is local working state.
 ARCHIVE_PATH = Path(__file__).resolve().parent / ".archived_orders.json"
 _archive: dict[str, dict] = {}
+
+# Unsent candidate orders older than this many days are auto-archived (they leave
+# the active list but stay recoverable in the archive). Sent orders are excluded.
+AUTO_ARCHIVE_DAYS = int(os.getenv("AUTO_ARCHIVE_DAYS", "8"))
+
+# Verification-board read cache. The UI polls /api/verification on every load(),
+# so we throttle the Supabase read behind a short TTL to avoid hammering it.
+VERIFICATION_TTL_SEC = int(os.getenv("VERIFICATION_TTL_SEC", "30"))
+_verification_cache: dict = {"ts": 0.0, "data": None}
+_verification_lock = threading.Lock()
+
+
+def _refresh_verification() -> dict:
+    """Return {count, board}, refreshing from Supabase at most once per TTL.
+
+    On error (e.g. Supabase env not set) returns a cached value if present, else
+    a zeroed snapshot — the UI counter should never crash the page.
+    """
+    with _verification_lock:
+        now = time.monotonic()
+        cached = _verification_cache["data"]
+        if cached is not None and (now - _verification_cache["ts"]) < VERIFICATION_TTL_SEC:
+            return cached
+        try:
+            data = {"count": get_verification_count(), "board": get_verification_board()}
+        except Exception as e:  # noqa: BLE001
+            logging.warning("Verification read failed: %s", e)
+            return cached if cached is not None else {"count": 0, "board": {}}
+        _verification_cache["ts"] = now
+        _verification_cache["data"] = data
+        return data
 
 
 def _load_archive() -> None:
@@ -143,6 +178,52 @@ def _find_archived_by_number(order_number) -> dict | None:
     return next((a for a in _archive.values() if a.get("order_number") == order_number), None)
 
 
+def _archive_entry(entry: dict) -> str:
+    """Move a pending order dict into the persisted local archive. Returns its aid.
+
+    Caller must hold _lock. Strips the in-memory-only fields (id/sent/result) and
+    stamps an archived_at timestamp, mirroring the manual /archive endpoint.
+    """
+    aid = uuid.uuid4().hex
+    arch = {k: v for k, v in entry.items() if k not in ("id", "sent", "result")}
+    arch["aid"] = aid
+    arch["archived_at"] = datetime.now(timezone.utc).isoformat()
+    _archive[aid] = arch
+    return aid
+
+
+def _auto_archive_stale() -> int:
+    """Auto-archive UNSENT candidate orders older than AUTO_ARCHIVE_DAYS.
+
+    Sent orders are never touched (they already collapse into their own section).
+    Returns the number of orders archived. Caller must hold _lock.
+    """
+    if AUTO_ARCHIVE_DAYS <= 0:
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=AUTO_ARCHIVE_DAYS)
+    stale_ids = []
+    for oid, entry in _orders.items():
+        if entry.get("sent"):
+            continue
+        scanned_at = entry.get("scanned_at")
+        if not scanned_at:
+            continue
+        try:
+            ts = datetime.fromisoformat(scanned_at)
+        except (ValueError, TypeError):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts < cutoff:
+            stale_ids.append(oid)
+
+    for oid in stale_ids:
+        _archive_entry(_orders.pop(oid))
+    if stale_ids:
+        _persist_archive()
+    return len(stale_ids)
+
+
 def _add_order(raw_text: str) -> dict:
     global _next_id
     preview = preview_order(raw_text)
@@ -171,11 +252,14 @@ def _add_order(raw_text: str) -> dict:
             "parsed_total": preview.get("parsed_total"),
             "total_mismatch": preview.get("total_mismatch", False),
             "ship_via": preview.get("ship_via"),
+            "shipping_type": preview.get("shipping_type"),
+            "order_date": preview.get("order_date"),
             "shipping_address": preview.get("shipping_address"),
             "order_comments": preview.get("order_comments"),
             "items": preview["items"],
             "archived_match": archived_match,
             "raw_text": raw_text,
+            "scanned_at": datetime.now(timezone.utc).isoformat(),
             "sent": False,
             "result": None,
         }
@@ -283,6 +367,7 @@ def list_orders():
     _sync_scanned_into_orders()
     _refresh_pickd_status()
     with _lock:
+        _auto_archive_stale()  # sweep stale unsent candidates into the archive
         # Newest first (by id, which increments as orders are added).
         ordered = sorted(_orders.values(), key=lambda o: o["id"], reverse=True)
         return jsonify([_public(o) for o in ordered])
@@ -433,16 +518,21 @@ def archive(oid: int):
         entry = _orders.pop(oid, None)
         if not entry:
             return jsonify({"error": "Order not found."}), 404
-        aid = uuid.uuid4().hex
-        arch = {k: v for k, v in entry.items() if k not in ("id", "sent", "result")}
-        arch["aid"] = aid
-        arch["archived_at"] = datetime.now(timezone.utc).isoformat()
-        _archive[aid] = arch
+        _archive_entry(entry)
         _persist_archive()
     # Remove from the scanned cache so it doesn't re-sync as a sendable order.
     if entry.get("order_number"):
         scanned_store.delete(entry["order_number"])
     return jsonify({"ok": True})
+
+
+@app.get("/api/verification")
+def verification():
+    """Read-only mirror of PickD's verification queue: {count, board}.
+
+    Throttled behind VERIFICATION_TTL_SEC so the UI polling doesn't hammer Supabase.
+    """
+    return jsonify(_refresh_verification())
 
 
 @app.get("/api/archived")
@@ -577,6 +667,39 @@ INDEX_HTML = """
                padding: .05rem .5rem; border-radius: 999px; align-self: center;
                background: rgba(37,99,235,.12); color: #2563eb;
                border: 1px solid rgba(37,99,235,.35); }
+    /* FedEx orders get a purple accent (mirrors PickD's verification palette). */
+    .card.fedex { border-left: 5px solid #a855f7; background: rgba(168,85,247,.06); }
+    .fdx-badge { font-size: .8rem; font-weight: 800; letter-spacing: .04em;
+                 padding: .05rem .5rem; border-radius: 999px; align-self: center;
+                 background: rgba(168,85,247,.12); color: #a855f7;
+                 border: 1px solid rgba(168,85,247,.45); }
+    /* Order Comments are operationally important → prominent red note on the card. */
+    .order-note { background: rgba(220,38,38,.1); border: 1px solid rgba(220,38,38,.5);
+                  color: #dc2626; border-radius: 8px; padding: .5rem .7rem;
+                  margin: .2rem 0 .7rem; font-size: .9rem; font-weight: 700; }
+    .orderdate { font-size: .78rem; color: #6b7280; margin: .1rem 0 .5rem; }
+    /* Prominent green success banner shown after an order is sent. */
+    #toast { position: fixed; top: 1rem; left: 50%; transform: translateX(-50%);
+             background: #16a34a; color: #fff; font-weight: 700; font-size: 1rem;
+             padding: .8rem 1.4rem; border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.25);
+             z-index: 1000; max-width: 90vw; text-align: center; display: none; }
+    /* Verification board (read-only mirror) badge + modal. */
+    .vbadge { display: inline-block; min-width: 1.4rem; text-align: center;
+              background: #dc2626; color: #fff; font-weight: 800; font-size: .8rem;
+              border-radius: 999px; padding: .05rem .45rem; margin-left: .35rem; }
+    #vboard-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5);
+                      display: none; z-index: 900; }
+    #vboard { position: absolute; top: 5%; left: 50%; transform: translateX(-50%);
+              width: min(640px, 92vw); max-height: 85vh; overflow: auto;
+              background: #fff; color: #111; border-radius: 12px; padding: 1rem; }
+    @media (prefers-color-scheme: dark) { #vboard { background: #17171c; color: #e5e7eb; } }
+    .vgroup { margin-bottom: .8rem; }
+    .vgroup h3 { font-size: .85rem; text-transform: uppercase; letter-spacing: .05em;
+                 color: #6b7280; margin: .4rem 0 .3rem; }
+    .vrow { display: flex; gap: .6rem; align-items: center; padding: .35rem .5rem;
+            border: 1px solid #d1d5db; border-radius: 8px; margin-bottom: .3rem;
+            font-size: .85rem; }
+    .vrow.fedex { border-left: 4px solid #a855f7; }
     /* Read-only detail panel — dark, double-check inspired. */
     .detail { background: #0f0f12; color: #e5e7eb; border-radius: 12px;
               padding: .6rem; margin: .2rem 0 .8rem; }
@@ -622,10 +745,14 @@ INDEX_HTML = """
   </style>
 </head>
 <body>
+  <div id="toast"></div>
   <h1>📦 AS400 → PickD</h1>
   <div class="row">
     <button id="conn" class="statuschip" onclick="doConnect()" title="Reconnect AS400">
       <span class="dot" id="dot"></span> AS400
+    </button>
+    <button id="vbtn" class="statuschip" onclick="openBoard()" title="Verification Board (live mirror)">
+      Verification<span id="vbadge" class="vbadge" style="display:none;">0</span>
     </button>
     <div class="more" id="topmore">
       <button onclick="toggleMenu(event, 'topmenu')" title="More">⋯</button>
@@ -633,6 +760,15 @@ INDEX_HTML = """
         <button onclick="doStatus()">Check AS400</button>
         <button onclick="doUpdate()">⟳ Update app</button>
       </div>
+    </div>
+  </div>
+  <div id="vboard-overlay" onclick="if(event.target===this) closeBoard()">
+    <div id="vboard">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h2 style="font-size:1.1rem; margin:.2rem 0;">Verification Board <span class="muted">(live mirror)</span></h2>
+        <button class="secondary" onclick="closeBoard()">Close</button>
+      </div>
+      <div id="vboard-body"><p class="muted">Loading…</p></div>
     </div>
   </div>
   <div class="row">
@@ -646,10 +782,65 @@ INDEX_HTML = """
 <script>
 const msg = (t, cls='muted') => { const m=document.getElementById('msg'); m.className=cls; m.textContent=t; };
 
+let _toastTimer = null;
+// Prominent green success banner (used after a successful send).
+function toast(t) {
+  const el = document.getElementById('toast');
+  el.textContent = t;
+  el.style.display = 'block';
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => { el.style.display = 'none'; }, 5000);
+}
+
 async function load() {
   const [ro, ra] = await Promise.all([fetch('/api/orders'), fetch('/api/archived')]);
   render(await ro.json(), await ra.json());
+  refreshVerification();  // keep the red counter live on each load
 }
+
+async function refreshVerification() {
+  try {
+    const r = await fetch('/api/verification');
+    if (!r.ok) return;
+    const data = await r.json();
+    const badge = document.getElementById('vbadge');
+    const n = data.count ?? 0;
+    badge.textContent = n;
+    badge.style.display = n > 0 ? 'inline-block' : 'none';
+    window._vboard = data.board || {};
+    // If the board modal is open, re-render it with the fresh snapshot.
+    if (document.getElementById('vboard-overlay').style.display === 'block') renderBoard();
+  } catch(e) { /* counter is best-effort; never break the page */ }
+}
+
+const VSTATUS_LABELS = {
+  active: 'Active', ready_to_double_check: 'Ready to double-check',
+  double_checking: 'Double-checking', needs_correction: 'Needs correction',
+  reopened: 'Reopened',
+};
+
+function renderBoard() {
+  const board = window._vboard || {};
+  const body = document.getElementById('vboard-body');
+  const groups = Object.keys(board).filter(s => (board[s] || []).length);
+  if (!groups.length) { body.innerHTML = '<p class="muted">Nothing in verification right now.</p>'; return; }
+  body.innerHTML = groups.map(s => {
+    const rows = board[s].map(o =>
+      `<div class="vrow${o.shipping_type === 'fedex' ? ' fedex' : ''}">
+        <span><b>#${o.order_number ?? '—'}</b></span>
+        <span>${o.customer ?? 'Unknown'}</span>
+        <span class="muted" style="margin-left:auto;">${o.items} items${o.shipping_type ? ' · ' + o.shipping_type : ''}</span>
+      </div>`).join('');
+    return `<div class="vgroup"><h3>${VSTATUS_LABELS[s] || s} (${board[s].length})</h3>${rows}</div>`;
+  }).join('');
+}
+
+function openBoard() {
+  document.getElementById('vboard-overlay').style.display = 'block';
+  renderBoard();
+  refreshVerification();
+}
+function closeBoard() { document.getElementById('vboard-overlay').style.display = 'none'; }
 
 function card(o) {
   const res = o.result;
@@ -659,12 +850,19 @@ function card(o) {
     status = `<div class="${cls}">→ ${res.status}${res.needs_correction ? ' (needs_correction)' : ''}: ${res.message||''}</div>`;
   }
   // Context that lives INSIDE the detail panel (the compact card stays clean):
-  // ship-to, watcher notes, carrier and the total-mismatch explanation.
+  // ship-to, carrier and the total-mismatch explanation.
+  // FedEx orders get a purple accent + FDX badge (regular orders: no special paint).
+  const isFedex = o.shipping_type === 'fedex';
+  const fdx = isFedex ? `<span class="fdx-badge">FDX</span>` : '';
+  const odate = o.order_date ? `<div class="orderdate">Order date: ${o.order_date}</div>` : '';
+  // Order Comments are operationally important → prominent red note in the main
+  // view, never hidden behind a tap.
+  const note = o.order_comments ? `<div class="order-note">⚠ ${o.order_comments}</div>` : '';
   const money = n => '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
   let dinfo = '';
   if (o.total_mismatch) dinfo += `<div class="mismatch">⚠ El total no cuadra: parseado ${money(o.parsed_total)} vs orden ${money(o.subtotal)} — pueden faltar items.</div>`;
   if (o.shipping_address) dinfo += `<div class="muted">📍 ${o.shipping_address}</div>`;
-  if (o.order_comments) dinfo += `<div class="muted">📝 ${o.order_comments}</div>`;
+  // order_comments is surfaced as a prominent red note on the card itself (not here).
   if (o.ship_via) dinfo += `<div class="muted">🚚 ${o.ship_via}</div>`;
   // An archived copy of this number exists — rare, actionable, so it stays visible.
   const am = o.archived_match;
@@ -674,14 +872,16 @@ function card(o) {
       + ` <button class="linkbtn" onclick="event.stopPropagation(); doRestore('${am.aid}')">Sacar del archivo</button></div>`
     : '';
   const mm = o.total_mismatch ? '<span class="badge amber">⚠ TOTAL</span>' : '';
-  return `<div class="card tappable" onclick="toggleDetail(${o.id})" title="Tap to see items">
+  return `<div class="card tappable${isFedex ? ' fedex' : ''}" onclick="toggleDetail(${o.id})" title="Tap to see items">
       <div class="chead">
         <span class="onum">#${o.order_number ?? '—'}</span>
         <span class="ocust">${o.customer ?? ''}</span>
-        ${mm}
+        ${fdx}${mm}
         <span class="ostats">${o.item_count} items · ${o.total_units ?? '—'} units</span>
         <span class="chev" id="chev-${o.id}">▾</span>
       </div>
+      ${odate}
+      ${note}
       <div class="detail" id="detail-${o.id}" style="display:none;">
         <div class="dinfo">${dinfo}</div>
         <div id="ditems-${o.id}"></div>
@@ -902,7 +1102,15 @@ async function doSend(id) {
   msg('Sending to PickD…', 'warn');
   const r = await fetch(`/api/orders/${id}/send`, {method:'POST'});
   const data = await r.json();
-  msg(r.ok ? (data.result?.message || 'Sent.') : (data.error||'Error sending.'), r.ok?'ok':'err');
+  const m = data.result?.message;
+  if (r.ok) {
+    msg(m || 'Sent.', 'ok');
+    const res = data.result || {};
+    // Prominent green banner so a successful send is impossible to miss.
+    toast(`✓ Order #${res.order_number ?? '—'} sent to PickD (${res.status || 'sent'}, ${res.item_count ?? 0} items)`);
+  } else {
+    msg(data.error || 'Error sending.', 'err');
+  }
   await load();
 }
 
