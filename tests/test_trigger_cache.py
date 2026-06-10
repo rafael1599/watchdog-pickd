@@ -139,6 +139,37 @@ def test_list_orders_dedupes_manual_and_scanned(client):
     assert nums.count("880009") == 1
 
 
+# Real AS400 screen for a number that isn't an order — parses to no order/items.
+INVALID_SCREEN = """                            O R D E R   I N Q U I R Y
+ Order Number:                              Account Number:
+ Invalid Order Number, REENTER              BEN BUSCHBACHER
+ ORDER# CUSTOMER P/O ORD DATE   Inv#     Date      Total   Ship Source   CRH"""
+
+
+def test_junk_cache_entry_is_purged_not_surfaced(client):
+    # Reported bug: junk captures (invalid-order screens) in the cache rendered as
+    # endless duplicated 'Order #—' cards — the dedup by order_number never matched
+    # because the parsed number is None. They must be purged, not shown.
+    scanned_store.put("880119", INVALID_SCREEN, {"order_number": "880119"}, source="auto_scan")
+    data = client.get("/api/orders", headers=HDR).get_json()
+    assert all(o.get("order_number") for o in data)  # no 'Order #—' cards
+    assert scanned_store.get("880119") is None  # junk purged from the cache
+
+
+def test_junk_does_not_duplicate_across_refreshes(client):
+    scanned_store.put("880119", INVALID_SCREEN, {"order_number": "880119"}, source="auto_scan")
+    for _ in range(3):  # simulate the UI's periodic refresh
+        data = client.get("/api/orders", headers=HDR).get_json()
+    assert data == []  # nothing surfaced, nothing accumulated
+
+
+def test_manual_capture_of_junk_is_not_cached(client, monkeypatch):
+    monkeypatch.setattr(appmod, "capture_order", lambda num, drv: INVALID_SCREEN)
+    monkeypatch.setattr(appmod, "MochaDriver", lambda *a, **k: object())
+    client.post("/api/capture", json={"order_number": "999999"}, headers=HDR)
+    assert scanned_store.get("999999") is None  # junk never re-enters the cache
+
+
 def test_send_drops_order_from_cache(client, monkeypatch):
     scanned_store.put("880009", CAPTURE_TEXT, {"order_number": "880009"})
     client.get("/api/orders", headers=HDR)  # materialize into _orders
