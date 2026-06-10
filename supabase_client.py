@@ -578,8 +578,22 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
             break
         offset += page_size
 
-    # Normalize DB SKUs for loose matching (Map normalized -> original)
-    sku_map = {normalize_sku(row["sku"]): row["sku"] for row in all_metadata}
+    # Normalize DB SKUs for loose matching (Map normalized -> original).
+    # Ambiguity guard (idea-101): if TWO catalog SKUs share a normalized form
+    # (e.g. '034-666-BR' and '03-4666BR'), auto-substituting would risk picking
+    # the wrong one — drop the collision so the item stays unresolved and the
+    # picker decides manually. (Identical strings are not a collision.)
+    sku_map = {}
+    ambiguous = set()
+    for row in all_metadata:
+        norm = normalize_sku(row["sku"])
+        if norm in sku_map and sku_map[norm] != row["sku"]:
+            ambiguous.add(norm)
+        else:
+            sku_map[norm] = row["sku"]
+    for norm in ambiguous:
+        log.warning("Ambiguous catalog SKUs share normalized form %s — leaving manual", norm)
+        sku_map.pop(norm, None)
 
     found_db_skus = []
     item_results = []
