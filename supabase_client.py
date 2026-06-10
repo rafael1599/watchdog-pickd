@@ -114,6 +114,31 @@ def find_existing_order(order_number: str) -> Optional[dict]:
 PICKD_RECENT_DAYS = int(os.getenv("PICKD_RECENT_DAYS", "14"))
 
 
+# Bike catalog cache: the set of normalized bike SKUs changes rarely (new models),
+# so one query per TTL is plenty. Used to estimate pallet counts like PickD does.
+BIKE_SKUS_TTL_SEC = int(os.getenv("BIKE_SKUS_TTL_SEC", "3600"))
+_bike_skus_cache: dict = {"at": 0.0, "skus": None}
+
+
+def get_bike_skus() -> set:
+    """Normalized SKUs of all bikes in sku_metadata (cached, one query per TTL).
+
+    Normalized (via parser.normalize_sku) because the watcher's parsed SKUs are
+    normalized ('033684BR') while the catalog stores canonical ('03-3684BR').
+    """
+    import time
+
+    now = time.monotonic()
+    if _bike_skus_cache["skus"] is not None and (now - _bike_skus_cache["at"]) < BIKE_SKUS_TTL_SEC:
+        return _bike_skus_cache["skus"]
+    client = get_client()
+    result = client.table("sku_metadata").select("sku").eq("is_bike", True).execute()
+    skus = {normalize_sku(row["sku"]) for row in result.data or [] if row.get("sku")}
+    _bike_skus_cache["at"] = now
+    _bike_skus_cache["skus"] = skus
+    return skus
+
+
 def find_orders_in_pickd(numbers: list) -> set:
     """Return the subset of `numbers` that already exist in PickD (one query).
 

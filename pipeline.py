@@ -12,7 +12,7 @@ import logging
 from typing import Optional
 
 from extractor import compute_hash
-from parser import parse_order
+from parser import normalize_sku, parse_order
 from supabase_client import (
     _to_cart_items,
     append_to_order,
@@ -55,6 +55,39 @@ def classify_shipping(ship_via: Optional[str], total_units: int) -> str:
         if any(h in via for h in _REGULAR_HINTS):
             return "regular"
     return "regular" if (total_units or 0) >= HEURISTIC_REGULAR_UNITS else "fedex"
+
+
+# Max bike units per pallet — same constant PickD uses (pickingLogic.ts).
+BIKES_PER_PALLET = 12
+
+
+def estimate_pallets(items: list, bike_skus: set) -> int:
+    """Estimate how many pallets PickD will compute for these items.
+
+    Faithful port of pickd's calculatePalletsWithBikeAwareness COUNT (we only
+    need the number, not the per-pallet item layout):
+      - no items → 0
+      - parts-only order → 1 pallet (everything consolidates onto one)
+      - bikes present → ceil(bike_units / 12); parts stack onto the last bike
+        pallet, so they never add a pallet of their own.
+    SKUs are compared normalized (the parser emits '033684BR'; the bike catalog
+    set must be normalized too — see supabase_client.get_bike_skus).
+    """
+    bike_units = 0
+    part_units = 0
+    for item in items:
+        qty = int(item.get("qty") or 0)
+        if qty <= 0:
+            continue
+        if normalize_sku(item.get("sku") or "") in bike_skus:
+            bike_units += qty
+        else:
+            part_units += qty
+    if bike_units == 0 and part_units == 0:
+        return 0
+    if bike_units == 0:
+        return 1
+    return -(-bike_units // BIKES_PER_PALLET)  # ceil division
 
 
 def preview_order(text: str) -> dict:
