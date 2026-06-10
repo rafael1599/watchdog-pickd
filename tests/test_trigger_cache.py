@@ -114,44 +114,67 @@ def test_capture_drives_and_caches_when_not_cached(client, monkeypatch):
     assert scanned_store.get("880009") is not None
 
 
-# --- /api/scanned visibility + load-to-review --------------------------------
+# --- unified order list (auto-scanned + manual, deduped, full sendable cards) ---
+
+CAPTURE_112 = CAPTURE_TEXT.replace("880009", "880112")
 
 
-def test_list_scanned_returns_summary_without_raw_text(client):
-    scanned_store.put("880112", CAPTURE_TEXT, {"order_number": "880112", "customer": "ACME"})
-    r = client.get("/api/scanned", headers=HDR)
+def test_list_orders_surfaces_scanned_as_full_cards(client):
+    scanned_store.put("880112", CAPTURE_112, {"order_number": "880112"}, source="auto_scan")
+    r = client.get("/api/orders", headers=HDR)
     assert r.status_code == 200
     data = r.get_json()
-    assert len(data) == 1
-    assert data[0]["order_number"] == "880112"
-    assert data[0]["customer"] == "ACME"
-    assert "raw_text" not in data[0]
+    o = next((o for o in data if o["order_number"] == "880112"), None)
+    assert o is not None
+    assert o["item_count"] >= 1  # full card fields present (not just a stub)
+    assert o["from_cache"] is True
+    assert "raw_text" not in o
 
 
-def test_load_scanned_adds_to_pending(client):
-    # CAPTURE_TEXT parses to order 880009, so key the cache to match.
+def test_list_orders_dedupes_manual_and_scanned(client):
+    # Same order present both in _orders (manual) and the cache → shows once.
+    appmod._add_order(CAPTURE_TEXT)  # 880009 → _orders
     scanned_store.put("880009", CAPTURE_TEXT, {"order_number": "880009"})
-    r = client.post("/api/scanned/880009/load", headers=HDR)
+    nums = [o["order_number"] for o in client.get("/api/orders", headers=HDR).get_json()]
+    assert nums.count("880009") == 1
+
+
+def test_send_drops_order_from_cache(client, monkeypatch):
+    scanned_store.put("880009", CAPTURE_TEXT, {"order_number": "880009"})
+    client.get("/api/orders", headers=HDR)  # materialize into _orders
+    oid = next(iter(appmod._orders))
+    monkeypatch.setattr(
+        appmod,
+        "process_order_text",
+        lambda *a, **k: {
+            "status": "created",
+            "order_number": "880009",
+            "customer": "X",
+            "item_count": 1,
+            "needs_correction": False,
+        },
+    )
+    r = client.post(f"/api/orders/{oid}/send", headers=HDR)
     assert r.status_code == 200
-    assert r.get_json()["from_cache"] is True
-    assert any(o["order_number"] == "880009" for o in appmod._orders.values())
+    assert scanned_store.get("880009") is None  # won't re-sync after a restart
 
 
-def test_load_scanned_missing_is_404(client):
-    r = client.post("/api/scanned/999999/load", headers=HDR)
-    assert r.status_code == 404
-
-
-def test_archive_scanned_moves_to_archive_and_keeps_cursor(client):
-    scanned_store.put("880112", CAPTURE_TEXT, {"order_number": "880112"}, source="auto_scan")
-    appmod._archive.clear()
+def test_archive_by_id_removes_from_cache_keeps_cursor(client):
+    scanned_store.put("880112", CAPTURE_112, {"order_number": "880112"}, source="auto_scan")
     cursor_before = scanned_store.next_scan_number(880112)
-
-    r = client.post("/api/scanned/880112/archive", headers=HDR)
+    client.get("/api/orders", headers=HDR)  # materialize
+    oid = next(iter(appmod._orders))
+    r = client.post(f"/api/orders/{oid}/archive", headers=HDR)
     assert r.status_code == 200
-    # Gone from the scanned cache, now in the archive, and NOT left in pending.
     assert scanned_store.get("880112") is None
     assert len(appmod._archive) == 1
-    assert not appmod._orders
-    # Removing it must not rewind the scan cursor.
-    assert scanned_store.next_scan_number(880112) == cursor_before
+    assert scanned_store.next_scan_number(880112) == cursor_before  # no rewind
+
+
+def test_remove_by_id_removes_from_cache(client):
+    scanned_store.put("880112", CAPTURE_112, {"order_number": "880112"})
+    client.get("/api/orders", headers=HDR)
+    oid = next(iter(appmod._orders))
+    r = client.delete(f"/api/orders/{oid}", headers=HDR)
+    assert r.status_code == 200
+    assert scanned_store.get("880112") is None  # removal sticks (no re-sync)
