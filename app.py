@@ -269,18 +269,6 @@ def status():
     return jsonify({"state": classify_screen(text)})
 
 
-@app.post("/api/peek")
-def peek():
-    """Return what Mocha currently shows on screen (for debugging login/focus/copy)."""
-    try:
-        text = MochaDriver().copy_screen()
-    except CaptureError as e:
-        return jsonify({"error": str(e)}), 422
-    except Exception as e:
-        return jsonify({"error": f"Error reading screen: {e}"}), 500
-    return jsonify({"screen": text})
-
-
 @app.post("/api/capture")
 def capture():
     data = request.get_json(force=True) or {}
@@ -499,10 +487,45 @@ INDEX_HTML = """
                 font-size: .83rem; }
     .linkbtn { background: none; color: #1d4ed8; text-decoration: underline; padding: 0 .2rem;
                font-size: .83rem; font-weight: 700; }
-    .actions { display: flex; gap: .5rem; }
+    .actions { display: flex; gap: .5rem; align-items: center; }
     #msg { min-height: 1.2rem; margin-bottom: .8rem; }
-    .meta.clickable { cursor: pointer; }
-    .meta .chev { color: #9ca3af; font-size: .9rem; }
+    /* Minimal card: the whole card is tappable to reveal the items. */
+    .card.tappable { cursor: pointer; transition: border-color .15s; }
+    .card.tappable:hover { border-color: #9ca3af; }
+    .chead { display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap; }
+    .onum { font-size: 1.45rem; font-weight: 900; letter-spacing: .02em; }
+    .ocust { font-size: .95rem; font-weight: 600; color: #374151; flex: 1; min-width: 0;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ostats { font-size: .8rem; font-weight: 700; color: #6b7280; white-space: nowrap; }
+    .chev { color: #9ca3af; font-size: .85rem; }
+    .badge.amber { font-size: .65rem; font-weight: 800; letter-spacing: .06em;
+                   padding: .1rem .4rem; border-radius: 6px;
+                   background: rgba(217,119,6,.15); color: #b45309;
+                   border: 1px solid rgba(217,119,6,.4); }
+    /* Per-card ⋯ menu */
+    .more { position: relative; margin-left: auto; }
+    .more > button { background: none; border: 1px solid #d1d5db; color: #6b7280;
+                     border-radius: 8px; padding: .45rem .7rem; font-weight: 900; }
+    .menu { position: absolute; right: 0; top: 110%; background: #fff; border: 1px solid #d1d5db;
+            border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.12); z-index: 30;
+            min-width: 130px; overflow: hidden; }
+    .menu button { display: block; width: 100%; text-align: left; background: none;
+                   color: #111827; border: 0; border-radius: 0; padding: .55rem .8rem;
+                   font-size: .85rem; }
+    .menu button:hover { background: #f3f4f6; }
+    .menu button.danger { color: #dc2626; }
+    @media (prefers-color-scheme: dark) {
+      .ocust { color: #d1d5db; }
+      .menu { background: #1f2937; border-color: #374151; }
+      .menu button { color: #e5e7eb; }
+      .menu button:hover { background: #374151; }
+    }
+    /* Top status chip */
+    .statuschip { display: inline-flex; align-items: center; gap: .45rem; background: none;
+                  border: 1px solid #d1d5db; color: inherit; border-radius: 999px;
+                  padding: .5rem .9rem; font-weight: 700; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #9ca3af; }
+    .dot.ok { background: #16a34a; } .dot.err { background: #dc2626; } .dot.warn { background: #d97706; }
     .shipvia { font-size: .8rem; font-weight: 700; letter-spacing: .04em;
                padding: .05rem .5rem; border-radius: 999px; align-self: center;
                background: rgba(37,99,235,.12); color: #2563eb;
@@ -554,13 +577,17 @@ INDEX_HTML = """
 <body>
   <h1>📦 AS400 → PickD</h1>
   <div class="row">
-    <button id="conn" class="secondary" onclick="doConnect()">Connect AS400</button>
-    <button id="stat" class="secondary" onclick="doStatus()">Check AS400</button>
-    <button id="peek" class="secondary" onclick="doPeek()">Peek screen</button>
-    <button id="upd" class="secondary" style="margin-left:auto;" onclick="doUpdate()">⟳ Update</button>
+    <button id="conn" class="statuschip" onclick="doConnect()" title="Reconnect AS400">
+      <span class="dot" id="dot"></span> AS400
+    </button>
+    <div class="more" id="topmore">
+      <button onclick="toggleMenu(event, 'topmenu')" title="More">⋯</button>
+      <div class="menu" id="topmenu" style="display:none;">
+        <button onclick="doStatus()">Check AS400</button>
+        <button onclick="doUpdate()">⟳ Update app</button>
+      </div>
+    </div>
   </div>
-  <pre id="screen" style="display:none; background:#111; color:#0f0; padding:.8rem;
-       border-radius:8px; overflow:auto; font-size:.75rem; line-height:1.15;"></pre>
   <div class="row">
     <input id="num" placeholder="Order number (e.g. 880005)" autofocus
            onkeydown="if(event.key==='Enter') doCapture()">
@@ -584,43 +611,45 @@ function card(o) {
     const cls = res.status === 'duplicate' ? 'warn' : (res.needs_correction ? 'warn' : 'ok');
     status = `<div class="${cls}">→ ${res.status}${res.needs_correction ? ' (needs_correction)' : ''}: ${res.message||''}</div>`;
   }
-  const ship = o.shipping_address ? `<div class="muted">📍 Ship to: ${o.shipping_address}</div>` : '';
-  const notes = o.order_comments ? `<div class="muted">📝 Notes: ${o.order_comments}</div>` : '';
-  const via = o.ship_via ? `<span class="shipvia">🚚 ${o.ship_via}</span>` : '';
-  // Reconciliation: parsed line total vs the order Sub-Total. A mismatch means a
-  // line was likely dropped/misparsed — warn loudly but still allow sending.
+  // Context that lives INSIDE the detail panel (the compact card stays clean):
+  // ship-to, watcher notes, carrier and the total-mismatch explanation.
   const money = n => '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-  const mismatch = o.total_mismatch
-    ? `<div class="mismatch">⚠ El total no cuadra: parseado ${money(o.parsed_total)} vs orden ${money(o.subtotal)} — pueden faltar items. Revisa el detalle antes de enviar.</div>`
-    : '';
-  // This order number already has an archived copy — warn and offer to pull it out,
-  // showing whether the fresh scan is identical or what changed.
+  let dinfo = '';
+  if (o.total_mismatch) dinfo += `<div class="mismatch">⚠ El total no cuadra: parseado ${money(o.parsed_total)} vs orden ${money(o.subtotal)} — pueden faltar items.</div>`;
+  if (o.shipping_address) dinfo += `<div class="muted">📍 ${o.shipping_address}</div>`;
+  if (o.order_comments) dinfo += `<div class="muted">📝 ${o.order_comments}</div>`;
+  if (o.ship_via) dinfo += `<div class="muted">🚚 ${o.ship_via}</div>`;
+  // An archived copy of this number exists — rare, actionable, so it stays visible.
   const am = o.archived_match;
   const archNote = am
-    ? `<div class="archived-note">📦 Ya hay una versión <b>archivada</b> de #${o.order_number} (${fmtDate(am.archived_at)}). `
-      + (am.identical
-          ? '✓ El nuevo escaneo es idéntico.'
-          : `⚠ Difiere del nuevo escaneo: ${am.summary}.`)
-      + ` <button class="linkbtn" onclick="doRestore('${am.aid}')">Sacar del archivo</button></div>`
+    ? `<div class="archived-note">📦 Ya hay una versión <b>archivada</b> de #${o.order_number}. `
+      + (am.identical ? '✓ Idéntica.' : `⚠ Difiere: ${am.summary}.`)
+      + ` <button class="linkbtn" onclick="event.stopPropagation(); doRestore('${am.aid}')">Sacar del archivo</button></div>`
     : '';
-  return `<div class="card">
-      <div class="meta clickable" onclick="toggleDetail(${o.id})" title="Show pick detail">
-        <span>Order <b>#${o.order_number ?? '—'}</b></span>
-        <span>Customer <b>${o.customer}</b></span>
-        <span>Items <b>${o.item_count}</b></span>
-        <span>Total units <b>${o.total_units ?? '—'}</b></span>
-        ${via}
-        <span class="chev" id="chev-${o.id}">▾ detail</span>
+  const mm = o.total_mismatch ? '<span class="badge amber">⚠ TOTAL</span>' : '';
+  return `<div class="card tappable" onclick="toggleDetail(${o.id})" title="Tap to see items">
+      <div class="chead">
+        <span class="onum">#${o.order_number ?? '—'}</span>
+        <span class="ocust">${o.customer ?? ''}</span>
+        ${mm}
+        <span class="ostats">${o.item_count} items · ${o.total_units ?? '—'} units</span>
+        <span class="chev" id="chev-${o.id}">▾</span>
       </div>
-      <div class="detail" id="detail-${o.id}" style="display:none;"></div>
-      ${mismatch}
+      <div class="detail" id="detail-${o.id}" style="display:none;">
+        <div class="dinfo">${dinfo}</div>
+        <div id="ditems-${o.id}"></div>
+      </div>
       ${archNote}
-      ${ship}${notes}
       ${status}
-      <div class="actions">
+      <div class="actions" onclick="event.stopPropagation()">
         <button class="send" ${o.sent?'disabled':''} onclick="doSend(${o.id})">${o.sent?'Sent ✓':'Send to PickD'}</button>
-        ${o.sent?'':`<button class="secondary" onclick="doArchive(${o.id})">Archive</button>`}
-        <button class="secondary" onclick="doRemove(${o.id})">Remove</button>
+        <div class="more">
+          <button onclick="toggleMenu(event, 'menu-${o.id}')" title="More actions">⋯</button>
+          <div class="menu" id="menu-${o.id}" style="display:none;">
+            ${o.sent?'':`<button onclick="doArchive(${o.id})">Archive</button>`}
+            <button class="danger" onclick="doRemove(${o.id}, '${o.order_number ?? ''}')">Remove</button>
+          </div>
+        </div>
       </div>
     </div>`;
 }
@@ -632,20 +661,15 @@ function fmtDate(s) {
 }
 
 function archCard(a) {
-  const via = a.ship_via ? `<span class="shipvia">🚚 ${a.ship_via}</span>` : '';
-  const ship = a.shipping_address ? `<div class="muted">📍 Ship to: ${a.shipping_address}</div>` : '';
   return `<div class="card">
-      <div class="meta">
-        <span>Order <b>#${a.order_number ?? '—'}</b></span>
-        <span>Customer <b>${a.customer}</b></span>
-        <span>Items <b>${a.item_count}</b></span>
-        <span>Total units <b>${a.total_units ?? '—'}</b></span>
-        ${via}
+      <div class="chead">
+        <span class="onum">#${a.order_number ?? '—'}</span>
+        <span class="ocust">${a.customer ?? ''}</span>
+        <span class="ostats">${a.item_count} items · ${a.total_units ?? '—'} units</span>
       </div>
-      <div class="muted">📦 Archivada ${fmtDate(a.archived_at)}</div>
-      ${ship}
+      <div class="muted">📦 Archived ${fmtDate(a.archived_at)}</div>
       <div class="actions">
-        <button class="secondary" onclick="doRestore('${a.aid}')">Restaurar a pendientes</button>
+        <button class="secondary" onclick="doRestore('${a.aid}')">Restore</button>
       </div>
     </div>`;
 }
@@ -691,31 +715,44 @@ function ditem(it) {
 
 async function toggleDetail(id) {
   const box = document.getElementById('detail-'+id);
+  const itemsBox = document.getElementById('ditems-'+id);
   const chev = document.getElementById('chev-'+id);
-  if (!box) return;
-  if (box.style.display !== 'none') { box.style.display='none'; if(chev) chev.textContent='▾ detail'; return; }
+  if (!box || !itemsBox) return;
+  if (box.style.display !== 'none') { box.style.display='none'; if(chev) chev.textContent='▾'; return; }
   box.style.display = 'block';
-  if (chev) chev.textContent = '▴ detail';
-  if (box.dataset.loaded) return;             // already fetched this session
-  box.innerHTML = '<div class="dhead">Resolving pick locations…</div>';
+  if (chev) chev.textContent = '▴';
+  if (itemsBox.dataset.loaded) return;        // already fetched this session
+  itemsBox.innerHTML = '<div class="dhead">Resolving pick locations…</div>';
   try {
     const r = await fetch(`/api/orders/${id}/detail`);
     const data = await r.json();
-    if (!r.ok) { box.innerHTML = `<div class="dhead err">${data.error || 'Error loading detail.'}</div>`; return; }
+    if (!r.ok) { itemsBox.innerHTML = `<div class="dhead err">${data.error || 'Error loading detail.'}</div>`; return; }
     const items = data.items || [];
     const probs = items.filter(i => i.sku_not_found || i.insufficient_stock).length;
     const head = `<div class="dhead">
-        <span>Order <b>#${data.order_number ?? '—'}</b></span>
-        <span>Units <b>${data.total_units ?? '—'}</b></span>
         <span>Lines <b>${items.length}</b></span>
+        <span>Units <b>${data.total_units ?? '—'}</b></span>
         ${probs ? `<span class="err">⚠ ${probs} need attention</span>` : '<span class="ok">✓ all resolved</span>'}
       </div>`;
-    box.innerHTML = head + (items.length ? items.map(ditem).join('') : '<div class="dhead">No items.</div>');
-    box.dataset.loaded = '1';
+    itemsBox.innerHTML = head + (items.length ? items.map(ditem).join('') : '<div class="dhead">No items.</div>');
+    itemsBox.dataset.loaded = '1';
   } catch(e) {
-    box.innerHTML = `<div class="dhead err">Network error: ${e}</div>`;
+    itemsBox.innerHTML = `<div class="dhead err">Network error: ${e}</div>`;
   }
 }
+
+function toggleMenu(ev, id) {
+  ev.stopPropagation();
+  const m = document.getElementById(id);
+  if (!m) return;
+  const open = m.style.display !== 'none';
+  closeMenus();
+  m.style.display = open ? 'none' : 'block';
+}
+function closeMenus() {
+  document.querySelectorAll('.menu').forEach(m => { m.style.display = 'none'; });
+}
+document.addEventListener('click', closeMenus);
 
 function render(orders, archived) {
   const list = document.getElementById('list');
@@ -747,14 +784,20 @@ function render(orders, archived) {
   list.innerHTML = html;
 }
 
+function setDot(cls) {
+  const d = document.getElementById('dot');
+  if (d) d.className = 'dot' + (cls ? ' ' + cls : '');
+}
+
 async function doConnect() {
   const btn = document.getElementById('conn'); btn.disabled = true;
   msg('Launching AS400 and logging in… do not touch the keyboard (~10s).', 'warn');
   try {
     const r = await fetch('/api/connect', {method:'POST'});
     const data = await r.json();
+    setDot(r.ok ? 'ok' : 'err');
     msg(r.ok ? (data.message || 'Connected.') : (data.error||'Error connecting.'), r.ok?'ok':'err');
-  } catch(e) { msg('Network error: '+e, 'err'); }
+  } catch(e) { setDot('err'); msg('Network error: '+e, 'err'); }
   finally { btn.disabled = false; document.getElementById('num').focus(); }
 }
 
@@ -769,30 +812,15 @@ const STATE_LABELS = {
 };
 
 async function doStatus() {
-  const btn = document.getElementById('stat'); btn.disabled = true;
   msg('Checking AS400 status…', 'warn');
   try {
     const r = await fetch('/api/status', {method:'POST'});
     const data = await r.json();
-    if (!r.ok) { msg(data.error || 'Error reading the screen.', 'err'); }
+    if (!r.ok) { setDot('err'); msg(data.error || 'Error reading the screen.', 'err'); }
     else { const [label, cls] = STATE_LABELS[data.state] || [`State: ${data.state}`, 'muted'];
+           setDot(cls === 'ok' ? 'ok' : cls === 'err' ? 'err' : 'warn');
            msg(label, cls); }
-  } catch(e) { msg('Network error: '+e, 'err'); }
-  finally { btn.disabled = false; }
-}
-
-async function doPeek() {
-  const btn = document.getElementById('peek'); btn.disabled = true;
-  msg('Reading current Mocha screen…', 'warn');
-  try {
-    const r = await fetch('/api/peek', {method:'POST'});
-    const data = await r.json();
-    const pre = document.getElementById('screen');
-    if (!r.ok) { msg(data.error || 'Error reading screen.', 'err'); pre.style.display='none'; }
-    else { pre.textContent = data.screen || '(empty)'; pre.style.display='block';
-           msg('Screen captured below (' + (data.screen||'').length + ' chars).', 'ok'); }
-  } catch(e) { msg('Network error: '+e, 'err'); }
-  finally { btn.disabled = false; }
+  } catch(e) { setDot('err'); msg('Network error: '+e, 'err'); }
 }
 
 async function doCapture() {
@@ -820,7 +848,8 @@ async function doSend(id) {
   await load();
 }
 
-async function doRemove(id) {
+async function doRemove(id, num) {
+  if (!confirm(`Remove order ${num ? '#' + num : ''}? It won't come back automatically.`)) return;
   await fetch(`/api/orders/${id}`, {method:'DELETE'});
   await load();
 }
@@ -839,13 +868,11 @@ async function doRestore(aid) {
 
 async function doUpdate() {
   if (!confirm('Update the app to the latest version?\\nIt will pull the new code, install libraries and restart — the window reopens automatically.')) return;
-  const btn = document.getElementById('upd'); btn.disabled = true;
   msg('Updating… pulling code and installing libraries. The app will restart and reopen shortly.', 'warn');
   try {
     const r = await fetch('/api/update', {method:'POST'});
     const data = await r.json();
     msg(r.ok ? (data.message || 'Updating…') : (data.error || 'Error updating.'), r.ok ? 'ok' : 'err');
-    if (!r.ok) btn.disabled = false;
   } catch(e) {
     // The app may have already restarted mid-request — that's expected.
     msg('Update in progress — the app is restarting and will reopen automatically.', 'warn');
@@ -853,8 +880,15 @@ async function doUpdate() {
 }
 
 load();
-// Live refresh so auto-scanned orders and statuses appear without a manual reload.
-setInterval(load, 8000);
+// Live refresh so auto-scanned orders appear without a manual reload — but never
+// while the operator is interacting (an open detail or menu would get wiped by
+// the re-render).
+function uiBusy() {
+  const open = el => el.style.display !== 'none';
+  return [...document.querySelectorAll('.detail')].some(open)
+      || [...document.querySelectorAll('.menu')].some(open);
+}
+setInterval(() => { if (!uiBusy()) load(); }, 8000);
 </script>
 </body>
 </html>
