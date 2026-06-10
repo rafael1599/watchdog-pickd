@@ -710,6 +710,19 @@ INDEX_HTML = """
                border: 1px solid rgba(37,99,235,.35); }
     /* FedEx orders get a purple accent (mirrors PickD's verification palette). */
     .card.fedex { border-left: 5px solid #a855f7; background: rgba(168,85,247,.06); }
+    /* Two lanes: FedEx (left, purple) and Truck (right, emerald) — same palette
+       as PickD's Verification Board (FDX purple / TRK emerald). Stacks on phones. */
+    .lanes { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; align-items: start; }
+    @media (max-width: 760px) { .lanes { grid-template-columns: 1fr; } }
+    .lane { border-radius: 12px; padding: .6rem; }
+    .lane-fedex { background: rgba(168,85,247,.08); border: 1px solid rgba(168,85,247,.25); }
+    .lane-truck { background: rgba(16,185,129,.07); border: 1px solid rgba(16,185,129,.22); }
+    .lane-title { font-size: .75rem; font-weight: 800; letter-spacing: .08em;
+                  text-transform: uppercase; margin: 0 0 .5rem .2rem; }
+    .lane-fedex .lane-title { color: #a855f7; }
+    .lane-truck .lane-title { color: #10b981; }
+    .lane-truck .card { border-left: 5px solid rgba(16,185,129,.6); }
+    .lane-empty { font-size: .85rem; margin: .2rem; }
     .fdx-badge { font-size: .8rem; font-weight: 800; letter-spacing: .04em;
                  padding: .05rem .5rem; border-radius: 999px; align-self: center;
                  background: rgba(168,85,247,.12); color: #a855f7;
@@ -1080,9 +1093,20 @@ function render(orders, archived) {
   if (!active.length) {
     html += '<p class="muted">No orders yet. The scanner adds them automatically, or capture one above.</p>';
   } else {
-    // Auto-scanned and manual captures are one unified list — each is a full,
-    // sendable card (no separate "load to review" step) and deduped by order #.
-    html += active.map(card).join('');
+    // Two lanes (like the Verification Board): FedEx on the LEFT, trucks on the
+    // RIGHT, each with its background tint. Cards stay full/sendable as before.
+    const fedex = active.filter(o => o.shipping_type === 'fedex');
+    const trucks = active.filter(o => o.shipping_type !== 'fedex');
+    html += `<div class="lanes">
+      <div class="lane lane-fedex">
+        <div class="lane-title">FedEx (${fedex.length})</div>
+        ${fedex.map(card).join('') || '<p class="muted lane-empty">No FedEx orders.</p>'}
+      </div>
+      <div class="lane lane-truck">
+        <div class="lane-title">Truck (${trucks.length})</div>
+        ${trucks.map(card).join('') || '<p class="muted lane-empty">No truck orders.</p>'}
+      </div>
+    </div>`;
   }
   // Already in PickD (arrived via PDF or elsewhere) — kept locally, out of the way.
   // Cards keep their Send button: re-sending appends any missing SKUs (delta).
