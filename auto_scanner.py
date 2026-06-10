@@ -112,9 +112,10 @@ def run_scan_step(
 ) -> dict:
     """Capture the single next unscanned order. Returns {"action", "number"}.
 
-    action ∈ {captured, not_found, incomplete, unavailable}. Only a successful
-    capture stores to the cache (advancing the cursor); the others leave the cursor
-    so the same number is retried.
+    action ∈ {captured, empty_skipped, not_found, incomplete, unavailable}. A
+    successful capture stores to the cache (advancing the cursor); a VOID/empty
+    order only advances the cursor (nothing cached); the rest leave the cursor so
+    the same number is retried.
     """
     if preview_fn is None:
         from pipeline import preview_order as preview_fn  # local import: avoids DB deps at import
@@ -130,7 +131,21 @@ def run_scan_step(
         # Partial / stalled capture (no END OF ORDER) — retry the same number later.
         return {"action": "incomplete", "number": str(n)}
 
-    meta = _meta_from_preview(preview_fn(text))
+    preview = preview_fn(text)
+    meta = _meta_from_preview(preview)
+    # VOID/empty order: a COMPLETE screen (END OF ORDER reached) with a real order
+    # number but ZERO items — e.g. an order voided in AS400 ('Account Number: VOID').
+    # It will never gain items, so retrying is useless: advance the cursor past it
+    # (caching nothing) and move on to the next number. Without this the scanner
+    # treated it as not_found and retried the SAME number forever.
+    if (
+        meta.get("order_number")
+        and not (meta.get("item_count") or 0)
+        and preview.get("is_last_page")
+    ):
+        scanned_store.skip(n)
+        log.info("auto-scan: #%s is VOID/empty (no items) — skipped past it", n)
+        return {"action": "empty_skipped", "number": str(n)}
     # Never cache junk: a real capture must parse to an order with items. The
     # 'Invalid Order Number, REENTER' screen (and any other non-order text) parses
     # to no number / no items — caching it floods the UI with empty 'Order #—'
@@ -144,6 +159,8 @@ def run_scan_step(
 def _wait_for(action: str) -> float:
     return {
         "captured": FOUND_NEXT_DELAY_SEC,
+        # A skipped VOID/empty order is progress — move to the next number quickly.
+        "empty_skipped": FOUND_NEXT_DELAY_SEC,
         "not_found": NOT_FOUND_WAIT_SEC,
         "incomplete": INCOMPLETE_RETRY_SEC,
         "unavailable": UNAVAILABLE_WAIT_SEC,

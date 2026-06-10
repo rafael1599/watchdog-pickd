@@ -439,7 +439,18 @@ def capture():
     # of the same number reuses it instead of re-driving Mocha. Only cache REAL
     # orders: junk text (e.g. an error screen) would resurface as empty cards.
     try:
-        meta = auto_scanner._meta_from_preview(preview_order(raw_text))
+        preview = preview_order(raw_text)
+        meta = auto_scanner._meta_from_preview(preview)
+        # VOID/empty order (complete screen, zero items): tell the operator clearly
+        # instead of adding an empty card that can never be sent.
+        if (
+            meta.get("order_number")
+            and not (meta.get("item_count") or 0)
+            and preview.get("is_last_page")
+        ):
+            return jsonify(
+                {"error": f"Order #{order_number} is VOID/empty (no items) — nothing to capture."}
+            ), 422
         if meta.get("order_number") and (meta.get("item_count") or 0):
             scanned_store.put(order_number, raw_text, meta, source="manual_capture")
     except Exception as e:
