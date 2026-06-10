@@ -45,9 +45,15 @@ from as400_capture import (  # noqa: E402
     classify_screen,
 )
 from auto_scanner import capture_lock, manual_waiting, start_auto_scanner  # noqa: E402
-from pipeline import preview_order, process_order_text, resolve_order_items  # noqa: E402
+from pipeline import (  # noqa: E402
+    estimate_pallets,
+    preview_order,
+    process_order_text,
+    resolve_order_items,
+)
 from supabase_client import (  # noqa: E402
     find_orders_in_pickd,
+    get_bike_skus,
     get_verification_board,
     get_verification_count,
 )
@@ -227,6 +233,14 @@ def _auto_archive_stale() -> int:
 def _add_order(raw_text: str) -> dict:
     global _next_id
     preview = preview_order(raw_text)
+    # Pallet estimate (same rule PickD applies): needs the bike catalog, which is
+    # one cached Supabase query per hour. Fail-open: without DB access the card
+    # simply falls back to showing units only.
+    try:
+        pallets_est = estimate_pallets(preview["items"], get_bike_skus())
+    except Exception as e:  # noqa: BLE001
+        logging.debug("Pallet estimate unavailable: %s", e)
+        pallets_est = None
     with _lock:
         oid = _next_id
         _next_id += 1
@@ -248,6 +262,7 @@ def _add_order(raw_text: str) -> dict:
             "customer": preview["customer"],
             "item_count": preview["item_count"],
             "total_units": preview["total_units"],
+            "pallets_est": pallets_est,
             "subtotal": preview.get("subtotal"),
             "parsed_total": preview.get("parsed_total"),
             "total_mismatch": preview.get("total_mismatch", False),
@@ -853,6 +868,17 @@ function openBoard() {
 }
 function closeBoard() { document.getElementById('vboard-overlay').style.display = 'none'; }
 
+// "2 pallets · 20 units" — pallets estimated with PickD's own rule (parts-only = 1;
+// bikes = ceil(units/12)). Falls back to the item count only if the estimate is
+// unavailable (e.g. Supabase unreachable when the order was captured).
+function palletStats(o) {
+  const units = `${o.total_units ?? '—'} units`;
+  if (o.pallets_est != null) {
+    return `${o.pallets_est} ${o.pallets_est === 1 ? 'pallet' : 'pallets'} · ${units}`;
+  }
+  return `${o.item_count} items · ${units}`;
+}
+
 function card(o) {
   const res = o.result;
   let status = '';
@@ -888,7 +914,7 @@ function card(o) {
         <span class="onum">#${o.order_number ?? '—'}</span>
         <span class="ocust">${o.customer ?? ''}</span>
         ${fdx}${mm}
-        <span class="ostats">${o.item_count} items · ${o.total_units ?? '—'} units</span>
+        <span class="ostats">${palletStats(o)}</span>
         <span class="chev" id="chev-${o.id}">▾</span>
       </div>
       ${odate}
@@ -923,7 +949,7 @@ function archCard(a) {
       <div class="chead">
         <span class="onum">#${a.order_number ?? '—'}</span>
         <span class="ocust">${a.customer ?? ''}</span>
-        <span class="ostats">${a.item_count} items · ${a.total_units ?? '—'} units</span>
+        <span class="ostats">${palletStats(a)}</span>
       </div>
       <div class="muted">📦 Archived ${fmtDate(a.archived_at)}</div>
       <div class="actions">
@@ -1103,7 +1129,7 @@ async function doCapture() {
     const data = await r.json();
     if (!r.ok) { msg(data.error || 'Error capturing.', 'err'); }
     else { const fc = data.from_cache ? ' · ya escaneada por el auto-scan' : '';
-           msg(`Captured order #${data.order_number ?? '—'} (${data.item_count} items, ${data.total_units} units)${fc}.`, 'ok');
+           msg(`Captured order #${data.order_number ?? '—'} (${palletStats(data)})${fc}.`, 'ok');
            document.getElementById('num').value=''; }
   } catch(e) { msg('Network error: '+e, 'err'); }
   finally { btn.disabled = false; await load(); document.getElementById('num').focus(); }
