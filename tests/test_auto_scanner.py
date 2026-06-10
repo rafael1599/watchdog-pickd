@@ -111,3 +111,68 @@ def test_system_idle_seconds_unknown_is_large(monkeypatch):
 
     monkeypatch.setattr(auto_scanner.subprocess, "run", boom)
     assert auto_scanner.system_idle_seconds() > 1e6  # treat as idle when unknown
+
+
+# --- VOID / empty orders (complete screen, zero items) --------------------------
+
+# Real capture of a voided order (operator-reported): valid ORDER INQUIRY screen,
+# order number present, END OF ORDER reached, but ZERO line items.
+VOID_SCREEN = """                            O R D E R   I N Q U I R Y
+
+ Order Number: 880138                       Account Number: VOID
+
+ Bill VOID VOID VOID VOID
+
+ Quant  Quant  Stock #   W/H   Description                       Unit    Extend
+   Ord   Ship                                                   Price
+
+                                END OF ORDER                                .00
+              Enter             Cmd6
+              More Details       RETURN TO SELECT"""
+
+
+def test_step_void_order_is_skipped_and_advances():
+    # The killer bug: a VOID order parsed to 0 items was treated as not_found, so
+    # the cursor never advanced and the scanner retried the SAME number forever.
+    def cap(n, driver):
+        return VOID_SCREEN
+
+    def void_preview(text):
+        return {"order_number": "880138", "item_count": 0, "total_units": 0, "is_last_page": True}
+
+    r = auto_scanner.run_scan_step(None, start=880138, capture_fn=cap, preview_fn=void_preview)
+    assert r == {"action": "empty_skipped", "number": "880138"}
+    assert scanned_store.get("880138") is None  # never a candidate card
+    assert scanned_store.next_scan_number(880138) == 880139  # moved past it
+
+
+def test_step_void_order_with_real_parser():
+    # End-to-end through the real preview_order: the 880138 screen must classify
+    # as empty_skipped, not as a candidate and not as not_found.
+    from pipeline import preview_order
+
+    def cap(n, driver):
+        return VOID_SCREEN
+
+    r = auto_scanner.run_scan_step(None, start=880138, capture_fn=cap, preview_fn=preview_order)
+    assert r["action"] == "empty_skipped"
+    assert scanned_store.get("880138") is None
+    assert scanned_store.next_scan_number(880138) == 880139
+
+
+def test_step_incomplete_empty_capture_still_retried():
+    # Zero items but NO 'END OF ORDER' → could be a stalled capture of a real
+    # order; must keep retrying (not skip past it and lose the order).
+    def cap(n, driver):
+        return "ORDER 880140 partial screen"
+
+    def partial_preview(text):
+        return {"order_number": "880140", "item_count": 0, "total_units": 0, "is_last_page": False}
+
+    r = auto_scanner.run_scan_step(None, start=880140, capture_fn=cap, preview_fn=partial_preview)
+    assert r["action"] == "not_found"
+    assert scanned_store.next_scan_number(880140) == 880140  # cursor untouched
+
+
+def test_wait_for_empty_skipped_moves_on_quickly():
+    assert auto_scanner._wait_for("empty_skipped") == auto_scanner.FOUND_NEXT_DELAY_SEC

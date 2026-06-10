@@ -139,6 +139,20 @@ def update_meta(order_number, **meta) -> None:
             _save(data)
 
 
+def skip(order_number) -> None:
+    """Advance the scan cursor past a number WITHOUT caching anything.
+
+    For orders that exist in AS400 but must never become candidates — e.g. a VOID
+    order (complete screen, zero items). Without this the scanner would treat the
+    number as not-found and retry it forever, never reaching the next order.
+    """
+    key = str(order_number)
+    with _lock:
+        if key.isdigit() and int(key) >= SCAN_START:
+            if int(key) + 1 > (_read_cursor() or 0):
+                _write_cursor(int(key) + 1)
+
+
 def delete(order_number) -> None:
     """Remove an order from the cache (e.g. after archiving it). Does NOT rewind the
     cursor, so the scanner won't re-capture the removed number."""

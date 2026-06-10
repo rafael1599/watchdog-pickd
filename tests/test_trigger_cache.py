@@ -266,3 +266,28 @@ def test_remove_by_id_removes_from_cache(client):
     r = client.delete(f"/api/orders/{oid}", headers=HDR)
     assert r.status_code == 200
     assert scanned_store.get("880112") is None  # removal sticks (no re-sync)
+
+
+VOID_SCREEN = """                            O R D E R   I N Q U I R Y
+
+ Order Number: 880138                       Account Number: VOID
+
+ Bill VOID VOID VOID VOID
+
+ Quant  Quant  Stock #   W/H   Description                       Unit    Extend
+   Ord   Ship                                                   Price
+
+                                END OF ORDER                                .00
+              Enter             Cmd6
+              More Details       RETURN TO SELECT"""
+
+
+def test_manual_capture_of_void_order_is_rejected_clearly(client, monkeypatch):
+    # A VOID order (complete screen, zero items) must NOT become an empty card:
+    # the operator gets a clear 422 message and nothing is cached.
+    monkeypatch.setattr(appmod, "capture_order", lambda num, drv: VOID_SCREEN)
+    monkeypatch.setattr(appmod, "MochaDriver", lambda *a, **k: object())
+    r = client.post("/api/capture", json={"order_number": "880138"}, headers=HDR)
+    assert r.status_code == 422
+    assert "VOID/empty" in r.get_json()["error"]
+    assert scanned_store.get("880138") is None
