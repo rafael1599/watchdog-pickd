@@ -144,6 +144,12 @@ class CaptureError(Exception):
     """Raised when a capture cannot complete (e.g. END OF ORDER never appears)."""
 
 
+class OrderNotFound(CaptureError):
+    """The order number isn't a real order (yet): AS400 rejects it ('Invalid Order
+    Number, REENTER') or we're not on an order view. Distinct from a partial/stalled
+    capture so the auto-scanner can wait longer before retrying the same number."""
+
+
 class AS400Disconnected(CaptureError):
     """The emulator isn't connected to the host (server down / session ended)."""
 
@@ -382,7 +388,7 @@ def capture_order(
     # generic order-screen check below would pass — detect the rejection explicitly
     # and stop here (the auto-scanner retries this same number next cycle).
     if _is_invalid_order(header):
-        raise CaptureError(
+        raise OrderNotFound(
             f"Order {order_number} doesn't exist yet (AS400: 'Invalid Order Number, REENTER')."
         )
 
@@ -390,7 +396,7 @@ def capture_order(
     # or the order doesn't exist. Bail out now instead of pressing F5 and looping
     # through pages that will never show END OF ORDER.
     if not _looks_like_order_screen(header):
-        raise CaptureError(
+        raise OrderNotFound(
             f"The screen isn't an order inquiry (wrong view, or order "
             f"{order_number} doesn't exist). Go to order search (F7 → 3) and try again."
         )
