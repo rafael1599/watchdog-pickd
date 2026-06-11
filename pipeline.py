@@ -9,6 +9,7 @@ This is the single source of truth for "turn order text into a PickD picking lis
 """
 
 import logging
+import re
 from typing import Optional
 
 from extractor import compute_hash
@@ -38,6 +39,37 @@ _REGULAR_HINTS = ("UPS", "TRUCK", "TRK", "FREIGHT", "ABF", "LTL", "GROUND FREIGH
 # (palletized / big), fewer is small-parcel "fedex". We lack per-SKU weights
 # locally, so only the units rule applies.
 HEURISTIC_REGULAR_UNITS = 5
+
+# ── Note filtering (mirror of pickd's meaningfulNote, src/features/picking/utils) ──
+# Order Comments mix real instructions with freight boilerplate. The red note on
+# the card should only show meaningful ones; the FULL comment is still sent to
+# PickD untouched (filtering is display-only).
+_NOTE_KEEP = re.compile(
+    r"\bship|\bnot\b|\bwait|\bhold|\bdo\s*not\b|\bback\s*order|\burgent\b|\basap\b"
+    r"|\battn\b|\brush\b|\bcall\b|\bcancel|\bdamage|\bshort|\bmissing|\bbefore\b"
+    r"|\bafter\b|\bpick\s*up|\bwill\s*call|\bdate\b",
+    re.IGNORECASE,
+)
+_NOTE_NOISE = re.compile(
+    r"free\s*freight|freight\s*\$?\s*[\d.,]+|^\s*freight\s*$|\bprepaid\b|\bf\.?o\.?b\.?\b",
+    re.IGNORECASE,
+)
+
+
+def meaningful_note(raw) -> Optional[str]:
+    """Return the note when it's worth showing, None when it's pure freight noise.
+
+    Keep rules win (a real instruction next to 'FREE FREIGHT' is kept verbatim);
+    unknown notes are kept too — never lose information.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if _NOTE_KEEP.search(text):
+        return text
+    if _NOTE_NOISE.search(text):
+        return None
+    return text
 
 
 def classify_shipping(ship_via: Optional[str], total_units: int) -> str:

@@ -306,6 +306,7 @@ class TestFindCombinableOrderByCustomer:
         mock_query.select.return_value = mock_query
         mock_query.eq.return_value = mock_query
         mock_query.in_.return_value = mock_query
+        mock_query.or_.return_value = mock_query
         mock_query.gte.return_value = mock_query
         mock_query.order.return_value = mock_query
         mock_query.limit.return_value = mock_query
@@ -326,6 +327,7 @@ class TestFindCombinableOrderByCustomer:
         mock_query.select.return_value = mock_query
         mock_query.eq.return_value = mock_query
         mock_query.in_.return_value = mock_query
+        mock_query.or_.return_value = mock_query
         mock_query.gte.return_value = mock_query
         mock_query.order.return_value = mock_query
         mock_query.limit.return_value = mock_query
@@ -344,6 +346,7 @@ class TestFindCombinableOrderByCustomer:
         mock_query.select.return_value = mock_query
         mock_query.eq.return_value = mock_query
         mock_query.in_.return_value = mock_query
+        mock_query.or_.return_value = mock_query
         mock_query.gte.return_value = mock_query
         mock_query.order.return_value = mock_query
         mock_query.limit.return_value = mock_query
@@ -365,6 +368,7 @@ class TestFindCombinableOrderByCustomer:
         mock_query.select.return_value = mock_query
         mock_query.eq.return_value = mock_query
         mock_query.in_.return_value = mock_query
+        mock_query.or_.return_value = mock_query
         mock_query.gte.return_value = mock_query
         mock_query.order.return_value = mock_query
         mock_query.limit.return_value = mock_query

@@ -357,6 +357,11 @@ def find_combinable_order_by_customer(
     Find an existing picking list for the same customer that can be combined.
     Only returns orders in combinable statuses, created within the last 24 hours.
     Returns the most recently created one.
+
+    Waiting orders (is_waiting_inventory = true — they live in needs_correction,
+    a combinable status) are EXCLUDED: an order parked waiting for inventory must
+    never be auto-combined with a new arrival. Joining one is a manual,
+    user-confirmed action in PickD only (operator rule, 2026-06-11).
     """
     client = get_client()
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
@@ -366,6 +371,7 @@ def find_combinable_order_by_customer(
         .select("*")
         .eq("customer_id", customer_id)
         .in_("status", COMBINABLE_STATUSES)
+        .or_("is_waiting_inventory.is.null,is_waiting_inventory.eq.false")
         .gte("created_at", cutoff)
         .order("created_at", desc=True)
         .limit(1)
