@@ -22,11 +22,20 @@ from as400_capture import (
     _has_end_marker,
     _is_invalid_order,
     _is_message_info_screen,
+    _is_void_order,
     bootstrap_session,
     capture_order,
     classify_screen,
     run_login,
 )
+
+# A VOID order's header (operator report 2026-06-11). Pressing F5 on it is what
+# routes to the dead-end message screen — so we must skip on the HEADER, pre-F5.
+VOID_HEADER = """                            O R D E R   I N Q U I R Y
+ Order Number: 880138                       Account Number: VOID
+ Bill VOID VOID VOID VOID
+                                   Cmd5            Cmd6
+                                    DETAILS         RETURN TO SELECT"""
 
 # The 'ADDITIONAL MESSAGE INFORMATION' dead-end a VOID order can route to (operator
 # report 2026-06-11): a BAS-#### error + 'No matching key' + an 'Option:' prompt.
@@ -485,3 +494,23 @@ def test_void_message_screen_after_f5_presses_f6_and_skips():
         capture_order("880151", driver, page_wait=0)
     # F6 (search) → F5 (items) → F6 (recover from the dead-end message screen).
     assert driver.keys == ["f6", "f5", "f6"]
+
+
+# --- VOID prevention: skip on the header BEFORE F5 (never enter the dead screen) ---
+
+
+def test_void_order_detector():
+    assert _is_void_order(VOID_HEADER)
+    assert _is_void_order("Account Number:   VOID")
+    assert not _is_void_order(ORDER_HEADER_SCREEN)  # a normal order
+    assert not _is_void_order("Bill AVOID COLLISIONS LLC")  # 'VOID' inside a word, once
+
+
+def test_void_header_skips_before_pressing_f5():
+    driver = FakeDriver([READY, VOID_HEADER])
+    with pytest.raises(OrderVoidSkip):
+        capture_order("880138", driver, page_wait=0)
+    # Initial F6 (search) + recovery F6. Crucially NO F5 — we never trigger the
+    # dead-end message screen.
+    assert driver.keys == ["f6", "f6"]
+    assert "f5" not in driver.keys

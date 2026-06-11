@@ -131,6 +131,22 @@ def _is_invalid_order(text: str) -> bool:
     return "INVALIDORDERNUMBER" in norm or "INVALIDORDER" in norm
 
 
+def _is_void_order(text: str) -> bool:
+    """True if the ORDER header is a VOID order ('Account Number: VOID', the Ship/
+    Bill name is 'VOID VOID VOID …').
+
+    Pressing F5 (DETAILS) on a VOID order is what routes the terminal to the
+    dead-end 'ADDITIONAL MESSAGE INFORMATION' screen, where NO key works and the
+    operator has to close the session and log back in. So we detect VOID on the
+    HEADER and skip BEFORE pressing F5 — never entering that screen at all.
+
+    Normalized to alphanumerics only so the ':' after 'Account Number' and the
+    5250 letter-spacing don't break the match.
+    """
+    norm = re.sub(r"[^A-Z0-9]", "", text.upper())
+    return "ACCOUNTNUMBERVOID" in norm or "BILLVOIDVOID" in norm or "SHIPVOIDVOID" in norm
+
+
 def _is_message_info_screen(text: str) -> bool:
     """True on the AS400 'ADDITIONAL MESSAGE INFORMATION' message-detail screen.
 
@@ -413,8 +429,17 @@ def capture_order(
             f"Order {order_number} doesn't exist yet (AS400: 'Invalid Order Number, REENTER')."
         )
 
-    # A VOID order can land on the 'ADDITIONAL MESSAGE INFORMATION' screen instead
-    # of an order view. Dead end → press F6 back to order search and skip.
+    # PREVENTION (primary): a VOID order header. Pressing F5 on it routes to the
+    # dead-end message screen where no key works (full re-login needed), so we
+    # SKIP here — before F5 — and never enter that screen. F6 (return to select)
+    # works from the header view; the next capture starts clean.
+    if _is_void_order(header):
+        driver.key("f6")
+        raise OrderVoidSkip(f"Order {order_number} is VOID (header) — skipped before F5.")
+
+    # DEFENSE IN DEPTH: if we somehow already landed on the message screen, still
+    # try F6 and skip rather than page-looping (no key may work here, but the next
+    # capture's initial F6 / a re-login is the operator's recovery).
     if _is_message_info_screen(header):
         driver.key("f6")
         raise OrderVoidSkip(
