@@ -677,10 +677,13 @@ INDEX_HTML = """
     .ocust { font-size: .95rem; font-weight: 600; color: #374151; flex: 1 1 12ch;
              min-width: 0; line-height: 1.25; overflow-wrap: anywhere; }
     .ostats { font-size: .8rem; font-weight: 700; color: #6b7280; white-space: nowrap; }
-    /* Inside a lane there's half the width: compact the number/stats so the
-       customer keeps room. */
+    /* Inside a lane there's half the width: the customer name takes its OWN full
+       line (always visible), with number/badges above and stats below; number and
+       stats are compacted. This keeps two lanes usable even at half-screen Safari. */
     .lane .onum { font-size: 1.15rem; }
     .lane .ostats { font-size: .72rem; }
+    .lane .ocust { flex: 1 1 100%; order: 10; font-size: .9rem; }
+    .lane .lane, .lane .card { min-width: 0; }
     .chev { color: #9ca3af; font-size: .85rem; }
     .badge.amber { font-size: .65rem; font-weight: 800; letter-spacing: .06em;
                    padding: .1rem .4rem; border-radius: 6px;
@@ -717,11 +720,12 @@ INDEX_HTML = """
     /* FedEx orders get a purple accent (mirrors PickD's verification palette). */
     .card.fedex { border-left: 5px solid #a855f7; background: rgba(168,85,247,.06); }
     /* Two lanes: FedEx (left, purple) and Truck (right, emerald) — same palette
-       as PickD's Verification Board (FDX purple / TRK emerald). Stacks on phones. */
+       as PickD's Verification Board (FDX purple / TRK emerald). */
     .lanes { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; align-items: start; }
-    /* Below ~1000px two lanes leave no room for the customer name — stack them.
-       (Safari at 50% of the MacBook screen lands here.) */
-    @media (max-width: 1000px) { .lanes { grid-template-columns: 1fr; } }
+    /* The two lanes MUST survive Safari at half-screen (the operator's 50/50
+       setup) — cards reflow inside them instead of the lanes collapsing. Only a
+       truly tiny window (a phone) stacks to one column. */
+    @media (max-width: 560px) { .lanes { grid-template-columns: 1fr; } }
     .lane { border-radius: 12px; padding: .6rem; }
     .lane-fedex { background: rgba(168,85,247,.08); border: 1px solid rgba(168,85,247,.25); }
     .lane-truck { background: rgba(16,185,129,.07); border: 1px solid rgba(16,185,129,.22); }
