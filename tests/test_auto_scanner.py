@@ -202,3 +202,17 @@ def test_health_degrades_to_unknown_when_stale(monkeypatch):
         auto_scanner._as400_health, "at", time.time() - auto_scanner.AS400_HEALTH_MAX_AGE_SEC - 1
     )
     assert auto_scanner.as400_health()["state"] == "unknown"
+
+
+def test_step_void_message_screen_is_skipped(monkeypatch):
+    # capture_order raises OrderVoidSkip (after pressing F6) when a VOID order
+    # dead-ends on the AS400 message screen → advance past it, cache nothing.
+    from as400_capture import OrderVoidSkip
+
+    def cap(n, driver):
+        raise OrderVoidSkip("routed to message screen")
+
+    r = auto_scanner.run_scan_step(None, start=880150, capture_fn=cap, preview_fn=_preview)
+    assert r == {"action": "empty_skipped", "number": "880150"}
+    assert scanned_store.get("880150") is None
+    assert scanned_store.next_scan_number(880150) == 880151
