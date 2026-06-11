@@ -48,6 +48,7 @@ from as400_capture import (  # noqa: E402
 from auto_scanner import capture_lock, manual_waiting, start_auto_scanner  # noqa: E402
 from pipeline import (  # noqa: E402
     estimate_pallets,
+    meaningful_note,
     preview_order,
     process_order_text,
     resolve_order_items,
@@ -272,6 +273,9 @@ def _add_order(raw_text: str) -> dict:
             "order_date": preview.get("order_date"),
             "shipping_address": preview.get("shipping_address"),
             "order_comments": preview.get("order_comments"),
+            # Red note on the card: only meaningful comments (freight boilerplate
+            # filtered). The FULL order_comments still goes to PickD on send.
+            "order_note_display": meaningful_note(preview.get("order_comments")),
             "items": preview["items"],
             "archived_match": archived_match,
             "raw_text": raw_text,
@@ -954,9 +958,11 @@ function card(o) {
   const isFedex = o.shipping_type === 'fedex';
   const fdx = isFedex ? `<span class="fdx-badge">FDX</span>` : '';
   const odate = o.order_date ? `<div class="orderdate">Order date: ${o.order_date}</div>` : '';
-  // Order Comments are operationally important → prominent red note in the main
-  // view, never hidden behind a tap.
-  const note = o.order_comments ? `<div class="order-note">⚠ ${o.order_comments}</div>` : '';
+  // Meaningful Order Comments → prominent red note in the main view (freight
+  // boilerplate like a bare 'FREE FREIGHT' is filtered server-side; the full
+  // comment is still sent to PickD). Fallback covers cached pre-filter entries.
+  const noteText = o.order_note_display !== undefined ? o.order_note_display : o.order_comments;
+  const note = noteText ? `<div class="order-note">⚠ ${noteText}</div>` : '';
   const money = n => '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
   let dinfo = '';
   if (o.total_mismatch) dinfo += `<div class="mismatch">⚠ El total no cuadra: parseado ${money(o.parsed_total)} vs orden ${money(o.subtotal)} — pueden faltar items.</div>`;
