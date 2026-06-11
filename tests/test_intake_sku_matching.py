@@ -54,3 +54,38 @@ def test_duplicate_identical_catalog_rows_are_not_a_collision():
     items = _to_cart_items(client, [{"sku": "034664BR", "qty": 1, "description": "d"}])
     assert items[0]["sku"] == "03-4664BR"
     assert items[0]["sku_not_found"] is False
+
+
+# --- finish/variant suffix: let the CATALOG decide (operator-reported 2026-06-11) --
+
+
+def test_suffix_kept_when_catalog_has_it():
+    # AS400 line '03 3769 BLD'; the parser truncates to '033769BL' but the catalog
+    # SKU really is '03-3769BLD' — the full raw form must win.
+    client = _client_with_catalog(["03-3769BLD"])
+    items = _to_cart_items(
+        client, [{"sku": "033769BL", "raw_sku": "03 3769 BLD", "qty": 1, "description": "d"}]
+    )
+    assert items[0]["sku"] == "03-3769BLD"
+    assert items[0]["sku_not_found"] is False
+
+
+def test_suffix_dropped_when_catalog_lacks_it():
+    # Same source shape, but this catalog entry has no 3rd letter → fall back to
+    # the 2-letter-color canonical guess (previous behavior preserved).
+    client = _client_with_catalog(["03-3768BL"])
+    items = _to_cart_items(
+        client, [{"sku": "033768BL", "raw_sku": "03 3768 BLD", "qty": 1, "description": "d"}]
+    )
+    assert items[0]["sku"] == "03-3768BL"
+    assert items[0]["sku_not_found"] is False
+
+
+def test_full_suffixed_match_beats_truncated_when_both_exist():
+    # If BOTH '03-3769BL' and '03-3769BLD' exist, the source said BLD → the more
+    # specific full match must be chosen, never the silently-truncated one.
+    client = _client_with_catalog(["03-3769BL", "03-3769BLD"])
+    items = _to_cart_items(
+        client, [{"sku": "033769BL", "raw_sku": "03 3769 BLD", "qty": 1, "description": "d"}]
+    )
+    assert items[0]["sku"] == "03-3769BLD"

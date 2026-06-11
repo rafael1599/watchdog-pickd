@@ -600,12 +600,20 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
     for item in parsed_items:
         normalized_pdf_sku = item["sku"]
 
-        # Exact match on the normalized SKU. `parse_items` already yields the
-        # canonical SKU (dept + number + 2-letter color) and keeps any finish/
-        # variant suffix out of it, so no suffix-stripping fallback is needed here.
-        # (A blind 'strip trailing T' fallback was also unsafe: it could mangle a
-        # real 2-letter color that ends in T, e.g. 'WT'/'GT'.)
-        db_sku = sku_map.get(normalized_pdf_sku)
+        # Most-specific match FIRST: the full raw SKU including any finish/variant
+        # suffix (e.g. '03 3769 BLD' → '033769BLD'), then the parser's 2-letter-color
+        # canonical guess ('033769BL'). The catalog is inconsistent: some SKUs keep
+        # the 3rd letter ('03-3769BLD' — operator-reported 2026-06-11), others don't
+        # ('03-3768BL' for a source 'BLD'), so we let the catalog decide instead of
+        # guessing at parse time. (A blind 'strip trailing T' fallback stays out:
+        # it could mangle a real 2-letter color like 'WT'/'GT'.)
+        candidates = []
+        raw_norm = normalize_sku(item.get("raw_sku") or "")
+        if raw_norm:
+            candidates.append(raw_norm)
+        if normalized_pdf_sku not in candidates:
+            candidates.append(normalized_pdf_sku)
+        db_sku = next((sku_map[c] for c in candidates if c in sku_map), None)
 
         not_found = db_sku is None
         found_db_skus.append(db_sku) if db_sku else None
