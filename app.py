@@ -40,6 +40,7 @@ from as400_capture import (  # noqa: E402
     AS400ManualLoginRequired,
     CaptureError,
     MochaDriver,
+    OrderVoidSkip,
     bootstrap_session,
     capture_order,
     classify_screen,
@@ -456,6 +457,12 @@ def capture():
     except AS400ManualLoginRequired as e:
         auto_scanner.note_as400(False)
         return jsonify({"error": str(e), "state": "needs_login"}), 409
+    except OrderVoidSkip:
+        # VOID order dead-ended on the message screen (capture already pressed F6).
+        auto_scanner.note_as400(True)
+        return jsonify(
+            {"error": f"Order #{order_number} is VOID (AS400 message screen) — nothing to capture."}
+        ), 422
     except CaptureError as e:
         # A stalled capture still means the host answered.
         auto_scanner.note_as400(True)

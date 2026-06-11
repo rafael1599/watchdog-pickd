@@ -38,6 +38,7 @@ from as400_capture import (
     CaptureError,
     MochaDriver,
     OrderNotFound,
+    OrderVoidSkip,
     bootstrap_session,
     capture_order,
 )
@@ -154,6 +155,12 @@ def run_scan_step(
     n = scanned_store.next_scan_number(start)
     try:
         text = capture_fn(str(n), driver)
+    except OrderVoidSkip:
+        # VOID order dead-ended on the message screen; capture pressed F6 to recover.
+        # Advance past it (like an empty order) instead of retrying forever.
+        scanned_store.skip(n)
+        log.info("auto-scan: #%s routed to AS400 message screen (VOID) — skipped past it", n)
+        return {"action": "empty_skipped", "number": str(n)}
     except OrderNotFound:
         return {"action": "not_found", "number": str(n)}
     except (AS400Disconnected, AS400ManualLoginRequired):

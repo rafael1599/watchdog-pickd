@@ -131,6 +131,18 @@ def _is_invalid_order(text: str) -> bool:
     return "INVALIDORDERNUMBER" in norm or "INVALIDORDER" in norm
 
 
+def _is_message_info_screen(text: str) -> bool:
+    """True on the AS400 'ADDITIONAL MESSAGE INFORMATION' message-detail screen.
+
+    A VOID order can route here after F5 (it shows a BAS-#### error like 'No
+    matching key' and an 'Option:' prompt). It's a dead end for capture — paging
+    with ENTER never reaches END OF ORDER — so we detect it explicitly to bail out
+    and skip the number instead of looping on it.
+    """
+    norm = re.sub(r"\s+", "", text.upper())
+    return "ADDITIONALMESSAGEINFORMATION" in norm
+
+
 def _looks_like_order_screen(text: str) -> bool:
     """True if the captured text looks like an order view (search or inquiry).
 
@@ -156,6 +168,15 @@ class AS400Disconnected(CaptureError):
 
 class AS400ManualLoginRequired(CaptureError):
     """The screen is unrecognized or not logged in — a human must log in first."""
+
+
+class OrderVoidSkip(CaptureError):
+    """Capture dead-ended on the AS400 'ADDITIONAL MESSAGE INFORMATION' screen
+    (e.g. a VOID order routes here after F5, prompting for an Option with no valid
+    key). There is nothing to capture and paging can't recover. We press F6 to
+    return to order search and the auto-scanner SKIPS this number (advances the
+    cursor) instead of retrying it forever. Distinct from OrderNotFound, which does
+    NOT advance (the number may become a real order later)."""
 
 
 class MochaDriver:
@@ -392,6 +413,14 @@ def capture_order(
             f"Order {order_number} doesn't exist yet (AS400: 'Invalid Order Number, REENTER')."
         )
 
+    # A VOID order can land on the 'ADDITIONAL MESSAGE INFORMATION' screen instead
+    # of an order view. Dead end → press F6 back to order search and skip.
+    if _is_message_info_screen(header):
+        driver.key("f6")
+        raise OrderVoidSkip(
+            f"Order {order_number} routed to the AS400 message screen (likely VOID) — skipped."
+        )
+
     # Guard: if this isn't an order view we're on the wrong screen (a menu, etc.)
     # or the order doesn't exist. Bail out now instead of pressing F5 and looping
     # through pages that will never show END OF ORDER.
@@ -419,6 +448,14 @@ def capture_order(
             time.sleep(poll_interval)
             waited += poll_interval
             page = driver.copy_screen()
+
+        # A VOID order can route to the message-detail screen after F5. Recover by
+        # pressing F6 (back to order search) and skip — never page-loop on it.
+        if _is_message_info_screen(page):
+            driver.key("f6")
+            raise OrderVoidSkip(
+                f"Order {order_number} routed to the AS400 message screen (likely VOID) — skipped."
+            )
 
         stale = _norm_screen(page) == prev_norm
         found = _has_end_marker(page)

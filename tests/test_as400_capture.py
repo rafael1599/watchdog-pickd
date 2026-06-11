@@ -18,13 +18,24 @@ from as400_capture import (
     AS400Disconnected,
     AS400ManualLoginRequired,
     CaptureError,
+    OrderVoidSkip,
     _has_end_marker,
     _is_invalid_order,
+    _is_message_info_screen,
     bootstrap_session,
     capture_order,
     classify_screen,
     run_login,
 )
+
+# The 'ADDITIONAL MESSAGE INFORMATION' dead-end a VOID order can route to (operator
+# report 2026-06-11): a BAS-#### error + 'No matching key' + an 'Option:' prompt.
+ADDL_MSG_SCREEN = """                                                              XP
+                         ADDITIONAL MESSAGE INFORMATION
+    BAS-5065  Options (  23 )
+    Line 1800: No matching key
+    There is no additional information for this message.
+    Option:"""
 
 # A logged-in "order search" screen, used as the pre-capture check screen.
 READY = "O R D E R   N U M B E R: ______"
@@ -449,3 +460,28 @@ def test_bootstrap_navigates_from_menu_only():
     assert state == STATE_ORDER_SEARCH
     assert ("text", "ROMAN") not in driver.actions  # no re-login
     assert driver.actions == [("text", "3"), ("key", "enter")]
+
+
+# --- VOID order routes to the 'ADDITIONAL MESSAGE INFORMATION' screen (F6 recover) ---
+
+
+def test_message_info_screen_detector():
+    assert _is_message_info_screen(ADDL_MSG_SCREEN)
+    assert not _is_message_info_screen("O R D E R  I N Q U I R Y\nITEM 1")
+    assert not _is_message_info_screen(MESSAGE_SCREEN)  # the Press-Enter one is different
+
+
+def test_void_message_screen_as_header_presses_f6_and_skips():
+    driver = FakeDriver([READY, ADDL_MSG_SCREEN])
+    with pytest.raises(OrderVoidSkip):
+        capture_order("880150", driver, page_wait=0)
+    # Initial F6 (new search) + the recovery F6 on the message screen. No F5/ENTER.
+    assert driver.keys == ["f6", "f6"]
+
+
+def test_void_message_screen_after_f5_presses_f6_and_skips():
+    driver = FakeDriver([READY, "O R D E R  I N Q U I R Y\nHEADER", ADDL_MSG_SCREEN])
+    with pytest.raises(OrderVoidSkip):
+        capture_order("880151", driver, page_wait=0)
+    # F6 (search) → F5 (items) → F6 (recover from the dead-end message screen).
+    assert driver.keys == ["f6", "f5", "f6"]
