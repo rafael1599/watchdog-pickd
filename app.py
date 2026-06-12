@@ -109,6 +109,8 @@ def _guard_localhost_only():
 _orders: dict[int, dict] = {}
 _next_id = 1
 _lock = threading.Lock()
+# Order ids with a send currently in flight (server-side double-click guard).
+_sending: set[int] = set()
 
 # Archived orders the operator chose NOT to send. Unlike the pending queue these
 # are persisted to a local JSON file so they survive an app restart. Keyed by a
@@ -596,34 +598,43 @@ def capture():
 def send(oid: int):
     with _lock:
         entry = _orders.get(oid)
-    if not entry:
-        return jsonify({"error": "Order not found."}), 404
-    if entry["sent"]:
-        return jsonify({"error": "This order was already sent."}), 409
+        if not entry:
+            return jsonify({"error": "Order not found."}), 404
+        if entry["sent"]:
+            return jsonify({"error": "This order was already sent."}), 409
+        # Concurrency guard: the UI locks the button, this locks the server —
+        # two parallel sends of the same card would race process_order_text.
+        if oid in _sending:
+            return jsonify({"error": "Send already in progress for this order."}), 409
+        _sending.add(oid)
 
     try:
-        result = process_order_text(entry["raw_text"], source_name="as400_app")
-    except Exception as e:
-        return jsonify({"error": f"Error sending to PickD: {e}"}), 500
+        try:
+            result = process_order_text(entry["raw_text"], source_name="as400_app")
+        except Exception as e:
+            return jsonify({"error": f"Error sending to PickD: {e}"}), 500
 
-    with _lock:
-        entry["result"] = result
-        entry["sent"] = result["status"] in (
-            "created",
-            "appended",
-            "reopened",
-            "combined",
-            "duplicate",
-        )
-    if result["status"] == "waiting_locked":
-        # Target order is parked WAITING FOR INVENTORY — nothing was written.
-        # 409 keeps the card pending and surfaces the message in red.
-        return jsonify({**_public(entry), "error": result["message"]}), 409
-    # Once sent, drop it from the scanned cache so it doesn't re-appear as a fresh
-    # sendable order after an app restart (the entry stays in-session under "Sent").
-    if entry["sent"] and entry.get("order_number"):
-        scanned_store.delete(entry["order_number"])
-    return jsonify({**_public(entry), "result": result})
+        with _lock:
+            entry["result"] = result
+            entry["sent"] = result["status"] in (
+                "created",
+                "appended",
+                "reopened",
+                "combined",
+                "duplicate",
+            )
+        if result["status"] == "waiting_locked":
+            # Target order is parked WAITING FOR INVENTORY — nothing was written.
+            # 409 keeps the card pending and surfaces the message in red.
+            return jsonify({**_public(entry), "error": result["message"]}), 409
+        # Once sent, drop it from the scanned cache so it doesn't re-appear as a fresh
+        # sendable order after an app restart (the entry stays in-session under "Sent").
+        if entry["sent"] and entry.get("order_number"):
+            scanned_store.delete(entry["order_number"])
+        return jsonify({**_public(entry), "result": result})
+    finally:
+        with _lock:
+            _sending.discard(oid)
 
 
 @app.get("/api/orders/<int:oid>/detail")
@@ -781,6 +792,9 @@ INDEX_HTML = """
              cursor: pointer; background: #2563eb; color: #fff; }
     button.secondary { background: #6b7280; }
     button.send { background: #16a34a; }
+    button.send:disabled { opacity: .65; cursor: default; }
+    .spin { display: inline-block; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
     button:disabled { opacity: .5; cursor: not-allowed; }
     .card { border: 1px solid #d1d5db; border-radius: 12px; padding: 1rem;
             margin-bottom: .8rem; }
@@ -1117,7 +1131,7 @@ function card(o) {
       ${archNote}
       ${status}
       <div class="actions" onclick="event.stopPropagation()">
-        <button class="send" ${o.sent?'disabled':''} onclick="doSend(${o.id})">${o.sent?'Sent ✓':'Send to PickD'}</button>
+        <button class="send" id="send-${o.id}" ${o.sent?'disabled':''} onclick="doSend(${o.id})">${o.sent?'Sent ✓':'Send to PickD'}</button>
         <div class="more">
           <button onclick="toggleMenu(event, 'menu-${o.id}')" title="More actions">⋯</button>
           <div class="menu" id="menu-${o.id}" style="display:none;">
@@ -1351,19 +1365,31 @@ async function doCapture() {
 }
 
 async function doSend(id) {
+  // Lock the button immediately: a send takes a few seconds and double-clicks
+  // were tempting ("did my click land?"). The spinner answers that question.
+  const btn = document.getElementById(`send-${id}`);
+  if (btn && btn.disabled) return;
+  const orig = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin">⏳</span> Sending…'; }
   msg('Sending to PickD…', 'warn');
-  const r = await fetch(`/api/orders/${id}/send`, {method:'POST'});
-  const data = await r.json();
-  const m = data.result?.message;
-  if (r.ok) {
-    msg(m || 'Sent.', 'ok');
-    const res = data.result || {};
-    // Prominent green banner so a successful send is impossible to miss.
-    toast(`✓ Order #${res.order_number ?? '—'} sent to PickD (${res.status || 'sent'}, ${res.item_count ?? 0} items)`);
-  } else {
-    msg(data.error || 'Error sending.', 'err');
+  try {
+    const r = await fetch(`/api/orders/${id}/send`, {method:'POST'});
+    const data = await r.json();
+    const m = data.result?.message;
+    if (r.ok) {
+      msg(m || 'Sent.', 'ok');
+      const res = data.result || {};
+      // Prominent green banner so a successful send is impossible to miss.
+      toast(`✓ Order #${res.order_number ?? '—'} sent to PickD (${res.status || 'sent'}, ${res.item_count ?? 0} items)`);
+    } else {
+      msg(data.error || 'Error sending.', 'err');
+    }
+  } catch(e) {
+    msg('Network error: '+e, 'err');
+  } finally {
+    await load();  // re-renders the card (Sent ✓, or the button restored)
+    if (btn && document.body.contains(btn)) { btn.disabled = false; btn.innerHTML = orig; }
   }
-  await load();
 }
 
 async function doRemove(id, num) {
