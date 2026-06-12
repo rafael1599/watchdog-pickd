@@ -668,6 +668,24 @@ def restore_archived(aid: str):
     return jsonify(_public(entry))
 
 
+@app.post("/api/scan-now")
+def scan_now():
+    """Operator's "get orders now": wake the auto-scanner for an immediate pass.
+
+    The kick also bypasses the operator-activity gate for that pass — the
+    operator just clicked the button, so waiting for idle makes no sense.
+    """
+    if auto_scanner.trigger_scan_now():
+        return jsonify(
+            {
+                "ok": True,
+                "message": "Scanner kicked — capturing the next order now. "
+                "It shows up in the list in a few seconds.",
+            }
+        )
+    return jsonify({"error": "Auto-scanner is not running (AUTO_SCAN is off)."}), 409
+
+
 @app.post("/api/update")
 def update():
     """Pull the latest code, refresh deps and restart the LaunchAgents.
@@ -903,6 +921,7 @@ INDEX_HTML = """
       <div class="more" id="topmore">
         <button onclick="toggleMenu(event, 'topmenu')" title="More">⋯</button>
         <div class="menu" id="topmenu" style="display:none;">
+          <button onclick="doScanNow()">▶ Get orders now</button>
           <button onclick="doStatus()">Check AS400</button>
           <button onclick="doUpdate()">⟳ Update app</button>
         </div>
@@ -1254,6 +1273,16 @@ const STATE_LABELS = {
   order_inquiry:['✅ Viewing an order. Ready to capture.', 'ok'],
   unknown:      ['⚠️ Unrecognized screen. Log in manually to the order-search screen.', 'warn'],
 };
+
+async function doScanNow() {
+  msg('Kicking the scanner — capturing the next order…', 'warn');
+  try {
+    const r = await fetch('/api/scan-now', {method:'POST'});
+    const data = await r.json();
+    if (r.ok) msg(data.message || 'Scanner kicked.', 'ok');
+    else msg(data.error || 'Could not kick the scanner.', 'err');
+  } catch(e) { msg('Network error: '+e, 'err'); }
+}
 
 async function doStatus() {
   msg('Checking AS400 status…', 'warn');
