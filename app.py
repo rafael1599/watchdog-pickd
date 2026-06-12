@@ -97,6 +97,12 @@ _archive: dict[str, dict] = {}
 # the active list but stay recoverable in the archive). Sent orders are excluded.
 AUTO_ARCHIVE_DAYS = int(os.getenv("AUTO_ARCHIVE_DAYS", "8"))
 
+# Orders billed to these customers are parts-only and never picked in the
+# warehouse: they are archived on arrival instead of parking in the pending
+# queue (still recoverable via Restore). Matched as a case/whitespace-
+# insensitive substring of the parsed Bill-to customer.
+AUTO_ARCHIVE_CUSTOMERS = ("EBAY PART SALES",)
+
 # Verification-board read cache. The UI polls /api/verification on every load(),
 # so we throttle the Supabase read behind a short TTL to avoid hammering it.
 VERIFICATION_TTL_SEC = int(os.getenv("VERIFICATION_TTL_SEC", "30"))
@@ -186,6 +192,12 @@ def _find_archived_by_number(order_number) -> dict | None:
     return next((a for a in _archive.values() if a.get("order_number") == order_number), None)
 
 
+def _is_auto_archive_customer(customer) -> bool:
+    """True when the Bill-to customer marks a parts-only order (e.g. eBay)."""
+    norm = " ".join(str(customer or "").upper().split())
+    return any(c in norm for c in AUTO_ARCHIVE_CUSTOMERS)
+
+
 def _archive_entry(entry: dict) -> str:
     """Move a pending order dict into the persisted local archive. Returns its aid.
 
@@ -232,7 +244,7 @@ def _auto_archive_stale() -> int:
     return len(stale_ids)
 
 
-def _add_order(raw_text: str) -> dict:
+def _add_order(raw_text: str, auto_archive: bool = True) -> dict:
     global _next_id
     preview = preview_order(raw_text)
     # Pallet estimate (same rule PickD applies): needs the bike catalog, which is
@@ -283,7 +295,28 @@ def _add_order(raw_text: str) -> dict:
             "sent": False,
             "result": None,
         }
-        _orders[oid] = entry
+        if auto_archive and _is_auto_archive_customer(entry["customer"]):
+            # Parts-only customer (e.g. EBAY PART SALES): straight to the
+            # archive — never a pending card. Recoverable via Restore, which
+            # re-adds with auto_archive=False so it isn't swallowed again.
+            entry["auto_archived"] = True
+            _archive_entry(entry)
+            _persist_archive()
+        else:
+            _orders[oid] = entry
+    if entry.get("auto_archived"):
+        # Purge any scanned-cache copy, or the auto-scan sweep would archive a
+        # fresh duplicate on every refresh.
+        if entry.get("order_number"):
+            try:
+                scanned_store.delete(entry["order_number"])
+            except Exception as e:  # noqa: BLE001
+                logging.warning(
+                    "Could not purge cache for auto-archived #%s: %s",
+                    entry["order_number"],
+                    e,
+                )
+        logging.info("Auto-archived order #%s (%s)", entry["order_number"], entry["customer"])
     return entry
 
 
@@ -323,6 +356,10 @@ def _sync_scanned_into_orders() -> None:
             scanned_store.delete(cache_key)
             continue
         entry = _add_order(raw)
+        if entry.get("auto_archived"):
+            # Parts-only customer: archived on arrival; the cache copy was
+            # already purged by _add_order, so it won't re-materialize.
+            continue
         if not entry.get("order_number") or not (entry.get("item_count") or 0):
             # Junk capture: drop it from both the session list and the cache.
             with _lock:
@@ -443,8 +480,9 @@ def capture():
     cached = scanned_store.get(order_number)
     if cached:
         entry = _add_order(cached["raw_text"])
-        with _lock:
-            entry["from_cache"] = True
+        if not entry.get("auto_archived"):
+            with _lock:
+                entry["from_cache"] = True
         return jsonify({**_public(entry), "from_cache": True})
 
     # Not cached → drive Mocha. Take priority over the auto-scanner: announce we're
@@ -601,7 +639,9 @@ def restore_archived(aid: str):
         if not arch:
             return jsonify({"error": "Archived order not found."}), 404
         _persist_archive()
-    entry = _add_order(arch["raw_text"])
+    # auto_archive=False: an explicit Restore must win over the parts-only
+    # customer rule, or eBay orders could never be pulled back.
+    entry = _add_order(arch["raw_text"], auto_archive=False)
     return jsonify(_public(entry))
 
 
@@ -1207,6 +1247,9 @@ async function doCapture() {
                                             body: JSON.stringify({order_number: num})});
     const data = await r.json();
     if (!r.ok) { msg(data.error || 'Error capturing.', 'err'); }
+    else if (data.auto_archived) {
+           msg(`Order #${data.order_number ?? '—'} auto-archived (${data.customer ?? 'parts-only customer'}) — see Archived below.`, 'warn');
+           document.getElementById('num').value=''; }
     else { const fc = data.from_cache ? ' · ya escaneada por el auto-scan' : '';
            msg(`Captured order #${data.order_number ?? '—'} (${palletStats(data)})${fc}.`, 'ok');
            document.getElementById('num').value=''; }
