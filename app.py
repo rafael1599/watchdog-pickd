@@ -41,9 +41,11 @@ from as400_capture import (  # noqa: E402
     CaptureError,
     MochaDriver,
     OrderVoidSkip,
+    activate_app,
     bootstrap_session,
     capture_order,
     classify_screen,
+    frontmost_app_name,
 )
 from auto_scanner import capture_lock, manual_waiting, start_auto_scanner  # noqa: E402
 from pipeline import (  # noqa: E402
@@ -468,6 +470,19 @@ def status():
     return jsonify({"state": classify_screen(text)})
 
 
+def _restore_focus(prev_app) -> None:
+    """Hand macOS focus back to the app the operator was in (their browser).
+
+    Best-effort only: a focus failure must never break the capture response.
+    """
+    if not prev_app:
+        return
+    try:
+        activate_app(prev_app)
+    except Exception as e:  # noqa: BLE001
+        logging.debug("Could not restore focus to %s: %s", prev_app, e)
+
+
 @app.post("/api/capture")
 def capture():
     data = request.get_json(force=True) or {}
@@ -487,6 +502,9 @@ def capture():
 
     # Not cached → drive Mocha. Take priority over the auto-scanner: announce we're
     # waiting (so an in-flight scan cycle yields), then hold the shared capture lock.
+    # Mocha steals macOS focus during the capture — remember who has it now
+    # (the operator's browser) so the focus comes back when the capture finishes.
+    prev_app = frontmost_app_name()
     manual_waiting.set()
     try:
         with capture_lock:
@@ -513,6 +531,7 @@ def capture():
         return jsonify({"error": f"Error capturing from AS400: {e}"}), 500
     finally:
         manual_waiting.clear()
+        _restore_focus(prev_app)
 
     # Record the manual capture in the scanned cache too, so a later PDF/recapture
     # of the same number reuses it instead of re-driving Mocha. Only cache REAL
@@ -699,6 +718,11 @@ INDEX_HTML = """
            margin: 2rem auto; padding: 0 1rem; }
     h1 { font-size: 1.3rem; }
     .row { display: flex; gap: .5rem; margin-bottom: 1.2rem; }
+    /* Sticky topbar: title + status + capture stay visible while the order
+       list scrolls. Background + shadow so cards slide underneath cleanly. */
+    #topbar { position: sticky; top: 0; z-index: 40; background: #fff;
+              padding-top: .6rem; margin-top: -.6rem;
+              box-shadow: 0 8px 14px -12px rgba(0,0,0,.35); }
     input { flex: 1; padding: .6rem .8rem; font-size: 1.1rem; border: 1px solid #999;
             border-radius: 8px; }
     button { padding: .6rem 1rem; font-size: 1rem; border: 0; border-radius: 8px;
@@ -867,20 +891,27 @@ INDEX_HTML = """
 </head>
 <body>
   <div id="toast"></div>
-  <h1>📦 AS400 → PickD</h1>
-  <div class="row">
-    <button id="conn" class="statuschip" onclick="doConnect()" title="Reconnect AS400">
-      <span class="dot" id="dot"></span> AS400
-    </button>
-    <button id="vbtn" class="statuschip" onclick="openBoard()" title="Verification Board (live mirror)">
-      Verification<span id="vbadge" class="vbadge" style="display:none;">0</span>
-    </button>
-    <div class="more" id="topmore">
-      <button onclick="toggleMenu(event, 'topmenu')" title="More">⋯</button>
-      <div class="menu" id="topmenu" style="display:none;">
-        <button onclick="doStatus()">Check AS400</button>
-        <button onclick="doUpdate()">⟳ Update app</button>
+  <div id="topbar">
+    <h1>📦 AS400 → PickD</h1>
+    <div class="row">
+      <button id="conn" class="statuschip" onclick="doConnect()" title="Reconnect AS400">
+        <span class="dot" id="dot"></span> AS400
+      </button>
+      <button id="vbtn" class="statuschip" onclick="openBoard()" title="Verification Board (live mirror)">
+        Verification<span id="vbadge" class="vbadge" style="display:none;">0</span>
+      </button>
+      <div class="more" id="topmore">
+        <button onclick="toggleMenu(event, 'topmenu')" title="More">⋯</button>
+        <div class="menu" id="topmenu" style="display:none;">
+          <button onclick="doStatus()">Check AS400</button>
+          <button onclick="doUpdate()">⟳ Update app</button>
+        </div>
       </div>
+    </div>
+    <div class="row">
+      <input id="num" placeholder="Order number (e.g. 880005)" autofocus
+             onkeydown="if(event.key==='Enter') doCapture()">
+      <button id="cap" onclick="doCapture()">Capture</button>
     </div>
   </div>
   <div id="vboard-overlay" onclick="if(event.target===this) closeBoard()">
@@ -891,11 +922,6 @@ INDEX_HTML = """
       </div>
       <div id="vboard-body"><p class="muted">Loading…</p></div>
     </div>
-  </div>
-  <div class="row">
-    <input id="num" placeholder="Order number (e.g. 880005)" autofocus
-           onkeydown="if(event.key==='Enter') doCapture()">
-    <button id="cap" onclick="doCapture()">Capture</button>
   </div>
   <div id="msg" class="muted"></div>
   <div id="list"></div>
