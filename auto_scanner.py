@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 
 import scanned_store
 from as400_capture import (
@@ -67,6 +68,11 @@ manual_waiting = threading.Event()
 
 _stop = threading.Event()
 _thread: threading.Thread | None = None
+
+# Manual "get orders now": wakes the loop from any pacing wait AND bypasses the
+# operator-activity gate for one pass (the operator just clicked the button, so
+# the computer is obviously in use). Consumed right before the scan step runs.
+_kick = threading.Event()
 
 # ── AS400 health beacon ──────────────────────────────────────────────────────
 # The UI status dot used to turn green ONLY after a manual Connect/Check click —
@@ -205,23 +211,37 @@ def _wait_for(action: str) -> float:
     }.get(action, NOT_FOUND_WAIT_SEC)
 
 
+def _interruptible_wait(seconds: float) -> None:
+    """Sleep up to `seconds`, returning early on shutdown or a manual kick."""
+    deadline = time.monotonic() + seconds
+    while not _stop.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or _kick.is_set():
+            return
+        _kick.wait(min(0.5, remaining))
+
+
 def _loop() -> None:
     log.info(
         "auto-scanner started (from #%s) — first capture in %.0fs",
         scanned_store.next_scan_number(),
         SCAN_INITIAL_DELAY_SEC,
     )
-    _stop.wait(SCAN_INITIAL_DELAY_SEC)
+    _interruptible_wait(SCAN_INITIAL_DELAY_SEC)
     driver = None
     while not _stop.is_set():
         # Pause while the operator is actively using the computer, or while a manual
-        # capture holds the lock — never fight the human for the keyboard.
-        if system_idle_seconds() < IDLE_THRESHOLD_SEC:
-            _stop.wait(IDLE_POLL_SEC)
+        # capture holds the lock — never fight the human for the keyboard. A manual
+        # kick skips the activity gate: the operator asked for this pass explicitly.
+        if system_idle_seconds() < IDLE_THRESHOLD_SEC and not _kick.is_set():
+            _interruptible_wait(IDLE_POLL_SEC)
             continue
         if not capture_lock.acquire(blocking=False):
-            _stop.wait(IDLE_POLL_SEC)
+            # Keep a pending kick armed while the manual capture finishes, but
+            # poll faster so the kicked pass starts right after it.
+            _stop.wait(0.5 if _kick.is_set() else IDLE_POLL_SEC)
             continue
+        _kick.clear()  # this pass consumes the manual trigger
 
         wait = NOT_FOUND_WAIT_SEC
         try:
@@ -251,7 +271,19 @@ def _loop() -> None:
         finally:
             capture_lock.release()
 
-        _stop.wait(wait)
+        _interruptible_wait(wait)
+
+
+def trigger_scan_now() -> bool:
+    """Wake the scanner for one immediate pass (operator's "get orders now").
+
+    Returns False when the scanner thread isn't running (AUTO_SCAN off or not
+    started) so the UI can say why nothing will happen.
+    """
+    if not (_thread and _thread.is_alive()):
+        return False
+    _kick.set()
+    return True
 
 
 def start_auto_scanner() -> None:
