@@ -562,6 +562,10 @@ def send(oid: int):
             "combined",
             "duplicate",
         )
+    if result["status"] == "waiting_locked":
+        # Target order is parked WAITING FOR INVENTORY — nothing was written.
+        # 409 keeps the card pending and surfaces the message in red.
+        return jsonify({**_public(entry), "error": result["message"]}), 409
     # Once sent, drop it from the scanned cache so it doesn't re-appear as a fresh
     # sendable order after an app restart (the entry stays in-session under "Sent").
     if entry["sent"] and entry.get("order_number"):
