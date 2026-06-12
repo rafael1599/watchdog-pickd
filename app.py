@@ -783,7 +783,10 @@ INDEX_HTML = """
     .row { display: flex; gap: .5rem; margin-bottom: 1.2rem; }
     /* Sticky topbar: title + status + capture stay visible while the order
        list scrolls. Background + shadow so cards slide underneath cleanly. */
-    #topbar { position: sticky; top: 0; z-index: 40; background: #fff;
+    /* Canvas = the UA's color-scheme-aware page background, so the sticky bar
+       matches the body in BOTH light and dark mode (a fixed #fff turned the
+       header into white-on-white on dark-mode Macs). */
+    #topbar { position: sticky; top: 0; z-index: 40; background: Canvas;
               padding-top: .6rem; margin-top: -.6rem;
               box-shadow: 0 8px 14px -12px rgba(0,0,0,.35); }
     input { flex: 1; padding: .6rem .8rem; font-size: 1.1rem; border: 1px solid #999;
