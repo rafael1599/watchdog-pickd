@@ -216,24 +216,39 @@ def frontmost_app_name():
         )
         return out.stdout.strip() or None
     except Exception as e:  # noqa: BLE001
-        log.debug("frontmost_app_name failed: %s", e)
+        # Visible on purpose: a silent None here disables the focus restore and
+        # usually means macOS denied the Automation permission for System Events.
+        log.warning("focus: could not read the frontmost app (Automation permission?): %s", e)
         return None
 
 
 def activate_app(name: str) -> None:
     """Bring a macOS app to the front by process name. Caller handles errors.
 
-    Names containing double quotes are ignored (AppleScript injection guard).
+    Tries System Events first (works on process names); falls back to a direct
+    `tell application … activate` (more reliable for some apps/Spaces). Names
+    containing double quotes are ignored (AppleScript injection guard).
     """
     if not name or '"' in name:
         return
+    try:
+        subprocess.run(
+            [
+                "osascript",
+                "-e",
+                f'tell application "System Events" to set frontmost of process "{name}" to true',
+            ],
+            check=True,
+            capture_output=True,
+            timeout=5,
+        )
+        return
+    except Exception as e:  # noqa: BLE001
+        log.info("focus: System Events activate failed for %s (%s) — trying app activate", name, e)
     subprocess.run(
-        [
-            "osascript",
-            "-e",
-            f'tell application "System Events" to set frontmost of process "{name}" to true',
-        ],
+        ["osascript", "-e", f'tell application "{name}" to activate'],
         check=True,
+        capture_output=True,
         timeout=5,
     )
 

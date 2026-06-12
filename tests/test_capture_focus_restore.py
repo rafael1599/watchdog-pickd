@@ -87,6 +87,26 @@ def test_cached_capture_never_touches_focus(client):
     assert r.status_code == 200
 
 
+def test_activate_app_falls_back_to_direct_app_activate(monkeypatch):
+    import subprocess
+
+    import as400_capture
+
+    scripts = []
+
+    def fake_run(cmd, **_kw):
+        scripts.append(cmd[2])
+        if "System Events" in cmd[2]:
+            raise subprocess.CalledProcessError(1, cmd)
+        return None
+
+    monkeypatch.setattr(as400_capture.subprocess, "run", fake_run)
+    as400_capture.activate_app("Google Chrome")
+
+    assert len(scripts) == 2  # System Events first, then the direct activate
+    assert scripts[1] == 'tell application "Google Chrome" to activate'
+
+
 def test_topbar_is_sticky_and_wraps_the_capture_controls():
     html = appmod.INDEX_HTML
     assert 'id="topbar"' in html

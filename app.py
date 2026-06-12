@@ -64,6 +64,27 @@ from supabase_client import (  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
 
+
+def _build_version() -> str:
+    """Git short SHA of the running code — shown in the UI footer and served at
+    /api/version so update.sh can verify the restart actually picked up the new
+    build (an answering server is NOT proof: a stale process or a LaunchAgent
+    pointing at another clone serves the old UI with a 200)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=True,
+        )
+        return out.stdout.strip() or "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+BUILD_VERSION = _build_version()
+
 app = Flask(__name__)
 
 # Only loopback hosts are valid. Rejecting other Host headers blocks DNS-rebinding
@@ -329,7 +350,13 @@ def _public(entry: dict) -> dict:
 
 @app.get("/")
 def index():
-    return render_template_string(INDEX_HTML)
+    return render_template_string(INDEX_HTML, version=BUILD_VERSION)
+
+
+@app.get("/api/version")
+def version():
+    """Build identity for humans and for update.sh's post-restart verification."""
+    return jsonify({"version": BUILD_VERSION})
 
 
 def _sync_scanned_into_orders() -> None:
@@ -474,13 +501,20 @@ def _restore_focus(prev_app) -> None:
     """Hand macOS focus back to the app the operator was in (their browser).
 
     Best-effort only: a focus failure must never break the capture response.
+    Every step logs at a visible level so a non-working restore is diagnosable
+    from the app log (look for "focus:" lines).
     """
     if not prev_app:
+        logging.warning("focus: no snapshot of the previous app — restore skipped")
         return
     try:
+        # Let Mocha settle for an instant so the activation isn't swallowed
+        # by its last keystroke/clipboard operation.
+        time.sleep(0.2)
         activate_app(prev_app)
+        logging.info("focus: returned to %s after the capture", prev_app)
     except Exception as e:  # noqa: BLE001
-        logging.debug("Could not restore focus to %s: %s", prev_app, e)
+        logging.warning("focus: could not return to %s: %s", prev_app, e)
 
 
 @app.post("/api/capture")
@@ -1374,6 +1408,7 @@ function uiBusy() {
 }
 setInterval(() => { if (!uiBusy()) load(); }, 8000);
 </script>
+<div class="muted" style="text-align:center; font-size:.7rem; margin:1.2rem 0 .6rem;">build {{ version }}</div>
 </body>
 </html>
 """
