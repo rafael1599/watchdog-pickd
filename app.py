@@ -474,13 +474,20 @@ def _restore_focus(prev_app) -> None:
     """Hand macOS focus back to the app the operator was in (their browser).
 
     Best-effort only: a focus failure must never break the capture response.
+    Every step logs at a visible level so a non-working restore is diagnosable
+    from the app log (look for "focus:" lines).
     """
     if not prev_app:
+        logging.warning("focus: no snapshot of the previous app — restore skipped")
         return
     try:
+        # Let Mocha settle for an instant so the activation isn't swallowed
+        # by its last keystroke/clipboard operation.
+        time.sleep(0.2)
         activate_app(prev_app)
+        logging.info("focus: returned to %s after the capture", prev_app)
     except Exception as e:  # noqa: BLE001
-        logging.debug("Could not restore focus to %s: %s", prev_app, e)
+        logging.warning("focus: could not return to %s: %s", prev_app, e)
 
 
 @app.post("/api/capture")
