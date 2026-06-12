@@ -31,7 +31,7 @@ APP_PORT=5000
 DOMAIN="gui/$(id -u)"
 
 BRANCH="${1:-$(git rev-parse --abbrev-ref HEAD)}"
-say "▶ [1/6] Updating Watchdog PickD on branch '$BRANCH'…"
+say "▶ [1/6] Updating Watchdog PickD on branch '$BRANCH' (repo: $REPO)…"
 
 # 1. Pull the latest code (fast-forward only; aborts if local work would conflict).
 if ! git pull --ff-only origin "$BRANCH"; then
@@ -122,6 +122,20 @@ if [ -f "$HOME/Library/LaunchAgents/com.antigravity.pickd-app.plist" ]; then
     if curl -s -o /dev/null --max-time 1 "$APP_URL"; then
       up="yes"
       say "✓ App is up after ${i}s."
+      # An answering server is NOT proof of the new build: a stale process or a
+      # LaunchAgent pointing at ANOTHER clone serves the old UI with a 200.
+      # /api/version exposes the running build's git SHA — compare with ours.
+      want="$(git rev-parse --short HEAD)"
+      served="$(curl -s --max-time 2 "$APP_URL/api/version" | grep -oE '[0-9a-f]{7,12}' || true)"
+      if [ "$served" = "$want" ]; then
+        say "✓ Serving the new build ($served)."
+      elif [ -z "$served" ]; then
+        say "⚠ App answers but has no /api/version (build older than this check)."
+      else
+        say "✗ App answers but serves build '$served' — this repo is at '$want'."
+        say "  Causes: a stale app.py survived the restart, or the LaunchAgent runs"
+        say "  ANOTHER clone. Check: grep -A3 ProgramArguments \"$HOME/Library/LaunchAgents/com.antigravity.pickd-app.plist\""
+      fi
       open -a Safari "$APP_URL" 2>/dev/null || open "$APP_URL" 2>/dev/null || true
       say "✓ Opened $APP_URL in Safari."
       break
