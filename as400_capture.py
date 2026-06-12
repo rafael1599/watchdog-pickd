@@ -195,6 +195,49 @@ class OrderVoidSkip(CaptureError):
     NOT advance (the number may become a real order later)."""
 
 
+def frontmost_app_name():
+    """Name of the macOS app that currently has focus, or None (off-macOS/error).
+
+    Snapshotted before a manual capture so the operator's browser can get the
+    focus back once Mocha is done.
+    """
+    try:
+        out = subprocess.run(
+            [
+                "osascript",
+                "-e",
+                'tell application "System Events" to get name of '
+                "first application process whose frontmost is true",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return out.stdout.strip() or None
+    except Exception as e:  # noqa: BLE001
+        log.debug("frontmost_app_name failed: %s", e)
+        return None
+
+
+def activate_app(name: str) -> None:
+    """Bring a macOS app to the front by process name. Caller handles errors.
+
+    Names containing double quotes are ignored (AppleScript injection guard).
+    """
+    if not name or '"' in name:
+        return
+    subprocess.run(
+        [
+            "osascript",
+            "-e",
+            f'tell application "System Events" to set frontmost of process "{name}" to true',
+        ],
+        check=True,
+        timeout=5,
+    )
+
+
 class MochaDriver:
     """
     macOS keystroke/clipboard driver for Mocha TN5250 using AppleScript (osascript)
