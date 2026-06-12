@@ -184,7 +184,7 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
 
     Returns a result dict:
         {
-            "status": "created" | "appended" | "reopened" | "combined"
+            "status": "created" | "appended" | "reopened" | "combined" | "waiting_locked"
                       | "duplicate" | "no_items" | "empty_text",
             "order_number": str | None,
             "customer": str,
@@ -253,6 +253,22 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
                     list_id, existing_items, delta_items, order_number, pdf_hash, source_name
                 )
                 status = "reopened"
+            elif existing.get("is_waiting_inventory"):
+                # Waiting orders are PARKED: a re-send with new SKUs must never
+                # mutate them automatically — same operator rule as the customer
+                # auto-combine exclusion. Adding to one is a manual action in
+                # PickD (unmark waiting / edit the order), then re-send.
+                skus = ", ".join(str(i.get("sku") or i.get("raw_sku") or "?") for i in delta_items)
+                return _result(
+                    "waiting_locked",
+                    order_number=order_number,
+                    customer=customer,
+                    message=(
+                        f"Order #{order_number} is WAITING FOR INVENTORY in PickD — "
+                        f"{len(delta_items)} new item(s) NOT added automatically ({skus}). "
+                        "Unmark waiting in PickD (or edit the order manually) and re-send."
+                    ),
+                )
             elif existing_status in (
                 "active",
                 "ready_to_double_check",

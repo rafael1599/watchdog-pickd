@@ -101,6 +101,12 @@ def process_pdf(pdf_path: str):
             log.warning(f"   ⚠️  DUPLICATE: {result['message']} Skipping.")
             move_file(pdf_path, PROCESSED_FOLDER)
             return
+        if status == "waiting_locked":
+            # The target order is parked waiting for inventory: nothing was
+            # written. Goes to errors/ so the operator handles it manually.
+            log.warning(f"   ⚠️  WAITING ORDER: {result['message']} Moving to errors/")
+            move_file(pdf_path, ERRORS_FOLDER)
+            return
 
         log.info(f"   📋 Order: #{result.get('order_number') or 'NO NUMBER'}")
         log.info(f"   👤 Customer: {result.get('customer')}")
