@@ -183,5 +183,38 @@ def next_scan_number(start: int = SCAN_START) -> int:
     return max(candidates)
 
 
+def search(query: str, limit: int = 25) -> list[dict]:
+    """Substring search over the scan cache by order number and customer.
+
+    Returns lightweight match descriptors (never raw_text), newest first. Backs the
+    UI's live filter so orders that exist only in the scan cache — captured by the
+    auto-scanner but not yet materialized into the visible list — are still findable
+    as the operator types, WITHOUT driving AS400. A blank query returns []."""
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    out: list[dict] = []
+    for key, e in load().items():
+        if not isinstance(e, dict):
+            continue
+        number = str(e.get("order_number") or key)
+        customer = str(e.get("customer") or "")
+        if q in number.lower() or q in customer.lower():
+            out.append(
+                {
+                    "order_number": number,
+                    "customer": e.get("customer"),
+                    "item_count": e.get("item_count"),
+                    "total_units": e.get("total_units"),
+                    "scanned_at": e.get("scanned_at"),
+                    "source": e.get("source"),
+                    "in_pickd": bool(e.get("in_pickd")),
+                }
+            )
+    # Newest first — ISO 8601 scanned_at strings sort lexicographically by time.
+    out.sort(key=lambda d: d.get("scanned_at") or "", reverse=True)
+    return out[:limit]
+
+
 def count() -> int:
     return len(load())
