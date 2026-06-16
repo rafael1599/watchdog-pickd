@@ -461,6 +461,18 @@ def list_orders():
         return jsonify([_public(o) for o in ordered])
 
 
+@app.get("/api/search")
+def search_orders():
+    """Search the scan cache for orders the daemon already has — no AS400 round-trip.
+
+    Backs the UI's live filter so cache-only orders (captured by the auto-scanner but
+    not yet materialized into the visible list) are still findable while typing. The
+    already-visible orders are filtered client-side from the data the page already
+    holds; this endpoint only adds the not-yet-materialized tail."""
+    q = request.args.get("q", "")
+    return jsonify(scanned_store.search(q))
+
+
 @app.post("/api/connect")
 def connect():
     """Launch the AS400 emulator and log in — verifying state, not assuming it."""
@@ -979,9 +991,10 @@ INDEX_HTML = """
       </div>
     </div>
     <div class="row">
-      <input id="num" placeholder="Order number (e.g. 880005)" autofocus
-             onkeydown="if(event.key==='Enter') doCapture()">
-      <button id="cap" onclick="doCapture()">Capture</button>
+      <input id="num" placeholder="Search orders or type # to capture (e.g. 880005)" autofocus
+             oninput="applyFilter()"
+             onkeydown="if(event.key==='Enter') onSearchEnter()">
+      <button id="cap" onclick="doCapture()" title="Fetch this order number from AS400">Capture</button>
     </div>
   </div>
   <div id="vboard-overlay" onclick="if(event.target===this) closeBoard()">
@@ -999,6 +1012,79 @@ INDEX_HTML = """
 <script>
 const msg = (t, cls='muted') => { const m=document.getElementById('msg'); m.className=cls; m.textContent=t; };
 
+// Live-filter state. The page already holds every order it has (active, already-in-
+// PickD, sent and archived), so filtering is instant and local — no AS400 round-trip.
+// _cacheHits adds the tail of orders that live only in the scan cache (just scanned,
+// not yet materialized), fetched via /api/search.
+let _allOrders = [];
+let _allArchived = [];
+let _filter = '';
+let _cacheHits = [];
+let _searchTimer = null;
+
+// Single source of truth for the search box + filter, so programmatic clears
+// (e.g. after a capture) keep the box and the rendered list in sync.
+function setSearch(v) {
+  _filter = v || '';
+  const box = document.getElementById('num');
+  if (box) box.value = _filter;
+}
+
+// Does an order card match the query? Looks at number, customer, shipping type and
+// each item's SKU/description — the fields the operator would search by.
+function orderMatches(o, q) {
+  if (!q) return true;
+  const parts = [o.order_number, o.customer, o.shipping_type];
+  for (const it of (o.items || [])) parts.push(it.sku, it.raw_sku, it.description, it.item_name);
+  return parts.filter(Boolean).join(' ').toLowerCase().includes(q);
+}
+
+function hitMatches(h, q) {
+  if (!q) return true;
+  return [h.order_number, h.customer].filter(Boolean).join(' ').toLowerCase().includes(q);
+}
+
+// Filter as the operator types (instant, local). Then debounce a reach into the scan
+// cache so orders scanned in the last few seconds (not yet in the live list) surface
+// too — still without driving AS400.
+function applyFilter() {
+  _filter = document.getElementById('num').value;
+  render(_allOrders, _allArchived);
+  if (_searchTimer) clearTimeout(_searchTimer);
+  const q = _filter.trim();
+  if (!q) { _cacheHits = []; return; }
+  _searchTimer = setTimeout(() => searchCache(q), 200);
+}
+
+async function searchCache(q) {
+  try {
+    const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+    if (!r.ok) return;
+    const hits = await r.json();
+    // Only surface cache hits that aren't already on screen (deduped by number).
+    const known = new Set([..._allOrders, ..._allArchived].map(o => o.order_number).filter(Boolean));
+    _cacheHits = hits.filter(h => h.order_number && !known.has(h.order_number));
+    render(_allOrders, _allArchived);
+  } catch (e) { /* network hiccup — the local filter still works */ }
+}
+
+// Enter only falls back to AS400 when the order isn't already in hand. If it matches
+// something we already have, Enter just keeps the filter — it never re-scans.
+function onSearchEnter() {
+  const q = document.getElementById('num').value.trim();
+  if (!q) return;
+  const ql = q.toLowerCase();
+  const hasLocal = [..._allOrders, ..._allArchived].some(o => orderMatches(o, ql))
+                || _cacheHits.some(h => hitMatches(h, ql));
+  if (hasLocal) return;  // already on screen — don't touch AS400
+  doCapture();           // genuinely new number → explicit AS400 fetch
+}
+
+function captureNumber(num) {
+  setSearch(num);
+  doCapture();
+}
+
 let _toastTimer = null;
 // Prominent green success banner (used after a successful send).
 function toast(t) {
@@ -1011,7 +1097,9 @@ function toast(t) {
 
 async function load() {
   const [ro, ra] = await Promise.all([fetch('/api/orders'), fetch('/api/archived')]);
-  render(await ro.json(), await ra.json());
+  _allOrders = await ro.json();
+  _allArchived = await ra.json();
+  render(_allOrders, _allArchived);  // render() applies the current live filter
   refreshVerification();  // keep the red counter live on each load
   refreshAs400Dot();      // dot goes green from real scanner/capture activity
 }
@@ -1246,17 +1334,51 @@ function closeMenus() {
 }
 document.addEventListener('click', closeMenus);
 
+// Compact row for an order that lives only in the scan cache (not yet materialized).
+function cacheHitRow(h) {
+  const n = h.order_number || '—';
+  const meta = [h.customer, (h.item_count != null ? h.item_count + ' items' : null)]
+    .filter(Boolean).join(' · ');
+  return `<div class="card" style="display:flex; justify-content:space-between; align-items:center; gap:.6rem;">
+    <span>#${n}${meta ? ` <span class="muted">· ${meta}</span>` : ''}</span>
+    <button onclick="captureNumber('${n}')">Capture</button>
+  </div>`;
+}
+
 function render(orders, archived) {
   const list = document.getElementById('list');
+  const q = _filter.trim().toLowerCase();
+  const searching = q.length > 0;
+
+  // Live filter across EVERY state the page already holds — instant and local,
+  // never a round-trip to AS400.
+  if (searching) {
+    orders = orders.filter(o => orderMatches(o, q));
+    archived = (archived || []).filter(o => orderMatches(o, q));
+  }
+
   // Candidates = not sent AND not already living in PickD. Orders detected in the
   // DB (sent by PDF / another path) are noise here — they collapse below.
   const active = orders.filter(o => !o.sent && !o.in_pickd);
   const inPickd = orders.filter(o => !o.sent && o.in_pickd);
   const sent = orders.filter(o => o.sent);
+  const arch = archived || [];
+  const cacheHits = searching ? _cacheHits.filter(h => hitMatches(h, q)) : [];
+  // While searching, expand the normally-collapsed sections so matches in Sent /
+  // Already-in-PickD / Archived are visible without an extra click.
+  const openAttr = searching ? ' open' : '';
 
   let html = '';
   if (!active.length) {
-    html += '<p class="muted">No orders yet. The scanner adds them automatically, or capture one above.</p>';
+    if (searching) {
+      const term = _filter.trim();
+      const elsewhere = inPickd.length + sent.length + arch.length + cacheHits.length;
+      html += elsewhere
+        ? `<p class="muted">No active matches for "${term}" — see the sections below.</p>`
+        : `<p class="muted">No order matches "${term}". Press Enter or Capture to fetch it from AS400.</p>`;
+    } else {
+      html += '<p class="muted">No orders yet. The scanner adds them automatically, or capture one above.</p>';
+    }
   } else {
     // Two lanes (like the Verification Board): FedEx on the LEFT, trucks on the
     // RIGHT, each with its background tint. Cards stay full/sendable as before.
@@ -1276,23 +1398,31 @@ function render(orders, archived) {
   // Already in PickD (arrived via PDF or elsewhere) — kept locally, out of the way.
   // Cards keep their Send button: re-sending appends any missing SKUs (delta).
   if (inPickd.length) {
-    html += `<details style="margin-top:1rem;">
+    html += `<details${openAttr} style="margin-top:1rem;">
       <summary class="muted" style="cursor:pointer;">✓ Already in PickD (${inPickd.length})</summary>
       <div style="margin-top:.6rem;">${inPickd.map(card).join('')}</div>
     </details>`;
   }
   // Sent orders are hidden in a collapsed section so they don't clutter the list.
   if (sent.length) {
-    html += `<details style="margin-top:1rem;">
+    html += `<details${openAttr} style="margin-top:1rem;">
       <summary class="muted" style="cursor:pointer;">✓ Sent to PickD (${sent.length})</summary>
       <div style="margin-top:.6rem;">${sent.map(card).join('')}</div>
     </details>`;
   }
   // Archived orders persist locally across restarts; collapsed by default.
-  if (archived && archived.length) {
-    html += `<details style="margin-top:1rem;">
-      <summary class="muted" style="cursor:pointer;">📦 Archived (${archived.length})</summary>
-      <div style="margin-top:.6rem;">${archived.map(archCard).join('')}</div>
+  if (arch.length) {
+    html += `<details${openAttr} style="margin-top:1rem;">
+      <summary class="muted" style="cursor:pointer;">📦 Archived (${arch.length})</summary>
+      <div style="margin-top:.6rem;">${arch.map(archCard).join('')}</div>
+    </details>`;
+  }
+  // Cache-only matches: scanned by the auto-scanner but not yet materialized into
+  // the live list. Capture reuses the cached AS400 text (no re-scan).
+  if (cacheHits.length) {
+    html += `<details open style="margin-top:1rem;">
+      <summary class="muted" style="cursor:pointer;">🔎 In scan cache (${cacheHits.length})</summary>
+      <div style="margin-top:.6rem;">${cacheHits.map(cacheHitRow).join('')}</div>
     </details>`;
   }
   list.innerHTML = html;
@@ -1359,10 +1489,10 @@ async function doCapture() {
     if (!r.ok) { msg(data.error || 'Error capturing.', 'err'); }
     else if (data.auto_archived) {
            msg(`Order #${data.order_number ?? '—'} auto-archived (${data.customer ?? 'parts-only customer'}) — see Archived below.`, 'warn');
-           document.getElementById('num').value=''; }
+           setSearch(''); }
     else { const fc = data.from_cache ? ' · ya escaneada por el auto-scan' : '';
            msg(`Captured order #${data.order_number ?? '—'} (${palletStats(data)})${fc}.`, 'ok');
-           document.getElementById('num').value=''; }
+           setSearch(''); }
   } catch(e) { msg('Network error: '+e, 'err'); }
   finally { btn.disabled = false; await load(); document.getElementById('num').focus(); }
 }

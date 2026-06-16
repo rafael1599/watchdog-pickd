@@ -60,3 +60,37 @@ def test_count():
     scanned_store.put("880112", "a")
     scanned_store.put("880113", "b")
     assert scanned_store.count() == 2
+
+
+def test_search_blank_returns_empty():
+    scanned_store.put("880112", "a", {"customer": "ACME"})
+    assert scanned_store.search("") == []
+    assert scanned_store.search("   ") == []
+
+
+def test_search_matches_by_number_and_customer():
+    scanned_store.put("880112", "a", {"customer": "ACME BIKES", "item_count": 3})
+    scanned_store.put("880113", "b", {"customer": "Globex", "item_count": 1})
+    # Partial order number matches both.
+    nums = {h["order_number"] for h in scanned_store.search("8801")}
+    assert nums == {"880112", "880113"}
+    # Customer match is case-insensitive and carries the lightweight meta.
+    hits = scanned_store.search("acme")
+    assert len(hits) == 1
+    assert hits[0]["order_number"] == "880112"
+    assert hits[0]["item_count"] == 3
+    # Never leaks the full AS400 capture text to the client.
+    assert "raw_text" not in hits[0]
+
+
+def test_search_excludes_non_matches():
+    scanned_store.put("880112", "a", {"customer": "ACME"})
+    assert scanned_store.search("999") == []
+
+
+def test_search_newest_first_and_limit():
+    scanned_store.put("880100", "a", {"customer": "C", "scanned_at": "2026-06-01T00:00:00Z"})
+    scanned_store.put("880200", "b", {"customer": "C", "scanned_at": "2026-06-10T00:00:00Z"})
+    hits = scanned_store.search("C")
+    assert [h["order_number"] for h in hits] == ["880200", "880100"]
+    assert scanned_store.search("C", limit=1) == hits[:1]
