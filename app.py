@@ -644,6 +644,9 @@ def send(oid: int):
         try:
             result = process_order_text(entry["raw_text"], source_name="as400_app")
         except Exception as e:
+            # Log the full traceback (it was being swallowed into the JSON message),
+            # so an unexpected send failure leaves a stack in logs/app-stderr.log.
+            logging.exception("Send to PickD failed for order #%s (oid %s)", entry.get("order_number"), oid)
             return jsonify({"error": f"Error sending to PickD: {e}"}), 500
 
         with _lock:
