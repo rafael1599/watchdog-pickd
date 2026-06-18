@@ -203,7 +203,7 @@ Interfaz web local. **Correr en la Mac con Mocha TN5250 abierto y logueado.**
 ```bash
 pip install -r requirements.txt
 python3 app.py
-# abrir http://127.0.0.1:5000
+# abrir http://127.0.0.1:5757
 ```
 
 Flujo en la UI:
@@ -242,7 +242,7 @@ python3 scripts/install_autostart.py
 Qué hace en cada login (vía `scripts/start_pickd.py`, ejecutado por el python del venv):
 1. Abre el emulador (`open -b <AS400_LAUNCH_TARGET>`).
 2. Levanta `app.py` en segundo plano (sin Terminal).
-3. Espera a que el servidor responda y abre **Safari** en `http://127.0.0.1:5000`.
+3. Espera a que el servidor responda y abre **Safari** en `http://127.0.0.1:5757`.
 
 No hace login automático en el AS400 (eso se hace a mano o con el botón Connect). Corre una
 vez por login (`KeepAlive=False`) para no reabrir Safari/Mocha en bucle.

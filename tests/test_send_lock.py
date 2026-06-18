@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import app as appmod  # noqa: E402
 
-HDR = {"Host": "localhost:5000"}
+HDR = {"Host": f"localhost:{appmod.PORT}"}
 
 ORDER_TEXT = """                            O R D E R   I N Q U I R Y
  Order Number: 880300                       Account Number: 0000991 00

@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import app as appmod  # noqa: E402
 
-HDR = {"Host": "localhost:5000"}  # satisfy the loopback-only guard
+HDR = {"Host": f"localhost:{appmod.PORT}"}  # satisfy the loopback-only guard
 
 
 # ---------- get_verification_count (statuses included/excluded) --------------

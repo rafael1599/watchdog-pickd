@@ -26,8 +26,8 @@ say() {
   echo "$line" >>"$LOG"
 }
 
-APP_URL="http://127.0.0.1:5000"
-APP_PORT=5000
+APP_PORT="${PICKD_PORT:-5757}"
+APP_URL="http://127.0.0.1:${APP_PORT}"
 DOMAIN="gui/$(id -u)"
 
 BRANCH="${1:-$(git rev-parse --abbrev-ref HEAD)}"
@@ -72,7 +72,7 @@ else
 fi
 
 # Kill any process still listening on the app port. A stale/hung app.py left on
-# :5000 is exactly what makes the new window load forever and show blank — the new
+# the app port is exactly what makes the new window load forever and show blank — the new
 # server can't bind, so Safari talks to a dead one. Clearing it lets the fresh app
 # take the port.
 free_port() {

@@ -18,7 +18,7 @@ import app as appmod  # noqa: E402
 import scanned_store  # noqa: E402
 from as400_capture import CaptureError  # noqa: E402
 
-HDR = {"Host": "localhost:5000"}
+HDR = {"Host": f"localhost:{appmod.PORT}"}
 
 CAPTURE = """                            O R D E R   I N Q U I R Y
  Order Number: 880092                       Account Number: 0000991 00

@@ -10,6 +10,7 @@ invoked). Using the venv python — instead of /bin/bash on a .sh — avoids mac
 ~/Documents (bash gets blocked there; the venv python already has access).
 """
 
+import os
 import subprocess
 import sys
 import time
@@ -17,7 +18,8 @@ import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-URL = "http://127.0.0.1:5000"
+PORT = int(os.environ.get("PICKD_PORT", "5757"))  # keep in sync with app.py's default
+URL = f"http://127.0.0.1:{PORT}"
 
 
 def _venv_python() -> str:
@@ -44,7 +46,7 @@ def _server_is_up() -> bool:
         return False
 
 
-def _free_port(port: int = 5000) -> None:
+def _free_port(port: int = PORT) -> None:
     """Kill any process still listening on the app port before we start a new one.
 
     A stale/hung app.py left on the port blocks the new server from binding — the

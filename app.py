@@ -5,7 +5,7 @@ Run on the Mac that has Mocha TN5250 open and logged in:
 
     pip install -r requirements.txt
     python3 app.py
-    # open http://127.0.0.1:5000
+    # open http://127.0.0.1:5757
 
 Flow:
     1. Type an order number → "Capturar" drives Mocha (AS400) and reads the screens.
@@ -100,7 +100,7 @@ app = Flask(__name__)
 # attacks; rejecting cross-site Origins blocks a malicious page (open in the same
 # Mac's browser) from driving the app via CSRF. The server is bound to 127.0.0.1,
 # so it is not reachable from the local network at all.
-PORT = 5000
+PORT = int(os.environ.get("PICKD_PORT", "5757"))  # 5757 dodges macOS AirPlay (5000/7000); override with PICKD_PORT
 _ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 _ALLOWED_ORIGINS = {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"}
 
