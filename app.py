@@ -71,17 +71,25 @@ def _build_version() -> str:
     /api/version so update.sh can verify the restart actually picked up the new
     build (an answering server is NOT proof: a stale process or a LaunchAgent
     pointing at another clone serves the old UI with a 200)."""
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            check=True,
-        )
-        return out.stdout.strip() or "unknown"
-    except Exception:  # noqa: BLE001
-        return "unknown"
+    repo = str(Path(__file__).resolve().parent)
+    # LaunchAgents run with a minimal PATH that usually lacks git (often only in
+    # Homebrew), so try the common absolute locations too — otherwise the served
+    # version is "unknown" and update.sh can't confirm the restart took the new build.
+    for git in ("git", "/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"):
+        try:
+            out = subprocess.run(
+                [git, "-C", repo, "rev-parse", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=True,
+            )
+            sha = out.stdout.strip()
+            if sha:
+                return sha
+        except Exception:  # noqa: BLE001
+            continue
+    return "unknown"
 
 
 BUILD_VERSION = _build_version()
