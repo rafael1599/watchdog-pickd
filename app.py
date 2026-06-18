@@ -23,6 +23,7 @@ import os
 import subprocess
 import threading
 import time
+import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -361,6 +362,25 @@ def version():
     return jsonify({"version": BUILD_VERSION})
 
 
+@app.errorhandler(Exception)
+def _json_error(e):
+    """Any unhandled error becomes structured JSON (message + type + traceback) so the
+    UI can show a copy-paste-able report. HTTP errors (404/405/…) keep their normal
+    response."""
+    from werkzeug.exceptions import HTTPException
+
+    if isinstance(e, HTTPException):
+        return e
+    logging.exception("Unhandled error on %s %s", request.method, request.path)
+    return jsonify(
+        {
+            "error": str(e) or e.__class__.__name__,
+            "error_type": type(e).__name__,
+            "detail": traceback.format_exc(),
+        }
+    ), 500
+
+
 def _sync_scanned_into_orders() -> None:
     """Materialize auto-scanned cache entries as full, sendable orders.
 
@@ -646,8 +666,16 @@ def send(oid: int):
         except Exception as e:
             # Log the full traceback (it was being swallowed into the JSON message),
             # so an unexpected send failure leaves a stack in logs/app-stderr.log.
-            logging.exception("Send to PickD failed for order #%s (oid %s)", entry.get("order_number"), oid)
-            return jsonify({"error": f"Error sending to PickD: {e}"}), 500
+            logging.exception(
+                "Send to PickD failed for order #%s (oid %s)", entry.get("order_number"), oid
+            )
+            return jsonify(
+                {
+                    "error": f"Error sending to PickD: {e}",
+                    "error_type": type(e).__name__,
+                    "detail": traceback.format_exc(),
+                }
+            ), 500
 
         with _lock:
             entry["result"] = result
@@ -840,6 +868,8 @@ INDEX_HTML = """
     .meta b { font-size: 1.1rem; }
     .muted { color: #6b7280; font-size: .85rem; }
     .ok { color: #16a34a; } .warn { color: #d97706; } .err { color: #dc2626; }
+    #msg { user-select: text; }
+    .copy-err { margin-left: .5rem; font-size: .8rem; padding: .1rem .5rem; border: 1px solid currentColor; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; vertical-align: middle; }
     .mismatch { background: rgba(217,119,6,.12); border: 1px solid rgba(217,119,6,.5);
                 color: #b45309; border-radius: 8px; padding: .5rem .7rem; margin: .2rem 0 .7rem;
                 font-size: .85rem; font-weight: 600; }
@@ -1034,6 +1064,45 @@ INDEX_HTML = """
 
 <script>
 const msg = (t, cls='muted') => { const m=document.getElementById('msg'); m.className=cls; m.textContent=t; };
+
+const APP_VERSION = {{ version | tojson }};
+
+// Show an error with a one-click "Copy error" button. The clipboard gets a paste-ready
+// report (version, time, action, message, exception type, server traceback) so a UI
+// failure can be sent verbatim and debugged at the root.
+let _lastError = null;
+function showError(context, message, data) {
+  const m = document.getElementById('msg');
+  m.className = 'err';
+  m.textContent = '';
+  const span = document.createElement('span');
+  span.textContent = message;
+  m.appendChild(span);
+  const lines = [
+    'PickD watcher — error report',
+    'time:    ' + new Date().toISOString(),
+    'version: ' + APP_VERSION,
+    'action:  ' + (context || '—'),
+    'message: ' + message,
+  ];
+  if (data && data.error_type) lines.push('type:    ' + data.error_type);
+  if (data && data.detail) lines.push('', 'traceback:', data.detail);
+  _lastError = lines.join('\\n');
+  const btn = document.createElement('button');
+  btn.className = 'copy-err';
+  btn.textContent = '📋 Copy error';
+  btn.onclick = () => copyError(btn);
+  m.appendChild(btn);
+}
+async function copyError(btn) {
+  if (!_lastError) return;
+  try {
+    await navigator.clipboard.writeText(_lastError);
+    if (btn) { const t = btn.textContent; btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = t; }, 1500); }
+  } catch (e) {
+    window.prompt('Copy this error (Ctrl/Cmd+C):', _lastError);
+  }
+}
 
 // Live-filter state. The page already holds every order it has (active, already-in-
 // PickD, sent and archived), so filtering is instant and local — no AS400 round-trip.
@@ -1539,14 +1608,14 @@ async function doCapture() {
     const r = await fetch('/api/capture', {method:'POST', headers:{'Content-Type':'application/json'},
                                             body: JSON.stringify({order_number: num})});
     const data = await r.json();
-    if (!r.ok) { msg(data.error || 'Error capturing.', 'err'); }
+    if (!r.ok) { showError('capture order #' + num, data.error || 'Error capturing.', data); }
     else if (data.auto_archived) {
            msg(`Order #${data.order_number ?? '—'} auto-archived (${data.customer ?? 'parts-only customer'}) — see Archived below.`, 'warn');
            setSearch(''); }
     else { const fc = data.from_cache ? ' · ya escaneada por el auto-scan' : '';
            msg(`Captured order #${data.order_number ?? '—'} (${palletStats(data)})${fc}.`, 'ok');
            setSearch(''); }
-  } catch(e) { msg('Network error: '+e, 'err'); }
+  } catch(e) { showError('capture order #' + num, 'Network error: ' + e, null); }
   finally { btn.disabled = false; await load(); document.getElementById('num').focus(); }
 }
 
@@ -1568,10 +1637,10 @@ async function doSend(id) {
       // Prominent green banner so a successful send is impossible to miss.
       toast(`✓ Order #${res.order_number ?? '—'} sent to PickD (${res.status || 'sent'}, ${res.item_count ?? 0} items)`);
     } else {
-      msg(data.error || 'Error sending.', 'err');
+      showError('send order (oid ' + id + ')', data.error || 'Error sending.', data);
     }
   } catch(e) {
-    msg('Network error: '+e, 'err');
+    showError('send order (oid ' + id + ')', 'Network error: ' + e, null);
   } finally {
     await load();  // re-renders the card (Sent ✓, or the button restored)
     if (btn && document.body.contains(btn)) { btn.disabled = false; btn.innerHTML = orig; }
