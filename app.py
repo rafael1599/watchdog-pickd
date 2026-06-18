@@ -238,6 +238,14 @@ def _archive_entry(entry: dict) -> str:
     Caller must hold _lock. Strips the in-memory-only fields (id/sent/result) and
     stamps an archived_at timestamp, mirroring the manual /archive endpoint.
     """
+    # De-dupe by order_number: re-archiving an order that is already archived
+    # REPLACES the prior copy instead of stacking a second one. Without this the
+    # auto-archive sweep added a fresh entry for the same order on every UI poll,
+    # growing the archive without bound (48 MB / 9k entries from ~18 orders).
+    number = entry.get("order_number")
+    if number is not None:
+        for old_aid in [a for a, v in _archive.items() if v.get("order_number") == number]:
+            del _archive[old_aid]
     aid = uuid.uuid4().hex
     arch = {k: v for k, v in entry.items() if k not in ("id", "sent", "result")}
     arch["aid"] = aid
@@ -272,7 +280,15 @@ def _auto_archive_stale() -> int:
             stale_ids.append(oid)
 
     for oid in stale_ids:
-        _archive_entry(_orders.pop(oid))
+        entry = _orders.pop(oid)
+        _archive_entry(entry)
+        # Drop the scan-cache copy too. Otherwise _sync_scanned_into_orders
+        # re-materializes the order on the next poll, it goes stale again, and it is
+        # re-archived forever — the runaway loop that grew the archive to 48 MB. The
+        # monotonic scan cursor is untouched, so the scanner never re-captures it.
+        cache_key = entry.get("cache_key") or entry.get("order_number")
+        if cache_key:
+            scanned_store.delete(cache_key)
     if stale_ids:
         _persist_archive()
     return len(stale_ids)
