@@ -473,6 +473,26 @@ def search_orders():
     return jsonify(scanned_store.search(q))
 
 
+# Trailing digits the operator types by hand; the prefill supplies every leading
+# digit before them (a tail of 2 means a prefill like "8802" for order 880267).
+PREFILL_TAIL_DIGITS = 2
+
+
+@app.get("/api/order-prefix")
+def order_prefix():
+    """Leading digits of the latest order, for the search box's capture prefill.
+
+    The operator types only the last two digits to capture the next order; the UI
+    pre-fills everything before them. Derived from the highest auto-scanned number
+    (manual one-off captures of old orders are excluded so they don't drag it back),
+    so it follows the live sequence and rolls to the next hundred on its own when the
+    latest order crosses a boundary (…99 → …00)."""
+    latest = scanned_store.latest_number()
+    s = str(latest)
+    prefix = s[:-PREFILL_TAIL_DIGITS] if len(s) > PREFILL_TAIL_DIGITS else ""
+    return jsonify({"latest": latest, "prefix": prefix})
+
+
 @app.post("/api/connect")
 def connect():
     """Launch the AS400 emulator and log in — verifying state, not assuming it."""
@@ -1021,6 +1041,9 @@ let _allArchived = [];
 let _filter = '';
 let _cacheHits = [];
 let _searchTimer = null;
+// The digits we last auto-filled into the box, so we can tell an untouched prefill
+// from something the operator typed (and never clobber the latter).
+let _prefill = '';
 
 // Single source of truth for the search box + filter, so programmatic clears
 // (e.g. after a capture) keep the box and the rendered list in sync.
@@ -1028,6 +1051,25 @@ function setSearch(v) {
   _filter = v || '';
   const box = document.getElementById('num');
   if (box) box.value = _filter;
+}
+
+// Soft-prefill the search box with the latest order's leading digits (all but the
+// last two), so the operator types only the final two to capture the next order.
+// Fills only when the box is empty or still holds the previous prefill — never over
+// the operator's own input. Follows the live sequence: when the latest order crosses
+// into a new hundred the prefill rolls on its own.
+function applyPrefill(prefix) {
+  const box = document.getElementById('num');
+  if (!box || !prefix) return;
+  const cur = box.value;
+  if ((cur === '' || cur === _prefill) && cur !== prefix) {
+    box.value = prefix;
+    try { box.setSelectionRange(prefix.length, prefix.length); } catch (e) { /* not focused yet */ }
+  }
+  _prefill = prefix;
+  // Keep the effective filter in sync: a bare prefill is a typing head-start, not a
+  // search, so it must not filter the list down to its own band.
+  _filter = (box.value === _prefill) ? '' : box.value;
 }
 
 // Does an order card match the query? Looks at number, customer, shipping type and
@@ -1048,7 +1090,10 @@ function hitMatches(h, q) {
 // cache so orders scanned in the last few seconds (not yet in the live list) surface
 // too — still without driving AS400.
 function applyFilter() {
-  _filter = document.getElementById('num').value;
+  const v = document.getElementById('num').value;
+  // A bare, untouched prefill is a typing head-start, not a search — treat it as
+  // empty so the full list stays visible until the operator types the tail.
+  _filter = (_prefill && v === _prefill) ? '' : v;
   render(_allOrders, _allArchived);
   if (_searchTimer) clearTimeout(_searchTimer);
   const q = _filter.trim();
@@ -1072,7 +1117,7 @@ async function searchCache(q) {
 // something we already have, Enter just keeps the filter — it never re-scans.
 function onSearchEnter() {
   const q = document.getElementById('num').value.trim();
-  if (!q) return;
+  if (!q || q === _prefill) return;  // empty, or a bare prefill with no tail typed yet
   const ql = q.toLowerCase();
   const hasLocal = [..._allOrders, ..._allArchived].some(o => orderMatches(o, ql))
                 || _cacheHits.some(h => hitMatches(h, ql));
@@ -1096,10 +1141,14 @@ function toast(t) {
 }
 
 async function load() {
-  const [ro, ra] = await Promise.all([fetch('/api/orders'), fetch('/api/archived')]);
+  const [ro, ra, rp] = await Promise.all([
+    fetch('/api/orders'), fetch('/api/archived'), fetch('/api/order-prefix')]);
   _allOrders = await ro.json();
   _allArchived = await ra.json();
-  render(_allOrders, _allArchived);  // render() applies the current live filter
+  let prefix = '';
+  try { if (rp.ok) prefix = (await rp.json()).prefix || ''; } catch (e) { /* prefill is best-effort */ }
+  applyPrefill(prefix);              // soft head-start in the search box (before render)
+  render(_allOrders, _allArchived);  // render() applies the current (effective) filter
   refreshVerification();  // keep the red counter live on each load
   refreshAs400Dot();      // dot goes green from real scanner/capture activity
 }
@@ -1480,6 +1529,7 @@ async function doStatus() {
 async function doCapture() {
   const num = document.getElementById('num').value.trim();
   if (!num) { msg('Enter an order number.', 'err'); return; }
+  if (_prefill && num === _prefill) { msg('Type the last two digits to capture.', 'warn'); return; }
   const btn = document.getElementById('cap'); btn.disabled = true;
   msg('Capturing from AS400… do not touch the keyboard.', 'warn');
   try {

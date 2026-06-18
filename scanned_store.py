@@ -183,6 +183,22 @@ def next_scan_number(start: int = SCAN_START) -> int:
     return max(candidates)
 
 
+def latest_number(start: int = SCAN_START) -> int:
+    """Highest auto-scanned order number on hand (>= start), or `start` if none yet.
+
+    Mirrors next_scan_number's exclusion of manual captures: a one-off manual grab of
+    an old order must not drag the 'latest' backwards, nor a stray high one push it
+    forward — only the auto-scanned sequence defines the live front. Backs the UI's
+    capture prefill, which shows this number's leading digits so the operator types
+    only the last two, and rolls to the next hundred on its own when the sequence
+    crosses a boundary."""
+    highest = start
+    for k, e in load().items():
+        if str(k).isdigit() and int(k) >= start and (e or {}).get("source") != "manual_capture":
+            highest = max(highest, int(k))
+    return highest
+
+
 def search(query: str, limit: int = 25) -> list[dict]:
     """Substring search over the scan cache by order number and customer.
 

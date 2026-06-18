@@ -56,6 +56,24 @@ def test_next_scan_number_ignores_below_start_and_nonnumeric():
     assert scanned_store.next_scan_number(880112) == 880112
 
 
+def test_latest_number_empty_is_start():
+    assert scanned_store.latest_number(880112) == 880112
+
+
+def test_latest_number_tracks_highest_auto_scan():
+    scanned_store.put("880112", "a", source="auto_scan")
+    scanned_store.put("880150", "b", source="auto_scan")
+    assert scanned_store.latest_number(880112) == 880150
+
+
+def test_latest_number_ignores_manual_below_start_and_nonnumeric():
+    scanned_store.put("880150", "a", source="auto_scan")
+    scanned_store.put("999999", "b", source="manual_capture")  # stray high manual — ignored
+    scanned_store.put("100", "c", source="auto_scan")  # below start — ignored
+    scanned_store.put("ABC", "d", source="auto_scan")  # non-numeric — ignored
+    assert scanned_store.latest_number(880112) == 880150
+
+
 def test_count():
     scanned_store.put("880112", "a")
     scanned_store.put("880113", "b")
