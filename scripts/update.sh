@@ -39,15 +39,27 @@ if ! git pull --ff-only origin "$BRANCH"; then
   exit 1
 fi
 
-# 2. Refresh dependencies inside the venv (creating it if missing).
-say "▶ [2/6] Refreshing dependencies…"
+# 2. Refresh dependencies inside the venv — but ONLY when requirements.txt actually
+# changed. A full reinstall every update took minutes (pip re-hits PyPI for every
+# pinned range, and `--upgrade pip` hung with no output on a slow network). We stamp
+# the file's hash after a successful install and skip while it matches.
+# Force a reinstall any time with:  FORCE_DEPS=1 ./scripts/update.sh
+say "▶ [2/6] Checking dependencies…"
+REQ_STAMP="venv/.requirements.sha256"
+req_hash="$(shasum -a 256 requirements.txt | awk '{print $1}')"
 if [ ! -d venv ]; then
   say "  creating virtualenv…"
   python3 -m venv venv
+  ./venv/bin/python3 -m pip install --quiet --upgrade pip  # only on first creation
 fi
-./venv/bin/python3 -m pip install --quiet --upgrade pip
-./venv/bin/python3 -m pip install --quiet -r requirements.txt
-say "✓ Dependencies up to date."
+if [ "${FORCE_DEPS:-0}" != "1" ] && [ -f "$REQ_STAMP" ] && [ "$(cat "$REQ_STAMP" 2>/dev/null)" = "$req_hash" ]; then
+  say "✓ Dependencies unchanged — skipped (run FORCE_DEPS=1 ./scripts/update.sh to reinstall)."
+else
+  say "  requirements.txt changed — installing (no --quiet, so you see progress)…"
+  ./venv/bin/python3 -m pip install -r requirements.txt
+  echo "$req_hash" >"$REQ_STAMP"
+  say "✓ Dependencies up to date."
+fi
 
 # 3. Apply the DB schema the watcher depends on (e.g. picking_lists.source_order_date).
 # Idempotent (ADD COLUMN IF NOT EXISTS) and non-fatal: skips cleanly when
