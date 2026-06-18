@@ -8,11 +8,25 @@ Inserts orders directly into picking_lists so the web app picks them up via Real
 import logging
 import os
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
 from supabase import Client, create_client
+
+# ClientOptions has moved between supabase-py versions — import it defensively so a
+# dependency bump never breaks startup. None → fall back to a plain client.
+try:  # recent supabase-py re-exports it at the top level
+    from supabase import ClientOptions  # type: ignore
+except Exception:  # pragma: no cover - import-path shim
+    try:
+        from supabase.client import ClientOptions  # type: ignore
+    except Exception:
+        try:
+            from supabase.lib.client_options import ClientOptions  # type: ignore
+        except Exception:
+            ClientOptions = None  # type: ignore
 
 from parser import normalize_sku
 
@@ -28,11 +42,45 @@ PDF_IMPORT_USER_ID = os.getenv("PDF_IMPORT_USER_ID", "")
 COUNTER_FILE = os.path.join(os.path.dirname(__file__), ".negative_counter")
 
 
+_client: Optional[Client] = None
+_client_lock = threading.Lock()
+
+
+def _make_client() -> Client:
+    """Build the Supabase client.
+
+    The service-role key never expires, so auto-refresh and session persistence are
+    turned off — gotrue starts a background auto-refresh worker per client when they
+    are on, and spinning up several clients in a row (as one send does) deadlocked on
+    macOS: '[Errno 11] Resource deadlock avoided'."""
+    if ClientOptions is not None:
+        try:
+            return create_client(
+                SUPABASE_URL,
+                SUPABASE_KEY,
+                options=ClientOptions(auto_refresh_token=False, persist_session=False),
+            )
+        except TypeError:
+            # Option/signature mismatch across versions — fall back to a plain client.
+            pass
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
 def get_client() -> Client:
-    """Create and return a Supabase client using service role key."""
+    """Return the shared Supabase client (service role key), creating it once.
+
+    Memoized for the whole process. A fresh client per call leaked a gotrue
+    auto-refresh worker every time and, after a dependency bump, deadlocked on macOS
+    when a send created several clients in a row. One reused client is also the
+    supabase-py–recommended pattern and is safe to share across threads."""
+    global _client
     if not SUPABASE_KEY:
         raise ValueError("SUPABASE_SERVICE_ROLE_KEY not set in .env")
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    if _client is None:
+        with _client_lock:
+            if _client is None:
+                _client = _make_client()
+    return _client
 
 
 def _next_negative_order_number() -> str:
