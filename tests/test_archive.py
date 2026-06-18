@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import app as appmod  # noqa: E402
 
-HDR = {"Host": "localhost:5000"}  # satisfy app's loopback-only guard
+HDR = {"Host": f"localhost:{appmod.PORT}"}  # satisfy app's loopback-only guard
 
 ORDER_TEXT = """                            O R D E R   I N Q U I R Y
  Order Number: 880009                       Account Number: 0003574 00

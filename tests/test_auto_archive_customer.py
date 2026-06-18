@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import app as appmod  # noqa: E402
 import scanned_store  # noqa: E402
 
-HDR = {"Host": "localhost:5000"}
+HDR = {"Host": f"localhost:{appmod.PORT}"}
 
 EBAY_ORDER = """                            O R D E R   I N Q U I R Y
  Order Number: 880100                       Account Number: 0099999 00

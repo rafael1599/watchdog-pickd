@@ -15,7 +15,7 @@ import app as appmod  # noqa: E402
 import scanned_store  # noqa: E402
 import watcher  # noqa: E402
 
-HDR = {"Host": "localhost:5000"}
+HDR = {"Host": f"localhost:{appmod.PORT}"}
 PDF_TEXT = " Order Number: 880009 \n some pdf body"
 
 
