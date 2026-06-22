@@ -60,6 +60,10 @@ UNAVAILABLE_WAIT_SEC = float(os.getenv("SCAN_UNAVAILABLE_WAIT_SEC", "300"))  # 5
 IDLE_THRESHOLD_SEC = float(os.getenv("SCAN_IDLE_THRESHOLD_SEC", "60"))
 # How often to re-check while paused (operator active / manual capture running).
 IDLE_POLL_SEC = float(os.getenv("SCAN_IDLE_POLL_SEC", "15"))
+# Most already-cached numbers a single scan step will skip past (without driving
+# AS400) before capturing anyway — guards a pathologically large run of cached
+# orders from spinning one step forever.
+MAX_SKIP_CACHED_PER_STEP = int(os.getenv("SCAN_MAX_SKIP_CACHED", "500"))
 
 # Serializes all AS400/Mocha access between the auto-scanner and manual captures.
 capture_lock = threading.Lock()
@@ -159,6 +163,21 @@ def run_scan_step(
         from pipeline import preview_order as preview_fn  # local import: avoids DB deps at import
 
     n = scanned_store.next_scan_number(start)
+    # Don't re-pull an order we already have. The scan position can legitimately
+    # land on a number that's already cached — most often when the operator
+    # manually captured the very next order (a manual capture deliberately doesn't
+    # advance the cursor, so the scanner still backfills the gap below an order
+    # grabbed a few ahead). Re-driving AS400 for an order already in the list is
+    # wasted work and steals the operator's keyboard, so advance past any cached
+    # numbers and land on the first one we don't have yet.
+    skipped = 0
+    while scanned_store.get(n) is not None and skipped < MAX_SKIP_CACHED_PER_STEP:
+        scanned_store.skip(n)  # advance the cursor past the already-cached number
+        nxt = scanned_store.next_scan_number(start)
+        if nxt == n:  # cursor couldn't advance (e.g. n below SCAN_START) — don't spin
+            break
+        n = nxt
+        skipped += 1
     try:
         text = capture_fn(str(n), driver)
     except OrderVoidSkip:

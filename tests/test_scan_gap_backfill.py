@@ -72,8 +72,9 @@ def test_scanner_backfills_the_gap_then_resumes_past_it():
         assert scanned_store.next_scan_number(START) == n
         _auto(n)
 
-    # Gap closed: the next number is the manually-captured one (re-captured by
-    # the scanner; the in_pickd flag collapses it in the UI if already sent).
+    # Gap closed: the scan position is now the manually-captured one. run_scan_step
+    # skips it (already cached) instead of re-pulling it from AS400 — see
+    # test_auto_scanner.test_step_backfills_gap_below_a_manual_capture_then_skips_it.
     assert scanned_store.next_scan_number(START) == START + 5
 
 
