@@ -45,6 +45,57 @@ def test_step_captures_and_advances():
     assert scanned_store.next_scan_number(880112) == 880113
 
 
+def test_step_skips_an_already_cached_next_number():
+    # Operator bug (2026-06): "Get orders now" re-pulled an order already in the
+    # list. The scan position landed on a number the operator had MANUALLY captured
+    # (a manual capture doesn't advance the cursor), and the step drove AS400 for it
+    # again. The step must skip cached numbers and capture the first NEW one instead.
+    scanned_store.put(
+        880112,
+        "ORDER 880112 END OF ORDER",
+        {"order_number": "880112", "item_count": 1},
+        source="manual_capture",
+    )
+    assert scanned_store.next_scan_number(880112) == 880112  # would re-pull it
+
+    pulled = []
+
+    def cap(n, driver):
+        pulled.append(n)
+        return f"ORDER {n} END OF ORDER"
+
+    r = auto_scanner.run_scan_step(None, start=880112, capture_fn=cap, preview_fn=_preview)
+    assert pulled == ["880113"]  # 880112 skipped — AS400 driven only for the new one
+    assert r == {"action": "captured", "number": "880113"}
+    assert scanned_store.get("880113") is not None
+
+
+def test_step_backfills_gap_below_a_manual_capture_then_skips_it():
+    # Gap-backfill contract preserved: a manual capture a few ahead must NOT make
+    # the scanner skip the numbers in the gap below it — only the cached manual one
+    # is skipped (not re-pulled) when the scanner reaches it.
+    scanned_store.put(
+        880115,
+        "ORDER 880115 END OF ORDER",
+        {"order_number": "880115", "item_count": 1},
+        source="manual_capture",
+    )
+    pulled = []
+
+    def cap(n, driver):
+        pulled.append(n)
+        return f"ORDER {n} END OF ORDER"
+
+    for expected in ("880112", "880113", "880114"):  # the gap below the manual one
+        r = auto_scanner.run_scan_step(None, start=880112, capture_fn=cap, preview_fn=_preview)
+        assert r == {"action": "captured", "number": expected}
+
+    # Next step lands on the cached manual 880115 → skipped → captures 880116.
+    r = auto_scanner.run_scan_step(None, start=880112, capture_fn=cap, preview_fn=_preview)
+    assert r == {"action": "captured", "number": "880116"}
+    assert "880115" not in pulled  # the manual order is never re-pulled from AS400
+
+
 def test_step_unparseable_capture_is_not_cached():
     # A capture that "succeeds" but parses to no order/items (e.g. an error screen
     # that slipped past the guards) must NOT be cached — junk in the cache floods
