@@ -517,20 +517,24 @@ def search_orders():
     return jsonify(scanned_store.search(q))
 
 
-# Trailing digits the operator types by hand; the prefill supplies every leading
-# digit before them (a tail of 2 means a prefill like "8802" for order 880267).
-PREFILL_TAIL_DIGITS = 2
+# Trailing digits the operator types by hand to search/capture an order; every
+# leading digit before them is the "day prefix" (a tail of 3 means a prefix like
+# "880" for order 880267). The box is NOT prefilled — the operator types only the
+# last 3 digits; the prefix is used solely to rebuild the full number for AS400
+# capture when the order isn't already on screen.
+PREFILL_TAIL_DIGITS = 3
 
 
 @app.get("/api/order-prefix")
 def order_prefix():
-    """Leading digits of the latest order, for the search box's capture prefill.
+    """Leading digits of the latest order — the "day prefix" before the last three.
 
-    The operator types only the last two digits to capture the next order; the UI
-    pre-fills everything before them. Derived from the highest auto-scanned number
-    (manual one-off captures of old orders are excluded so they don't drag it back),
-    so it follows the live sequence and rolls to the next hundred on its own when the
-    latest order crosses a boundary (…99 → …00)."""
+    The operator types only the last three digits to search or capture an order; the
+    UI keeps this prefix hidden and prepends it when a typed 3-digit tail needs to be
+    captured from AS400. Derived from the highest auto-scanned number (manual one-off
+    captures of old orders are excluded so they don't drag it back), so it follows the
+    live sequence and rolls to the next hundred on its own when the latest order
+    crosses a boundary (…99 → …00)."""
     latest = scanned_store.latest_number()
     s = str(latest)
     prefix = s[:-PREFILL_TAIL_DIGITS] if len(s) > PREFILL_TAIL_DIGITS else ""
@@ -913,12 +917,12 @@ INDEX_HTML = """
        lanes the old nowrap+ellipsis crushed it to nothing. */
     .ocust { font-size: .95rem; font-weight: 600; color: #374151; flex: 1 1 12ch;
              min-width: 0; line-height: 1.25; overflow-wrap: anywhere; }
-    .ostats { font-size: .8rem; font-weight: 700; color: #6b7280; white-space: nowrap; }
+    .ostats { font-size: 1.05rem; font-weight: 800; color: #374151; white-space: nowrap; }
     /* Inside a lane there's half the width: the customer name takes its OWN full
        line (always visible), with number/badges above and stats below; number and
        stats are compacted. This keeps two lanes usable even at half-screen Safari. */
     .lane .onum { font-size: 1.15rem; }
-    .lane .ostats { font-size: .72rem; }
+    .lane .ostats { font-size: .95rem; }
     .lane .ocust { flex: 1 1 100%; order: 10; font-size: .9rem; }
     .lane .lane, .lane .card { min-width: 0; }
     .chev { color: #9ca3af; font-size: .85rem; }
@@ -1068,7 +1072,7 @@ INDEX_HTML = """
       </div>
     </div>
     <div class="row">
-      <input id="num" placeholder="Search orders or type # to capture (e.g. 880005)" autofocus
+      <input id="num" placeholder="Últimos 3 dígitos para buscar / capturar (ej. 267)" inputmode="numeric" autofocus
              oninput="applyFilter()"
              onkeydown="if(event.key==='Enter') onSearchEnter()">
       <button id="cap" onclick="doCapture()" title="Fetch this order number from AS400">Capture</button>
@@ -1137,9 +1141,10 @@ let _allArchived = [];
 let _filter = '';
 let _cacheHits = [];
 let _searchTimer = null;
-// The digits we last auto-filled into the box, so we can tell an untouched prefill
-// from something the operator typed (and never clobber the latter).
-let _prefill = '';
+// The day's leading digits (everything before the last three of the latest order).
+// Kept hidden and used ONLY to rebuild the full order number for AS400 capture — the
+// operator types just the last three digits; we never prefill or show these.
+let _capturePrefix = '';
 
 // Single source of truth for the search box + filter, so programmatic clears
 // (e.g. after a capture) keep the box and the rendered list in sync.
@@ -1149,23 +1154,12 @@ function setSearch(v) {
   if (box) box.value = _filter;
 }
 
-// Soft-prefill the search box with the latest order's leading digits (all but the
-// last two), so the operator types only the final two to capture the next order.
-// Fills only when the box is empty or still holds the previous prefill — never over
-// the operator's own input. Follows the live sequence: when the latest order crosses
-// into a new hundred the prefill rolls on its own.
+// Store the day's leading digits for capture reconstruction. The search box is left
+// empty — the operator types only the last three digits to search; those digits
+// substring-match the full order numbers already on screen. The prefix is prepended
+// later only when a typed 3-digit tail must be captured from AS400.
 function applyPrefill(prefix) {
-  const box = document.getElementById('num');
-  if (!box || !prefix) return;
-  const cur = box.value;
-  if ((cur === '' || cur === _prefill) && cur !== prefix) {
-    box.value = prefix;
-    try { box.setSelectionRange(prefix.length, prefix.length); } catch (e) { /* not focused yet */ }
-  }
-  _prefill = prefix;
-  // Keep the effective filter in sync: a bare prefill is a typing head-start, not a
-  // search, so it must not filter the list down to its own band.
-  _filter = (box.value === _prefill) ? '' : box.value;
+  _capturePrefix = prefix || '';
 }
 
 // Does an order card match the query? Looks at number, customer, shipping type and
@@ -1187,9 +1181,7 @@ function hitMatches(h, q) {
 // too — still without driving AS400.
 function applyFilter() {
   const v = document.getElementById('num').value;
-  // A bare, untouched prefill is a typing head-start, not a search — treat it as
-  // empty so the full list stays visible until the operator types the tail.
-  _filter = (_prefill && v === _prefill) ? '' : v;
+  _filter = v;
   render(_allOrders, _allArchived);
   if (_searchTimer) clearTimeout(_searchTimer);
   const q = _filter.trim();
@@ -1213,7 +1205,7 @@ async function searchCache(q) {
 // something we already have, Enter just keeps the filter — it never re-scans.
 function onSearchEnter() {
   const q = document.getElementById('num').value.trim();
-  if (!q || q === _prefill) return;  // empty, or a bare prefill with no tail typed yet
+  if (!q) return;  // nothing typed yet
   const ql = q.toLowerCase();
   const hasLocal = [..._allOrders, ..._allArchived].some(o => orderMatches(o, ql))
                 || _cacheHits.some(h => hitMatches(h, ql));
@@ -1243,7 +1235,7 @@ async function load() {
   _allArchived = await ra.json();
   let prefix = '';
   try { if (rp.ok) prefix = (await rp.json()).prefix || ''; } catch (e) { /* prefill is best-effort */ }
-  applyPrefill(prefix);              // soft head-start in the search box (before render)
+  applyPrefill(prefix);              // store the day prefix for capture reconstruction
   render(_allOrders, _allArchived);  // render() applies the current (effective) filter
   refreshVerification();  // keep the red counter live on each load
   refreshAs400Dot();      // dot goes green from real scanner/capture activity
@@ -1623,9 +1615,12 @@ async function doStatus() {
 }
 
 async function doCapture() {
-  const num = document.getElementById('num').value.trim();
+  let num = document.getElementById('num').value.trim();
   if (!num) { msg('Enter an order number.', 'err'); return; }
-  if (_prefill && num === _prefill) { msg('Type the last two digits to capture.', 'warn'); return; }
+  // The operator types only the last 3 digits. Rebuild the full order number with the
+  // day's leading prefix so AS400 capture targets the right order. A longer entry is
+  // treated as a full number and left as-is.
+  if (_capturePrefix && /^[0-9]{1,3}$/.test(num)) num = _capturePrefix + num;
   const btn = document.getElementById('cap'); btn.disabled = true;
   msg('Capturing from AS400… do not touch the keyboard.', 'warn');
   try {
