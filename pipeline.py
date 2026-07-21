@@ -306,7 +306,7 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
     # 4. Auto-combine by customer
     if result is None and order_data.get("customer_name"):
         client = get_client()
-        addr = order_data.get("customer_address") or {}
+        addr = order_data.get("shipping") or {}
         customer_id = resolve_customer(
             client,
             order_data["customer_name"],

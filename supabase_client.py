@@ -240,7 +240,7 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str) -> dict:
     customer_id = None
     customer_name = order_data.get("customer_name")
     if customer_name:
-        addr = order_data.get("customer_address") or {}
+        addr = order_data.get("shipping") or {}
         customer_id = _resolve_customer(
             client,
             customer_name,
