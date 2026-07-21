@@ -240,7 +240,15 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str) -> dict:
     customer_id = None
     customer_name = order_data.get("customer_name")
     if customer_name:
-        customer_id = _resolve_customer(client, customer_name)
+        addr = order_data.get("customer_address") or {}
+        customer_id = _resolve_customer(
+            client,
+            customer_name,
+            street=addr.get("street"),
+            city=addr.get("city"),
+            state=addr.get("state"),
+            zip_code=addr.get("zip_code")
+        )
 
     # Mirror the web Orders view: persist the Ship-to address on the customer
     # (main address) and in customer_addresses (history). Non-blocking.
@@ -390,9 +398,16 @@ def reopen_completed_order(
     return result.data[0]
 
 
-def resolve_customer(client: Client, name: str) -> Optional[str]:
+def resolve_customer(
+    client: Client,
+    name: str,
+    street: str = None,
+    city: str = None,
+    state: str = None,
+    zip_code: str = None
+) -> Optional[str]:
     """Public wrapper for _resolve_customer."""
-    return _resolve_customer(client, name)
+    return _resolve_customer(client, name, street, city, state, zip_code)
 
 
 COMBINABLE_STATUSES = ["active", "ready_to_double_check", "needs_correction", "double_checking"]
@@ -863,38 +878,79 @@ def _normalize_customer_name(name: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (name or "").upper())
 
 
-def _resolve_customer(client: Client, name: str) -> Optional[str]:
+def _resolve_customer(
+    client: Client,
+    name: str,
+    street: str = None,
+    city: str = None,
+    state: str = None,
+    zip_code: str = None
+) -> Optional[str]:
     """
-    Look up a customer by name, creating one only if there is no match.
-
-    PickD itself does not normalize customer names — dedup is a human picking a
-    fuzzy autocomplete suggestion, and there is no UNIQUE constraint on
-    ``customers.name``. So we normalize defensively here (comparing on uppercased
-    alphanumerics) to avoid inserting duplicates the web app would never merge
-    back together.
+    Look up a customer by name and address, creating one only if there is no match.
+    Defensively normalizes customer names to avoid duplicates in the UI.
     """
-    clean = name.strip()
-    target = _normalize_customer_name(clean)
+    clean_name = name.strip()
+    target_name = _normalize_customer_name(clean_name)
+    normalized_street = street.strip() if street else None
 
-    if target:
-        # Fast path: exact match on the stored name.
-        result = client.table("customers").select("id").eq("name", clean).execute()
+    if not target_name:
+        return None
+
+    import re
+
+    # Helper to normalize street address for comparison
+    def clean_street_str(s):
+        return re.sub(r'[^a-z0-9]', '', s.lower()) if s else ''
+
+    if normalized_street:
+        # Match by name and street address.
+        existing = client.table("customers").select("id, name, street, city, state, zip_code").execute()
+        if existing.data:
+            target_street_clean = clean_street_str(normalized_street)
+            for row in existing.data:
+                if _normalize_customer_name(row.get("name", "")) == target_name:
+                    if clean_street_str(row.get("street")) == target_street_clean:
+                        # Match found! If other fields are missing, let's update them.
+                        updates = {}
+                        if not row.get("street") and street: updates["street"] = street.strip()
+                        if not row.get("city") and city: updates["city"] = city.strip()
+                        if not row.get("state") and state: updates["state"] = state.strip()
+                        if not row.get("zip_code") and zip_code: updates["zip_code"] = zip_code.strip()
+                        
+                        if updates:
+                            client.table("customers").update(updates).eq("id", row["id"]).execute()
+                            
+                        return row["id"]
+        
+        # If no match, insert new customer with address details
+        insert_data = {
+            "name": clean_name.upper(),
+            "street": street.strip() if street else None,
+            "city": city.strip() if city else None,
+            "state": state.strip() if state else None,
+            "zip_code": zip_code.strip() if zip_code else None,
+        }
+        result = client.table("customers").insert(insert_data).execute()
         if result.data:
             return result.data[0]["id"]
-
-        # Fall back to a normalized comparison against existing customers,
-        # tolerating differences in casing, spacing and punctuation.
-        existing = client.table("customers").select("id, name").execute()
-        for row in existing.data or []:
-            if _normalize_customer_name(row.get("name", "")) == target:
-                return row["id"]
-
-    # No match — create the customer. Store the name uppercased to stay
-    # consistent with how the rest of the app renders customer names.
-    result = client.table("customers").insert({"name": clean.upper()}).execute()
-
-    if result.data:
-        return result.data[0]["id"]
+    else:
+        # Fallback to name-only match.
+        existing = client.table("customers").select("id, name, street").execute()
+        if existing.data:
+            # First look for a row with matching name and NO street address (generic)
+            for row in existing.data:
+                if _normalize_customer_name(row.get("name", "")) == target_name and not row.get("street"):
+                    return row["id"]
+            # Otherwise return the first matching name row
+            for row in existing.data:
+                if _normalize_customer_name(row.get("name", "")) == target_name:
+                    return row["id"]
+            
+        # Create new customer with name only
+        result = client.table("customers").insert({"name": clean_name.upper()}).execute()
+        if result.data:
+            return result.data[0]["id"]
 
     return None
 

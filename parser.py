@@ -83,6 +83,45 @@ def parse_customer_name(text: str) -> Optional[str]:
     return name or None
 
 
+def parse_customer_address(text: str) -> Optional[dict]:
+    """
+    Extract customer address following the 'Bill' line.
+    Looks at up to 4 lines below the customer name to find the city/state/zip line.
+    Concats intervening lines as the street.
+    """
+    lines = text.split("\n")
+    for idx, line in enumerate(lines):
+        if re.match(r"^Bill\s+", line, re.IGNORECASE):
+            for offset in range(1, 5):
+                if idx + offset < len(lines):
+                    candidate_line = lines[idx + offset].strip()
+                    zip_match = re.search(r"\b(\d{5}(?:-\d{4})?)\s*$", candidate_line)
+                    if zip_match:
+                        street_lines = [lines[idx + o].strip() for o in range(1, offset)]
+                        street = " ".join(street_lines)
+                        
+                        zip_code = zip_match.group(1)
+                        rem = candidate_line[:zip_match.start()].strip()
+                        state_match = re.search(r"\b([A-Z]{2})\s*$", rem, re.IGNORECASE)
+                        if state_match:
+                            state = state_match.group(1).upper()
+                            city = rem[:state_match.start()].replace(",", "").strip()
+                            return {
+                                "street": street,
+                                "city": city,
+                                "state": state,
+                                "zip_code": zip_code
+                            }
+                        else:
+                            return {
+                                "street": street,
+                                "city": rem.replace(",", "").strip(),
+                                "state": "",
+                                "zip_code": zip_code
+                            }
+    return None
+
+
 def parse_items(text: str) -> List[Dict]:
     """
     Parse order line items from the structured table.
@@ -410,6 +449,7 @@ def parse_order(text: str) -> dict:
             'order_number': str | None,
             'account_number': str | None,
             'customer_name': str | None,
+            'customer_address': dict | None,
             'items': [ { sku, qty, qty_ordered, raw_sku, warehouse, description, unit_price, extend_price } ],
             'is_last_page': bool,
             'order_comments': str | None,
@@ -423,6 +463,7 @@ def parse_order(text: str) -> dict:
         "order_number": parse_order_number(text),
         "account_number": parse_account_number(text),
         "customer_name": parse_customer_name(text),
+        "customer_address": parse_customer_address(text),
         "items": parse_items(text),
         "subtotal": parse_order_subtotal(text),
         "is_last_page": has_end_of_order(text),

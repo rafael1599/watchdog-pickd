@@ -117,6 +117,7 @@ def process_pdf(pdf_path: str):
             f"({result.get('item_count')} total items)"
         )
 
+        # 6. Move to processed
         dest = move_file(pdf_path, PROCESSED_FOLDER)
         log.info(f"   📂 Moved to: {os.path.basename(dest)}")
 
