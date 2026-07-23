@@ -215,7 +215,7 @@ def find_orders_in_pickd(numbers: list) -> set:
     return wanted & present
 
 
-def create_order(order_data: dict, pdf_hash: str, file_name: str) -> dict:
+def create_order(order_data: dict, pdf_hash: str, file_name: str, group_id: str = None) -> dict:
     """
     Create a new picking list from parsed PDF data.
     Inserts with status='ready_to_double_check' and source='pdf_import'.
@@ -226,6 +226,10 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str) -> dict:
         'customer_name': str | None,
         'items': [ { sku, qty, ... } ]
     }
+
+    group_id, when given, is set in this same INSERT statement so it links
+    the row to an order_groups cluster from the moment it's created — required
+    for auto_group_fedex_orders to see NEW.group_id IS NOT NULL and skip it.
     """
     client = get_client()
 
@@ -276,6 +280,9 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str) -> dict:
     order_date = order_data.get("order_date")
     if order_date:
         insert_data["source_order_date"] = order_date
+
+    if group_id:
+        insert_data["group_id"] = group_id
 
     result = client.table("picking_lists").insert(insert_data).execute()
     picking_list = result.data[0]
@@ -453,106 +460,32 @@ def combine_into_order(
     target_order: dict, new_order_data: dict, pdf_hash: str, file_name: str
 ) -> dict:
     """
-    Combine a new PDF order into an existing picking list for the same customer.
-    - Tags items with source_order for future splitting
-    - Concatenates order numbers: "878279 / 878280"
-    - Updates combine_meta with provenance data
-    - If target was in double_checking: resets to ready_to_double_check, releases checker
+    Link a new PDF order to an existing same-customer picking list via group_id,
+    instead of merging into one row. Both orders stay independent, standalone
+    rows — the app's read side reconstructs the combined view (source_order
+    tagging, combine_meta, pallet_photos) live from group_id for display.
+
+    The target row is never mutated except possibly getting a group_id: no
+    item merging, no order_number concatenation, no status reset. A
+    completed/in-progress verification on the target is undisturbed by an
+    unrelated new order arriving for the same customer.
     """
     client = get_client()
+    group_id = target_order.get("group_id")
 
-    target_id = target_order["id"]
-    existing_items = target_order.get("items", []) or []
-    existing_order_number = target_order["order_number"] or ""
-    new_order_number = new_order_data.get("order_number") or "UNKNOWN"
+    if not group_id:
+        group_result = client.table("order_groups").insert({"group_type": "general"}).execute()
+        group_id = group_result.data[0]["id"]
+        # Safe here: group_id is being set in this UPDATE statement itself,
+        # so auto_group_fedex_orders sees NEW.group_id IS NOT NULL and skips.
+        client.table("picking_lists").update({"group_id": group_id}).eq(
+            "id", target_order["id"]
+        ).execute()
 
-    # Tag existing items with source_order if not already tagged
-    for item in existing_items:
-        if "source_order" not in item:
-            # Use the first order number segment (handles already-combined orders)
-            base_order = (
-                existing_order_number.split(" / ")[0]
-                if " / " in existing_order_number
-                else existing_order_number
-            )
-            item["source_order"] = base_order
-
-    # Convert new items to cart format and tag with source_order
-    cart_items = _to_cart_items(client, new_order_data["items"])
-    for item in cart_items:
-        item["source_order"] = new_order_number
-
-    # Delta check: only add items not already present
-    delta_items = []
-    existing_skus = set()
-    for item in existing_items:
-        sku = item.get("sku", "")
-        if sku:
-            existing_skus.add(sku)
-            existing_skus.add(normalize_sku(sku))
-
-    for new_item in cart_items:
-        sku = new_item.get("sku", "")
-        norm = normalize_sku(sku) if sku else ""
-        if sku not in existing_skus and norm not in existing_skus:
-            delta_items.append(new_item)
-        else:
-            # Same SKU but different source_order: keep as separate line item
-            delta_items.append(new_item)
-            # Mark that this is a cross-order duplicate so we DON'T merge quantities
-            new_item["_cross_order"] = True
-
-    # Merge: append delta items without merging same-SKU across source orders
-    merged = list(existing_items)
-    for new_item in delta_items:
-        cross_order = new_item.pop("_cross_order", False)
-        if cross_order:
-            # Keep as separate line item (different source_order)
-            merged.append(new_item)
-        else:
-            # New SKU, just append
-            merged.append(new_item)
-
-    # Concatenate order numbers
-    combined_order_number = f"{existing_order_number} / {new_order_number}"
-
-    # Build/update combine_meta
-    existing_meta = target_order.get("combine_meta") or {}
-    if not existing_meta.get("source_orders"):
-        existing_meta["source_orders"] = [
-            {
-                "order_number": existing_order_number,
-                "added_at": target_order.get("created_at", datetime.now(timezone.utc).isoformat()),
-                "item_count": len(existing_items),
-            }
-        ]
-    existing_meta["is_combined"] = True
-    existing_meta["source_orders"].append(
-        {
-            "order_number": new_order_number,
-            "pdf_hash": pdf_hash,
-            "file_name": file_name,
-            "added_at": datetime.now(timezone.utc).isoformat(),
-            "item_count": len(cart_items),
-        }
-    )
-
-    update_data = {
-        "items": merged,
-        "order_number": combined_order_number,
-        "combine_meta": existing_meta,
-    }
-
-    # If checker had the order open, release it
-    if target_order.get("status") == "double_checking":
-        update_data["status"] = "ready_to_double_check"
-        update_data["checked_by"] = None
-
-    result = client.table("picking_lists").update(update_data).eq("id", target_id).execute()
-
-    _log_import(client, pdf_hash, new_order_number, file_name, len(cart_items), target_id)
-
-    return result.data[0]
+    # New order is its own independent row. group_id must be passed into
+    # create_order (set in the same INSERT), not applied via a follow-up
+    # update, for the same trigger-safety reason.
+    return create_order(new_order_data, pdf_hash, file_name, group_id=group_id)
 
 
 # Statuses that count as "in verification" (the PickD double-check pipeline).
