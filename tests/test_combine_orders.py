@@ -2,7 +2,8 @@
 Tests for the auto-combine orders by customer feature.
 
 Tests the logic in supabase_client.py:
-- combine_into_order: item tagging, merging, order number concatenation, combine_meta
+- combine_into_order: links a new order to an existing one via group_id
+  (order_groups insert + picking_lists.group_id), never mutating the target row
 - find_combinable_order_by_customer: status filtering, 24h cutoff
 
 Uses mocks for Supabase client to avoid DB dependency.
@@ -22,140 +23,67 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 class TestCombineIntoOrder:
     """Test the combine_into_order function logic."""
 
+    @patch("supabase_client.create_order")
     @patch("supabase_client.get_client")
-    @patch("supabase_client._to_cart_items")
-    @patch("supabase_client._log_import")
-    def test_basic_combine_tags_items_with_source_order(self, mock_log, mock_cart, mock_client):
-        """Items from both orders should be tagged with their source_order."""
+    def test_target_without_group_id_creates_group_and_links_it(
+        self, mock_client, mock_create_order
+    ):
+        """No group_id on target: create an order_groups row, link target to it,
+        and create the new order already carrying that group_id."""
         from supabase_client import combine_into_order
 
-        # Existing order
-        target_order = {
-            "id": "uuid-1",
-            "order_number": "878279",
-            "status": "ready_to_double_check",
-            "items": [
-                {"sku": "03-3684BL", "pickingQty": 4},
-            ],
-            "combine_meta": None,
-            "created_at": "2026-03-17T10:00:00Z",
-        }
+        target_order = {"id": "uuid-1", "order_number": "878279", "status": "ready_to_double_check"}
+        new_order_data = {"order_number": "878280", "items": [{"sku": "A", "qty": 1}]}
 
-        # New PDF data
-        new_order_data = {
-            "order_number": "878280",
-            "items": [{"sku": "033994BR", "qty": 2}],
-        }
+        groups_table = MagicMock()
+        groups_table.insert.return_value.execute.return_value.data = [{"id": "group-uuid"}]
+        lists_table = MagicMock()
 
-        # Mock _to_cart_items to return converted items
-        mock_cart.return_value = [
-            {"sku": "03-3994BR", "pickingQty": 2},
-        ]
+        def table(name):
+            return groups_table if name == "order_groups" else lists_table
 
-        # Mock Supabase update
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
-            {
-                "id": "uuid-1",
-                "items": [
-                    {"sku": "03-3684BL", "pickingQty": 4, "source_order": "878279"},
-                    {"sku": "03-3994BR", "pickingQty": 2, "source_order": "878280"},
-                ],
-                "order_number": "878279 / 878280",
-                "combine_meta": {"is_combined": True, "source_orders": []},
-            }
-        ]
-        mock_client.return_value.table.return_value = mock_table
+        mock_client.return_value.table.side_effect = table
+        mock_create_order.return_value = {"id": "uuid-2", "order_number": "878280"}
 
-        combine_into_order(target_order, new_order_data, "hash123", "test.pdf")
+        combine_into_order(target_order, new_order_data, "hash", "f.pdf")
 
-        # Verify update was called
-        mock_table.update.assert_called_once()
-        call_args = mock_table.update.call_args[0][0]
+        groups_table.insert.assert_called_once_with({"group_type": "general"})
+        lists_table.update.assert_called_once_with({"group_id": "group-uuid"})
+        lists_table.update.return_value.eq.assert_called_once_with("id", "uuid-1")
+        mock_create_order.assert_called_once_with(
+            new_order_data, "hash", "f.pdf", group_id="group-uuid"
+        )
 
-        # Check items are tagged
-        merged_items = call_args["items"]
-        assert len(merged_items) == 2
-        assert merged_items[0]["source_order"] == "878279"
-        assert merged_items[1]["source_order"] == "878280"
-
+    @patch("supabase_client.create_order")
     @patch("supabase_client.get_client")
-    @patch("supabase_client._to_cart_items")
-    @patch("supabase_client._log_import")
-    def test_combine_concatenates_order_numbers(self, mock_log, mock_cart, mock_client):
-        """Combined order number should be "X / Y"."""
+    def test_target_with_group_id_reuses_it(self, mock_client, mock_create_order):
+        """Target already has a group_id: no new group, no update — just reuse it."""
         from supabase_client import combine_into_order
 
         target_order = {
             "id": "uuid-1",
             "order_number": "878279",
             "status": "ready_to_double_check",
-            "items": [],
-            "combine_meta": None,
-            "created_at": "2026-03-17T10:00:00Z",
+            "group_id": "existing-group",
         }
+        new_order_data = {"order_number": "878280", "items": [{"sku": "A", "qty": 1}]}
 
-        new_order_data = {
-            "order_number": "878280",
-            "items": [{"sku": "033994BR", "qty": 2}],
-        }
-
-        mock_cart.return_value = [{"sku": "03-3994BR", "pickingQty": 2}]
         mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
-            {"id": "uuid-1"}
-        ]
         mock_client.return_value.table.return_value = mock_table
+        mock_create_order.return_value = {"id": "uuid-2", "order_number": "878280"}
 
-        combine_into_order(target_order, new_order_data, "hash123", "test.pdf")
+        combine_into_order(target_order, new_order_data, "hash", "f.pdf")
 
-        call_args = mock_table.update.call_args[0][0]
-        assert call_args["order_number"] == "878279 / 878280"
+        mock_table.insert.assert_not_called()
+        mock_table.update.assert_not_called()
+        mock_create_order.assert_called_once_with(
+            new_order_data, "hash", "f.pdf", group_id="existing-group"
+        )
 
+    @patch("supabase_client.create_order")
     @patch("supabase_client.get_client")
-    @patch("supabase_client._to_cart_items")
-    @patch("supabase_client._log_import")
-    def test_combine_builds_combine_meta(self, mock_log, mock_cart, mock_client):
-        """combine_meta should track both source orders."""
-        from supabase_client import combine_into_order
-
-        target_order = {
-            "id": "uuid-1",
-            "order_number": "878279",
-            "status": "ready_to_double_check",
-            "items": [{"sku": "A", "pickingQty": 1}],
-            "combine_meta": None,
-            "created_at": "2026-03-17T10:00:00Z",
-        }
-
-        new_order_data = {
-            "order_number": "878280",
-            "items": [{"sku": "B", "qty": 1}],
-        }
-
-        mock_cart.return_value = [{"sku": "B", "pickingQty": 1}]
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
-            {"id": "uuid-1"}
-        ]
-        mock_client.return_value.table.return_value = mock_table
-
-        combine_into_order(target_order, new_order_data, "hash456", "order2.pdf")
-
-        call_args = mock_table.update.call_args[0][0]
-        meta = call_args["combine_meta"]
-
-        assert meta["is_combined"] is True
-        assert len(meta["source_orders"]) == 2
-        assert meta["source_orders"][0]["order_number"] == "878279"
-        assert meta["source_orders"][1]["order_number"] == "878280"
-        assert meta["source_orders"][1]["pdf_hash"] == "hash456"
-
-    @patch("supabase_client.get_client")
-    @patch("supabase_client._to_cart_items")
-    @patch("supabase_client._log_import")
-    def test_combine_resets_double_checking_status(self, mock_log, mock_cart, mock_client):
-        """If target was in double_checking, reset to ready_to_double_check and clear checker."""
+    def test_target_row_items_and_status_never_written(self, mock_client, mock_create_order):
+        """The target row's items/status/checked_by must never be part of any write."""
         from supabase_client import combine_into_order
 
         target_order = {
@@ -163,132 +91,42 @@ class TestCombineIntoOrder:
             "order_number": "878279",
             "status": "double_checking",
             "checked_by": "checker-uuid",
-            "items": [],
-            "combine_meta": None,
-            "created_at": "2026-03-17T10:00:00Z",
+            "items": [{"sku": "X", "pickingQty": 1}],
         }
-
         new_order_data = {"order_number": "878280", "items": [{"sku": "A", "qty": 1}]}
-        mock_cart.return_value = [{"sku": "A", "pickingQty": 1}]
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
-            {"id": "uuid-1"}
-        ]
-        mock_client.return_value.table.return_value = mock_table
+
+        groups_table = MagicMock()
+        groups_table.insert.return_value.execute.return_value.data = [{"id": "group-uuid"}]
+        lists_table = MagicMock()
+        mock_client.return_value.table.side_effect = lambda name: (
+            groups_table if name == "order_groups" else lists_table
+        )
+        mock_create_order.return_value = {"id": "uuid-2", "order_number": "878280"}
 
         combine_into_order(target_order, new_order_data, "hash", "f.pdf")
 
-        call_args = mock_table.update.call_args[0][0]
-        assert call_args["status"] == "ready_to_double_check"
-        assert call_args["checked_by"] is None
+        update_payload = lists_table.update.call_args[0][0]
+        assert update_payload == {"group_id": "group-uuid"}
+        for key in ("items", "status", "checked_by", "order_number", "combine_meta"):
+            assert key not in update_payload
 
+    @patch("supabase_client.create_order")
     @patch("supabase_client.get_client")
-    @patch("supabase_client._to_cart_items")
-    @patch("supabase_client._log_import")
-    def test_combine_does_not_reset_active_status(self, mock_log, mock_cart, mock_client):
-        """If target is active, do NOT change status (picker keeps working)."""
+    def test_returns_create_order_result(self, mock_client, mock_create_order):
+        """combine_into_order returns whatever create_order returns, unmodified."""
         from supabase_client import combine_into_order
 
-        target_order = {
-            "id": "uuid-1",
-            "order_number": "878279",
-            "status": "active",
-            "items": [],
-            "combine_meta": None,
-            "created_at": "2026-03-17T10:00:00Z",
-        }
-
+        target_order = {"id": "uuid-1", "order_number": "878279", "group_id": "g1"}
         new_order_data = {"order_number": "878280", "items": [{"sku": "A", "qty": 1}]}
-        mock_cart.return_value = [{"sku": "A", "pickingQty": 1}]
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
-            {"id": "uuid-1"}
-        ]
-        mock_client.return_value.table.return_value = mock_table
-
-        combine_into_order(target_order, new_order_data, "hash", "f.pdf")
-
-        call_args = mock_table.update.call_args[0][0]
-        assert "status" not in call_args  # Should NOT change status
-
-    @patch("supabase_client.get_client")
-    @patch("supabase_client._to_cart_items")
-    @patch("supabase_client._log_import")
-    def test_combine_same_sku_keeps_separate_items(self, mock_log, mock_cart, mock_client):
-        """Same SKU from different orders should be kept as separate line items."""
-        from supabase_client import combine_into_order
-
-        target_order = {
-            "id": "uuid-1",
-            "order_number": "878279",
-            "status": "ready_to_double_check",
-            "items": [{"sku": "03-3684BL", "pickingQty": 4}],
-            "combine_meta": None,
-            "created_at": "2026-03-17T10:00:00Z",
+        mock_create_order.return_value = {
+            "id": "uuid-2",
+            "order_number": "878280",
+            "items": [{"sku": "A", "pickingQty": 1}],
         }
 
-        new_order_data = {"order_number": "878280", "items": [{"sku": "033684BL", "qty": 2}]}
-        mock_cart.return_value = [{"sku": "03-3684BL", "pickingQty": 2}]
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
-            {"id": "uuid-1"}
-        ]
-        mock_client.return_value.table.return_value = mock_table
+        result = combine_into_order(target_order, new_order_data, "hash", "f.pdf")
 
-        combine_into_order(target_order, new_order_data, "hash", "f.pdf")
-
-        call_args = mock_table.update.call_args[0][0]
-        merged = call_args["items"]
-
-        # Both items should exist (not merged into one)
-        assert len(merged) == 2
-        assert merged[0]["source_order"] == "878279"
-        assert merged[0]["pickingQty"] == 4
-        assert merged[1]["source_order"] == "878280"
-        assert merged[1]["pickingQty"] == 2
-
-    @patch("supabase_client.get_client")
-    @patch("supabase_client._to_cart_items")
-    @patch("supabase_client._log_import")
-    def test_triple_combine_appends_to_existing_meta(self, mock_log, mock_cart, mock_client):
-        """Third order combining into already-combined order should append to source_orders."""
-        from supabase_client import combine_into_order
-
-        target_order = {
-            "id": "uuid-1",
-            "order_number": "878279 / 878280",
-            "status": "ready_to_double_check",
-            "items": [
-                {"sku": "A", "pickingQty": 1, "source_order": "878279"},
-                {"sku": "B", "pickingQty": 2, "source_order": "878280"},
-            ],
-            "combine_meta": {
-                "is_combined": True,
-                "source_orders": [
-                    {"order_number": "878279", "added_at": "2026-03-17T10:00:00Z", "item_count": 1},
-                    {"order_number": "878280", "added_at": "2026-03-17T10:05:00Z", "item_count": 1},
-                ],
-            },
-            "created_at": "2026-03-17T10:00:00Z",
-        }
-
-        new_order_data = {"order_number": "878281", "items": [{"sku": "C", "qty": 3}]}
-        mock_cart.return_value = [{"sku": "C", "pickingQty": 3}]
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
-            {"id": "uuid-1"}
-        ]
-        mock_client.return_value.table.return_value = mock_table
-
-        combine_into_order(target_order, new_order_data, "hash3", "order3.pdf")
-
-        call_args = mock_table.update.call_args[0][0]
-
-        assert call_args["order_number"] == "878279 / 878280 / 878281"
-
-        meta = call_args["combine_meta"]
-        assert len(meta["source_orders"]) == 3
-        assert meta["source_orders"][2]["order_number"] == "878281"
+        assert result == mock_create_order.return_value
 
 
 # ---------- find_combinable_order_by_customer tests ----------

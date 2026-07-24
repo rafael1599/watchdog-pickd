@@ -1,6 +1,7 @@
 """
 Tests that create_order writes the AS400 'Order Date' into the additive
-picking_lists.source_order_date column when present (and omits it otherwise).
+picking_lists.source_order_date column when present (and omits it otherwise),
+and that the optional group_id kwarg is included/omitted the same way.
 
 Uses mocks for the Supabase client to avoid any DB dependency.
 """
@@ -12,7 +13,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 
-def _run_create(order_data):
+def _run_create(order_data, group_id=None):
     """Call create_order with everything mocked and return the insert payload."""
     from supabase_client import create_order
 
@@ -26,7 +27,7 @@ def _run_create(order_data):
         patch("supabase_client._log_import"),
     ):
         mock_client.return_value.table.return_value = mock_table
-        create_order(order_data, "hash123", "test_source")
+        create_order(order_data, "hash123", "test_source", group_id=group_id)
 
     mock_table.insert.assert_called_once()
     return mock_table.insert.call_args[0][0]
@@ -49,3 +50,15 @@ def test_source_order_date_omitted_when_none():
         {"order_number": "880009", "items": [{"sku": "X", "qty": 1}], "order_date": None}
     )
     assert "source_order_date" not in payload
+
+
+def test_group_id_in_payload_when_provided():
+    payload = _run_create(
+        {"order_number": "880009", "items": [{"sku": "X", "qty": 1}]}, group_id="group-uuid"
+    )
+    assert payload["group_id"] == "group-uuid"
+
+
+def test_group_id_omitted_when_absent():
+    payload = _run_create({"order_number": "880009", "items": [{"sku": "X", "qty": 1}]})
+    assert "group_id" not in payload

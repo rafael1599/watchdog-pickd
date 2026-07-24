@@ -222,6 +222,7 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
 
     result = None
     status = None  # action taken
+    combined_with = None  # order_number this one was grouped with, if any
 
     # 3. Existing order by number → delta append / reopen (self-healing re-send)
     if order_number:
@@ -322,6 +323,7 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
             if combinable:
                 result = combine_into_order(combinable, order_data, pdf_hash, source_name)
                 status = "combined"
+                combined_with = combinable.get("order_number")
 
     # 5. Fallback: create new
     if result is None:
@@ -343,6 +345,13 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
             "id", result["id"]
         ).execute()
 
+    message = f"Order #{result.get('order_number')} ({len(updated_items)} items)."
+    if combined_with:
+        message = (
+            f"Order #{result.get('order_number')} ({len(updated_items)} items), "
+            f"grouped with #{combined_with}."
+        )
+
     return _result(
         status,
         order_number=result.get("order_number"),
@@ -350,7 +359,7 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
         item_count=len(updated_items),
         needs_correction=needs_correction,
         picking_list=result,
-        message=f"Order #{result.get('order_number')} ({len(updated_items)} items).",
+        message=message,
     )
 
 
