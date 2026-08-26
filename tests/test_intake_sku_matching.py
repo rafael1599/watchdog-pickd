@@ -229,3 +229,33 @@ def test_two_letter_colour_is_not_a_sibling_of_a_different_colour():
     )
     assert items[0]["sku"] == "03-4070BL"
     assert items[0]["insufficient_stock"] is True
+
+
+
+# --- a line the catalog does not know is written in the canonical spelling ------
+
+
+def test_not_found_line_carries_the_canonical_spelling():
+    # '03 3768 BLD' is not in the catalog: the line used to be written as the
+    # bare matching key '033768BL' (the parser's 2-letter guess), and when the
+    # operator registered it as '03-3768BLD' the order line never matched.
+    client = _client_with_catalog([])
+    items = _to_cart_items(
+        client, [{"sku": "033768BL", "raw_sku": "03 3768 BLD", "qty": 1, "description": "d"}]
+    )
+    assert items[0]["sku_not_found"] is True
+    assert items[0]["sku"] == "03-3768BLD"
+
+
+def test_not_found_part_line_is_padded_and_dashed():
+    client = _client_with_catalog([])
+    items = _to_cart_items(
+        client, [{"sku": "010530", "raw_sku": "01 0530", "qty": 2, "description": "d"}]
+    )
+    assert items[0]["sku"] == "01-0530"
+
+
+def test_not_found_line_without_raw_sku_falls_back_to_the_parsed_key():
+    client = _client_with_catalog([])
+    items = _to_cart_items(client, [{"sku": "034664BR", "qty": 1, "description": "d"}])
+    assert items[0]["sku"] == "03-4664BR"

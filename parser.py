@@ -24,6 +24,40 @@ def normalize_sku(raw_sku: str) -> str:
     return re.sub(r"[^A-Z0-9]+", "", raw_sku.upper())
 
 
+_CANON_SEP = re.compile(r"^(\d{2})[-\s]+(\d{1,4})\s*([A-Z]{0,3})$")
+_CANON_GLUED = re.compile(r"^(\d{2})(\d{4})([A-Z]{0,3})$")
+
+
+def canonical_sku(raw_sku: str) -> str:
+    """
+    Pickd's canonical SKU spelling — the ONE rule, mirrored from the SQL
+    function canonical_sku() (pickd migration 20260826220000) and from the
+    app's normalizeSkuOnRegister. Keep the three case tables identical (see
+    tests/test_canonical_sku.py).
+
+    Anything that parses as an AS400 stock number becomes DD-NNNN[CCC]:
+    2-digit department, dash, number zero-padded to 4, 0-3 upper-case letters.
+        '01 0530'      → '01-0530'
+        '03 3768 BLD'  → '03-3768BLD'
+        '033768BLD'    → '03-3768BLD'
+    Everything else (PKD-…, 12-digit UPCs, serials, '23-00146A') is
+    upper/strip and otherwise left alone.
+
+    normalize_sku() (no separators at all) stays the MATCHING key; this is the
+    spelling a not-found line is written with, so that when the operator
+    registers the SKU the catalog row and the order line carry the same name
+    and the DB can mark the line found by exact match.
+    """
+    v = re.sub(r"\s+", " ", (raw_sku or "").strip().upper())
+    m = _CANON_SEP.match(v)
+    if m:
+        return f"{m.group(1)}-{m.group(2).zfill(4)}{m.group(3)}"
+    m = _CANON_GLUED.match(v)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}{m.group(3)}"
+    return v
+
+
 def parse_order_number(text: str) -> Optional[str]:
     """
     Extract order number from text. Position-independent regex.

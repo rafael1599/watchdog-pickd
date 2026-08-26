@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - import-path shim
         except Exception:
             ClientOptions = None  # type: ignore
 
-from parser import normalize_sku
+from parser import canonical_sku, normalize_sku
 
 load_dotenv()
 
@@ -751,6 +751,13 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         # wins here is the one a picker can actually take from.
         db_sku = _pick_by_stock(res["matches"], total_stock_map, requested_qty)
 
+        # A line the catalog does not know is written in the canonical spelling
+        # of what the paper said ('01-0530', '03-3768BLD'), not the bare matching
+        # key ('010530'): when the operator registers it, the catalog row gets
+        # that same name and the DB marks the line found by exact match
+        # (pickd idea-154 / bug-020).
+        line_sku = db_sku if db_sku else canonical_sku(item.get("raw_sku") or normalized_pdf_sku)
+
         # Availability check
         available_qty = total_stock_map.get(db_sku, 0) if db_sku else 0
         insufficient_stock = requested_qty > available_qty
@@ -822,7 +829,7 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
 
         cart_items.append(
             {
-                "sku": db_sku if db_sku else normalized_pdf_sku,
+                "sku": line_sku,
                 "pickingQty": requested_qty,
                 "item_name": assigned_item_name or item.get("description", ""),
                 "description": item.get("description", ""),
