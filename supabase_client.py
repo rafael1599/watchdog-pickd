@@ -554,6 +554,45 @@ def get_verification_board() -> dict:
     return board
 
 
+_VARIANT_BASE_RE = re.compile(r"^(\d{6}[A-Z]{2})[A-Z]?$")
+
+
+def _variant_base(norm_sku: str) -> Optional[str]:
+    """Family base of a normalized bike SKU: dept + number + 2-letter color.
+
+    '033768BL' and '033768BLD' → '033768BL'. Anything that is not exactly that
+    shape plus at most ONE finish/variant letter (parts, UPCs, longer codes) has
+    no family and returns None, so the sibling rule never touches it.
+    """
+    m = _VARIANT_BASE_RE.match(norm_sku or "")
+    return m.group(1) if m else None
+
+
+def _pick_by_stock(matches: list, available: dict, requested_qty: int) -> Optional[str]:
+    """Choose the catalog SKU for one order line among its variant siblings.
+
+    `matches` is in preference order (the source's own spelling first, then the
+    2-letter canonical, then the rest of the family). Stock decides, not the
+    spelling: the same bike lives under '03-3768BL' or '03-3768BLD' depending on
+    which row the operator last renamed, and the catalog keeps BOTH names alive
+    (the old sku_metadata row cannot go — qty-0 inventory rows reference it), so
+    "the first name that exists in the catalog" kept landing on the dead one and
+    the order arrived flagged LOW STOCK with 145 units on the shelf.
+
+    Returns the first match whose available stock covers the line; failing that
+    the one with the most stock; failing that the first — a line nobody can fill
+    stays flagged under the name the source used, exactly as before.
+    """
+    if not matches:
+        return None
+    needed = max(int(requested_qty or 0), 1)
+    for sku in matches:
+        if available.get(sku, 0) >= needed:
+            return sku
+    best = max(matches, key=lambda sku: available.get(sku, 0))
+    return best if available.get(best, 0) > 0 else matches[0]
+
+
 def _to_cart_items(client: Client, parsed_items: list) -> list:
     """
     Convert parsed PDF items to CartItem-compatible format.
@@ -597,33 +636,52 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         log.warning("Ambiguous catalog SKUs share normalized form %s — leaving manual", norm)
         sku_map.pop(norm, None)
 
+    # Variant-sibling index: normalized bike SKUs grouped by dept+number+color
+    # base, so '033768BL' and '033768BLD' are looked at together (_variant_base).
+    family_index = {}
+    for norm in sku_map:
+        base = _variant_base(norm)
+        if base:
+            family_index.setdefault(base, []).append(norm)
+
     found_db_skus = []
     item_results = []
     for item in parsed_items:
         normalized_pdf_sku = item["sku"]
 
-        # Most-specific match FIRST: the full raw SKU including any finish/variant
-        # suffix (e.g. '03 3769 BLD' → '033769BLD'), then the parser's 2-letter-color
-        # canonical guess ('033769BL'). The catalog is inconsistent: some SKUs keep
-        # the 3rd letter ('03-3769BLD' — operator-reported 2026-06-11), others don't
-        # ('03-3768BL' for a source 'BLD'), so we let the catalog decide instead of
-        # guessing at parse time. (A blind 'strip trailing T' fallback stays out:
-        # it could mangle a real 2-letter color like 'WT'/'GT'.)
+        # Every catalog name this line could mean, most specific first: the full
+        # raw SKU including any finish/variant suffix (e.g. '03 3769 BLD' →
+        # '033769BLD'), then the parser's 2-letter-color canonical guess
+        # ('033769BL'), then any other sibling in the family ('033769BLT'…). The
+        # catalog is inconsistent — some SKUs keep the 3rd letter ('03-3769BLD',
+        # operator-reported 2026-06-11), others don't ('03-3768BL' for a source
+        # 'BLD') — and which sibling holds the stock changes with operator renames,
+        # so the choice among them is made by STOCK below (_pick_by_stock), not
+        # here. (A blind 'strip trailing T' fallback stays out: it could mangle a
+        # real 2-letter color like 'WT'/'GT'.)
         candidates = []
         raw_norm = normalize_sku(item.get("raw_sku") or "")
         if raw_norm:
             candidates.append(raw_norm)
         if normalized_pdf_sku not in candidates:
             candidates.append(normalized_pdf_sku)
-        db_sku = next((sku_map[c] for c in candidates if c in sku_map), None)
+        base = _variant_base(normalized_pdf_sku)
+        for norm in sorted(family_index.get(base, [])) if base else []:
+            if norm not in candidates:
+                candidates.append(norm)
 
-        not_found = db_sku is None
-        found_db_skus.append(db_sku) if db_sku else None
+        matches = []
+        for c in candidates:
+            db_sku = sku_map.get(c)
+            if db_sku and db_sku not in matches:
+                matches.append(db_sku)
+
+        found_db_skus.extend(m for m in matches if m not in found_db_skus)
         item_results.append(
             {
                 "normalized_pdf_sku": normalized_pdf_sku,
-                "db_sku": db_sku,
-                "not_found": not_found,
+                "matches": matches,  # preference order; stock picks one below
+                "not_found": not matches,
                 "item": item,
             }
         )
@@ -686,10 +744,12 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
 
     cart_items = []
     for res in item_results:
-        db_sku = res["db_sku"]
         normalized_pdf_sku = res["normalized_pdf_sku"]
         item = res["item"]
         requested_qty = item["qty"]
+        # total_stock_map is already net of reservations, so the sibling that
+        # wins here is the one a picker can actually take from.
+        db_sku = _pick_by_stock(res["matches"], total_stock_map, requested_qty)
 
         # Availability check
         available_qty = total_stock_map.get(db_sku, 0) if db_sku else 0
