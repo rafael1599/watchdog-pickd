@@ -548,7 +548,10 @@ def get_verification_board() -> dict:
     client = get_client()
     result = (
         client.table("picking_lists")
-        .select("order_number, status, shipping_type, items, customers(name), updated_at")
+        .select(
+            "order_number, status, shipping_type, items, customers(name), updated_at, "
+            "ship_to:customer_addresses!picking_lists_ship_to_address_id_fkey(label)"
+        )
         .in_("status", VERIFICATION_STATUSES)
         .gte("updated_at", cutoff)
         .order("updated_at", desc=True)
@@ -566,6 +569,9 @@ def get_verification_board() -> dict:
                 "order_number": row.get("order_number"),
                 "customer": (customer.get("name") if isinstance(customer, dict) else None)
                 or "Unknown",
+                "ship_to": (
+                    row["ship_to"].get("label") if isinstance(row.get("ship_to"), dict) else None
+                ),
                 "status": status,
                 "shipping_type": row.get("shipping_type"),
                 "items": len(row.get("items") or []),

@@ -137,6 +137,7 @@ def _meta_from_preview(preview: dict) -> dict:
     return {
         "order_number": preview.get("order_number"),
         "customer": preview.get("customer"),
+        "ship_to": preview.get("ship_to"),
         "item_count": preview.get("item_count"),
         "total_units": preview.get("total_units"),
         "subtotal": preview.get("subtotal"),

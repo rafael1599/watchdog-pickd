@@ -8,7 +8,7 @@ Run on the Mac that has Mocha TN5250 open and logged in:
     # open http://127.0.0.1:5757
 
 Flow:
-    1. Type an order number → "Capturar" drives Mocha (AS400) and reads the screens.
+    1. Type an order number → "Capture" drives Mocha (AS400) and reads the screens.
     2. The captured order shows a preview: order number, customer, total item count.
     3. Review it, then "Enviar a PickD" pushes that single order into Supabase.
 
@@ -100,7 +100,9 @@ app = Flask(__name__)
 # attacks; rejecting cross-site Origins blocks a malicious page (open in the same
 # Mac's browser) from driving the app via CSRF. The server is bound to 127.0.0.1,
 # so it is not reachable from the local network at all.
-PORT = int(os.environ.get("PICKD_PORT", "5757"))  # 5757 dodges macOS AirPlay (5000/7000); override with PICKD_PORT
+PORT = int(
+    os.environ.get("PICKD_PORT", "5757")
+)  # 5757 dodges macOS AirPlay (5000/7000); override with PICKD_PORT
 _ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 _ALLOWED_ORIGINS = {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"}
 
@@ -212,12 +214,12 @@ def _compare_items(archived_items: list, new_items: list) -> dict:
 
     parts = []
     if added:
-        parts.append(f"{len(added)} SKU nuevo(s)")
+        parts.append(f"{len(added)} new SKU(s)")
     if removed:
-        parts.append(f"{len(removed)} faltante(s)")
+        parts.append(f"{len(removed)} missing")
     if changed:
-        parts.append(f"{len(changed)} cantidad(es) distinta(s)")
-    return {"identical": identical, "summary": "idéntica" if identical else ", ".join(parts)}
+        parts.append(f"{len(changed)} quantity change(s)")
+    return {"identical": identical, "summary": "identical" if identical else ", ".join(parts)}
 
 
 def _find_archived_by_number(order_number) -> dict | None:
@@ -324,6 +326,7 @@ def _add_order(raw_text: str, auto_archive: bool = True) -> dict:
             "id": oid,
             "order_number": preview["order_number"],
             "customer": preview["customer"],
+            "ship_to": preview.get("ship_to"),
             "item_count": preview["item_count"],
             "total_units": preview["total_units"],
             "pallets_est": pallets_est,
@@ -744,6 +747,7 @@ def order_detail(oid: int):
         {
             "order_number": entry["order_number"],
             "customer": entry["customer"],
+            "ship_to": entry.get("ship_to"),
             "total_units": entry["total_units"],
             "items": items,
         }
@@ -1072,7 +1076,7 @@ INDEX_HTML = """
       </div>
     </div>
     <div class="row">
-      <input id="num" placeholder="Últimos 3 dígitos para buscar / capturar (ej. 267)" inputmode="numeric" autofocus
+      <input id="num" placeholder="Last 3 digits to search / capture (e.g. 267)" inputmode="numeric" autofocus
              oninput="applyFilter()"
              onkeydown="if(event.key==='Enter') onSearchEnter()">
       <button id="cap" onclick="doCapture()" title="Fetch this order number from AS400">Capture</button>
@@ -1162,18 +1166,18 @@ function applyPrefill(prefix) {
   _capturePrefix = prefix || '';
 }
 
-// Does an order card match the query? Looks at number, customer, shipping type and
+// Does an order card match the query? Looks at number, bill-to, ship-to, shipping type and
 // each item's SKU/description — the fields the operator would search by.
 function orderMatches(o, q) {
   if (!q) return true;
-  const parts = [o.order_number, o.customer, o.shipping_type];
+  const parts = [o.order_number, o.customer, o.ship_to, o.shipping_type];
   for (const it of (o.items || [])) parts.push(it.sku, it.raw_sku, it.description, it.item_name);
   return parts.filter(Boolean).join(' ').toLowerCase().includes(q);
 }
 
 function hitMatches(h, q) {
   if (!q) return true;
-  return [h.order_number, h.customer].filter(Boolean).join(' ').toLowerCase().includes(q);
+  return [h.order_number, h.customer, h.ship_to].filter(Boolean).join(' ').toLowerCase().includes(q);
 }
 
 // Filter as the operator types (instant, local). Then debounce a reach into the scan
@@ -1285,7 +1289,7 @@ function renderBoard() {
     const rows = board[s].map(o =>
       `<div class="vrow${o.shipping_type === 'fedex' ? ' fedex' : ''}">
         <span><b>#${o.order_number ?? '—'}</b></span>
-        <span>${o.customer ?? 'Unknown'}</span>
+        <span>${o.ship_to || o.customer || 'Unknown'}</span>
         <span class="muted" style="margin-left:auto;">${o.items} items${o.shipping_type ? ' · ' + o.shipping_type : ''}</span>
       </div>`).join('');
     return `<div class="vgroup"><h3>${VSTATUS_LABELS[s] || s} (${board[s].length})</h3>${rows}</div>`;
@@ -1330,22 +1334,22 @@ function card(o) {
   const note = noteText ? `<div class="order-note">⚠ ${noteText}</div>` : '';
   const money = n => '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
   let dinfo = '';
-  if (o.total_mismatch) dinfo += `<div class="mismatch">⚠ El total no cuadra: parseado ${money(o.parsed_total)} vs orden ${money(o.subtotal)} — pueden faltar items.</div>`;
+  if (o.total_mismatch) dinfo += `<div class="mismatch">⚠ Total does not add up: parsed ${money(o.parsed_total)} vs order ${money(o.subtotal)} — items may be missing.</div>`;
   if (o.shipping_address) dinfo += `<div class="muted">📍 ${o.shipping_address}</div>`;
   // order_comments is surfaced as a prominent red note on the card itself (not here).
   if (o.ship_via) dinfo += `<div class="muted">🚚 ${o.ship_via}</div>`;
   // An archived copy of this number exists — rare, actionable, so it stays visible.
   const am = o.archived_match;
   const archNote = am
-    ? `<div class="archived-note">📦 Ya hay una versión <b>archivada</b> de #${o.order_number}. `
-      + (am.identical ? '✓ Idéntica.' : `⚠ Difiere: ${am.summary}.`)
-      + ` <button class="linkbtn" onclick="event.stopPropagation(); doRestore('${am.aid}')">Sacar del archivo</button></div>`
+    ? `<div class="archived-note">📦 An <b>archived</b> copy of #${o.order_number} already exists. `
+      + (am.identical ? '✓ Identical.' : `⚠ Differs: ${am.summary}.`)
+      + ` <button class="linkbtn" onclick="event.stopPropagation(); doRestore('${am.aid}')">Unarchive</button></div>`
     : '';
   const mm = o.total_mismatch ? '<span class="badge amber">⚠ TOTAL</span>' : '';
   return `<div class="card tappable${isFedex ? ' fedex' : ''}" onclick="toggleDetail(${o.id})" title="Tap to see items">
       <div class="chead">
         <span class="onum">#${o.order_number ?? '—'}</span>
-        <span class="ocust">${o.customer ?? ''}</span>
+        <span class="ocust">${o.ship_to || o.customer || ''}</span>
         ${fdx}${mm}
         <span class="ostats">${palletStats(o)}</span>
         <span class="chev" id="chev-${o.id}">▾</span>
@@ -1381,7 +1385,7 @@ function archCard(a) {
   return `<div class="card">
       <div class="chead">
         <span class="onum">#${a.order_number ?? '—'}</span>
-        <span class="ocust">${a.customer ?? ''}</span>
+        <span class="ocust">${a.ship_to || a.customer || ''}</span>
         <span class="ostats">${palletStats(a)}</span>
       </div>
       <div class="muted">📦 Archived ${fmtDate(a.archived_at)}</div>
@@ -1474,7 +1478,7 @@ document.addEventListener('click', closeMenus);
 // Compact row for an order that lives only in the scan cache (not yet materialized).
 function cacheHitRow(h) {
   const n = h.order_number || '—';
-  const meta = [h.customer, (h.item_count != null ? h.item_count + ' items' : null)]
+  const meta = [h.ship_to || h.customer, (h.item_count != null ? h.item_count + ' items' : null)]
     .filter(Boolean).join(' · ');
   return `<div class="card" style="display:flex; justify-content:space-between; align-items:center; gap:.6rem;">
     <span>#${n}${meta ? ` <span class="muted">· ${meta}</span>` : ''}</span>
@@ -1631,7 +1635,7 @@ async function doCapture() {
     else if (data.auto_archived) {
            msg(`Order #${data.order_number ?? '—'} auto-archived (${data.customer ?? 'parts-only customer'}) — see Archived below.`, 'warn');
            setSearch(''); }
-    else { const fc = data.from_cache ? ' · ya escaneada por el auto-scan' : '';
+    else { const fc = data.from_cache ? ' · already scanned by the auto-scan' : '';
            msg(`Captured order #${data.order_number ?? '—'} (${palletStats(data)})${fc}.`, 'ok');
            setSearch(''); }
   } catch(e) { showError('capture order #' + num, 'Network error: ' + e, null); }

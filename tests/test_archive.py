@@ -41,7 +41,7 @@ def client(tmp_path, monkeypatch):
 def test_compare_items_identical():
     r = appmod._compare_items([{"sku": "X", "qty": 1}], [{"sku": "X", "qty": 1}])
     assert r["identical"] is True
-    assert r["summary"] == "idéntica"
+    assert r["summary"] == "identical"
 
 
 def test_compare_items_added_sku():
@@ -49,13 +49,13 @@ def test_compare_items_added_sku():
         [{"sku": "X", "qty": 1}], [{"sku": "X", "qty": 1}, {"sku": "Y", "qty": 2}]
     )
     assert r["identical"] is False
-    assert "nuevo" in r["summary"]
+    assert "new SKU" in r["summary"]
 
 
 def test_compare_items_changed_qty():
     r = appmod._compare_items([{"sku": "X", "qty": 1}], [{"sku": "X", "qty": 3}])
     assert r["identical"] is False
-    assert "cantidad" in r["summary"]
+    assert "quantity" in r["summary"]
 
 
 # --- archive / list / restore -----------------------------------------------

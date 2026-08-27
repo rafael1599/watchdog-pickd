@@ -142,7 +142,10 @@ def preview_order(text: str) -> dict:
 
     return {
         "order_number": data.get("order_number"),
-        "customer": data.get("customer_name") or "Unknown",
+        "customer": data.get("customer_name") or "Unknown",  # Bill-to (drives customers.name)
+        # Ship-to name: what the floor reads on the card. Bill-to stays for the DB
+        # and the auto-archive rule (EBAY PART SALES is a Bill-to).
+        "ship_to": (data.get("shipping") or {}).get("name") or None,
         "item_count": len(items),  # number of distinct line items / SKUs
         "total_units": total_units,  # sum of quantities
         "subtotal": subtotal,  # order Sub-Total from the header (None if not found)
