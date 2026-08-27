@@ -35,6 +35,7 @@ load_dotenv()  # must run before importing modules that read env at import time
 from flask import Flask, abort, jsonify, render_template_string, request  # noqa: E402
 
 import auto_scanner  # noqa: E402
+import maintenance  # noqa: E402
 import scanned_store  # noqa: E402
 from as400_capture import (  # noqa: E402
     AS400Disconnected,
@@ -826,6 +827,30 @@ def scan_now():
     return jsonify({"error": "Auto-scanner is not running (AUTO_SCAN is off)."}), 409
 
 
+@app.get("/api/maintenance")
+def maintenance_actions():
+    """The actions the Maintenance panel offers (see maintenance.ACTIONS)."""
+    return jsonify({"actions": maintenance.list_actions()})
+
+
+@app.post("/api/maintenance/<action_id>")
+def maintenance_run(action_id):
+    """Run one maintenance action. Body: {"apply": bool} — false is the dry run the
+    panel shows first. Synchronous: a pass over the scan cache takes seconds to a
+    minute, and the panel waits with the buttons disabled."""
+    if action_id not in maintenance.ACTIONS:
+        return jsonify({"error": f"Unknown maintenance action: {action_id}"}), 404
+    body = request.get_json(silent=True) or {}
+    apply = bool(body.get("apply"))
+    try:
+        return jsonify(maintenance.run_action(action_id, apply))
+    except maintenance.Busy:
+        return jsonify({"error": "Another maintenance action is still running — wait for it."}), 409
+    except Exception as e:  # noqa: BLE001
+        logging.exception("maintenance %s failed", action_id)
+        return jsonify({"error": f"{action_id} failed: {e}"}), 500
+
+
 @app.post("/api/update")
 def update():
     """Pull the latest code, refresh deps and restart the LaunchAgents.
@@ -998,12 +1023,21 @@ INDEX_HTML = """
     .vbadge { display: inline-block; min-width: 1.4rem; text-align: center;
               background: #dc2626; color: #fff; font-weight: 800; font-size: .8rem;
               border-radius: 999px; padding: .05rem .45rem; margin-left: .35rem; }
-    #vboard-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5);
+    #vboard-overlay, #maint-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5);
                       display: none; z-index: 900; }
-    #vboard { position: absolute; top: 5%; left: 50%; transform: translateX(-50%);
+    #vboard, #maint { position: absolute; top: 5%; left: 50%; transform: translateX(-50%);
               width: min(640px, 92vw); max-height: 85vh; overflow: auto;
               background: #fff; color: #111; border-radius: 12px; padding: 1rem; }
-    @media (prefers-color-scheme: dark) { #vboard { background: #17171c; color: #e5e7eb; } }
+    @media (prefers-color-scheme: dark) { #vboard, #maint { background: #17171c; color: #e5e7eb; } }
+    .maint-action { margin-bottom: 1rem; }
+    .maint-action h3 { font-size: .95rem; margin: .2rem 0 .2rem; }
+    .maint-action .what { font-size: .85rem; color: #6b7280; margin: 0 0 .5rem; }
+    .maint-action .actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+    .maint-counts { display: grid; grid-template-columns: auto 1fr; gap: .15rem .8rem;
+                    font-size: .85rem; margin: .6rem 0 .3rem; }
+    .maint-counts b { text-align: right; font-variant-numeric: tabular-nums; }
+    .maint-lines { font-size: .75rem; white-space: pre-wrap; max-height: 40vh; overflow: auto;
+                   border: 1px solid #d1d5db; border-radius: 8px; padding: .5rem; margin-top: .4rem; }
     .vgroup { margin-bottom: .8rem; }
     .vgroup h3 { font-size: .85rem; text-transform: uppercase; letter-spacing: .05em;
                  color: #6b7280; margin: .4rem 0 .3rem; }
@@ -1072,6 +1106,7 @@ INDEX_HTML = """
           <button onclick="doScanNow()">▶ Get orders now</button>
           <button onclick="doStatus()">Check AS400</button>
           <button onclick="doUpdate()">⟳ Update app</button>
+          <button onclick="openMaintenance()">🛠 Maintenance</button>
         </div>
       </div>
     </div>
@@ -1089,6 +1124,16 @@ INDEX_HTML = """
         <button class="secondary" onclick="closeBoard()">Close</button>
       </div>
       <div id="vboard-body"><p class="muted">Loading…</p></div>
+    </div>
+  </div>
+  <div id="maint-overlay" onclick="if(event.target===this) closeMaintenance()">
+    <div id="maint">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h2 style="font-size:1.1rem; margin:.2rem 0;">Maintenance</h2>
+        <button class="secondary" onclick="closeMaintenance()">Close</button>
+      </div>
+      <p class="muted" style="font-size:.85rem; margin:.3rem 0 .8rem;">One-off actions. Preview shows what would change without writing anything; Apply writes it.</p>
+      <div id="maint-body"><p class="muted">Loading…</p></div>
     </div>
   </div>
   <div id="msg" class="muted"></div>
@@ -1302,6 +1347,59 @@ function openBoard() {
   refreshVerification();
 }
 function closeBoard() { document.getElementById('vboard-overlay').style.display = 'none'; }
+
+// --- Maintenance panel: every action from /api/maintenance gets a card with a
+// one-sentence explanation, Preview (dry run) and Apply. The result renders in
+// place: counts first, the per-order lines folded underneath.
+async function openMaintenance() {
+  document.getElementById('maint-overlay').style.display = 'block';
+  const body = document.getElementById('maint-body');
+  try {
+    const r = await fetch('/api/maintenance');
+    const data = await r.json();
+    body.innerHTML = (data.actions || []).map(a => `
+      <div class="card maint-action" id="maint-${a.id}">
+        <h3>${a.title}</h3>
+        <p class="what">${a.what}</p>
+        <div class="actions">
+          <button class="secondary" onclick="runMaintenance('${a.id}', false)">Preview</button>
+          <button onclick="runMaintenance('${a.id}', true)">Apply</button>
+        </div>
+        <div class="result"></div>
+      </div>`).join('') || '<p class="muted">No maintenance actions available.</p>';
+  } catch(e) {
+    body.innerHTML = '<p class="err">Could not load the maintenance actions.</p>';
+  }
+}
+function closeMaintenance() { document.getElementById('maint-overlay').style.display = 'none'; }
+
+async function runMaintenance(id, apply) {
+  const card = document.getElementById('maint-' + id);
+  const out = card.querySelector('.result');
+  const buttons = [...card.querySelectorAll('button')];
+  if (apply && !confirm('Apply this action? It writes to PickD. Run Preview first if you have not.')) return;
+  buttons.forEach(b => b.disabled = true);
+  out.innerHTML = `<p class="warn">${apply ? 'Applying' : 'Previewing'}… this can take up to a minute.</p>`;
+  try {
+    const r = await fetch('/api/maintenance/' + id, {method:'POST', headers:{'Content-Type':'application/json'},
+                          body: JSON.stringify({apply})});
+    const data = await r.json();
+    if (!r.ok) { out.innerHTML = `<p class="err">${data.error || 'Failed.'}</p>`; return; }
+    const labels = data.labels || {};
+    const would = apply ? '' : ' (would be)';
+    const written = new Set(['headers','accounts','addresses','links']);
+    const rows = Object.entries(data.counts || {}).map(([k, v]) =>
+      `<b>${v}</b><span>${labels[k] || k}${written.has(k) ? would : ''}</span>`).join('');
+    const lines = (data.lines || []).join('\n') + (data.truncated ? `\n… and ${data.truncated} more` : '');
+    out.innerHTML = `<p class="${apply ? 'ok' : 'muted'}">${apply ? 'Applied' : 'Preview'} in ${data.seconds}s.${apply ? '' : ' Nothing was written.'}</p>
+      <div class="maint-counts">${rows}</div>
+      ${lines ? `<details><summary class="muted" style="cursor:pointer; font-size:.8rem;">Per-order detail</summary><div class="maint-lines">${lines}</div></details>` : ''}`;
+  } catch(e) {
+    out.innerHTML = '<p class="err">Request failed — is the app still running?</p>';
+  } finally {
+    buttons.forEach(b => b.disabled = false);
+  }
+}
 
 // "2 pallets · 20 units" — pallets estimated with PickD's own rule (parts-only = 1;
 // bikes = ceil(units/12)). Falls back to the item count only if the estimate is

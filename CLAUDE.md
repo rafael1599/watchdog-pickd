@@ -90,6 +90,11 @@ el watcher se actualiza antes que ella.
 **Backfill, una sola vez tras actualizar en la MacBook de Bay 2** (donde vive
 `.scanned_orders.json` con el `raw_text` de cada captura):
 
+Desde la UI: **⋯ → Maintenance → Backfill AS400 accounts**, primero *Preview* (no escribe
+nada, muestra los conteos y el detalle por orden) y luego *Apply*. La lógica vive en
+`maintenance.py` (registro `ACTIONS`: cada acción nueva es una entrada ahí y nada más; el
+panel las pinta solo). Por terminal, lo mismo:
+
 ```bash
 ./venv/bin/python3 scripts/backfill_account_numbers.py          # dry-run, solo imprime
 ./venv/bin/python3 scripts/backfill_account_numbers.py --apply
@@ -109,7 +114,8 @@ orden → dirección). Es idempotente: una segunda pasada no toca nada.
 | `supabase_client.py` | Operaciones contra Supabase (CRUD picking lists, clientes, inventario) |
 | `pipeline.py` | Texto de orden → Supabase (create/append/reopen/combine); lo usan watcher y app |
 | `migrations.py` | DDL idempotente que el watcher necesita (`ADD COLUMN IF NOT EXISTS`) |
-| `scripts/backfill_account_numbers.py` | One-off: sella cuenta AS400 y ship-to en órdenes ya capturadas |
+| `maintenance.py` | Acciones de mantenimiento del panel ⋯ → Maintenance (registro `ACTIONS`, dry-run/apply, un lock) |
+| `scripts/backfill_account_numbers.py` | CLI de la acción "Backfill AS400 accounts" (la lógica está en `maintenance.py`) |
 | `tests/` | Tests del proyecto |
 
 ## Variables de entorno
