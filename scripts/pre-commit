@@ -3,4 +3,8 @@ FILES=$(git diff --cached --name-only --diff-filter=ACM -- '*.py')
 if [ -z "$FILES" ]; then
   exit 0
 fi
-ruff check $FILES && ruff format --check $FILES
+# ruff is installed as a module on the Bay 2 Mac and not always on PATH; the
+# hook used to fail with "ruff: command not found" and every commit went
+# through with --no-verify (2026-08-26).
+if command -v ruff >/dev/null 2>&1; then RUFF=ruff; else RUFF="python3 -m ruff"; fi
+$RUFF check $FILES && $RUFF format --check $FILES

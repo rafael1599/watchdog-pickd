@@ -223,7 +223,11 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str, group_id: str 
     order_data format:
     {
         'order_number': str | None,
+        'account_number': str | None,   # raw AS400 header value ('0010495 00')
+        'as400_account': str | None,    # '10495' — seals customers.as400_account
+        'as400_ship_to': str | None,    # '00'    — tags the ship-to address
         'customer_name': str | None,
+        'shipping': dict | None,
         'items': [ { sku, qty, ... } ]
     }
 
@@ -240,7 +244,8 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str, group_id: str 
     # Convert items to CartItem-compatible format for the web app
     cart_items = _to_cart_items(client, order_data["items"])
 
-    # Look up or create customer
+    # Look up or create customer. The AS400 account from the header is the
+    # identity that survives a rename — see _resolve_customer.
     customer_id = None
     customer_name = order_data.get("customer_name")
     if customer_name:
@@ -251,13 +256,19 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str, group_id: str 
             street=addr.get("street"),
             city=addr.get("city"),
             state=addr.get("state"),
-            zip_code=addr.get("zip_code")
+            zip_code=addr.get("zip_code"),
+            account=order_data.get("as400_account"),
         )
 
     # Mirror the web Orders view: persist the Ship-to address on the customer
-    # (main address) and in customer_addresses (history). Non-blocking.
+    # (main address) and in customer_addresses (history). Non-blocking. The row
+    # it returns is the ship-to THIS order goes to — a dealer with two stores has
+    # two rows, and "the customer's default" is the wrong one half the time.
+    ship_to_address_id = None
     if customer_id and order_data.get("shipping"):
-        _save_shipping_address(client, customer_id, order_data["shipping"])
+        ship_to_address_id = _save_shipping_address(
+            client, customer_id, order_data["shipping"], ship_to=order_data.get("as400_ship_to")
+        )
 
     # Insert picking list
     insert_data = {
@@ -280,6 +291,14 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str, group_id: str 
     order_date = order_data.get("order_date")
     if order_date:
         insert_data["source_order_date"] = order_date
+
+    # Raw AS400 'Account Number' ('0010495 00') for audit, and the ship-to row.
+    # Both omitted when unknown, so PostgREST leaves them NULL.
+    account_number = order_data.get("account_number")
+    if account_number:
+        insert_data["as400_account_number"] = account_number
+    if ship_to_address_id:
+        insert_data["ship_to_address_id"] = ship_to_address_id
 
     if group_id:
         insert_data["group_id"] = group_id
@@ -411,10 +430,11 @@ def resolve_customer(
     street: str = None,
     city: str = None,
     state: str = None,
-    zip_code: str = None
+    zip_code: str = None,
+    account: str = None,
 ) -> Optional[str]:
     """Public wrapper for _resolve_customer."""
-    return _resolve_customer(client, name, street, city, state, zip_code)
+    return _resolve_customer(client, name, street, city, state, zip_code, account=account)
 
 
 COMBINABLE_STATUSES = ["active", "ready_to_double_check", "needs_correction", "double_checking"]
@@ -752,11 +772,13 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         db_sku = _pick_by_stock(res["matches"], total_stock_map, requested_qty)
 
         # A line the catalog does not know is written in the canonical spelling
-        # of what the paper said ('01-0530', '03-3768BLD'), not the bare matching
-        # key ('010530'): when the operator registers it, the catalog row gets
-        # that same name and the DB marks the line found by exact match
-        # (pickd idea-154 / bug-020).
-        line_sku = db_sku if db_sku else canonical_sku(item.get("raw_sku") or normalized_pdf_sku)
+        # of the parser's 2-letter-colour guess ('01-0530', '03-3768BL'), not the
+        # bare matching key ('010530') and not the paper's third letter
+        # ('03-3768BLD'): the box says BL (Rafael, 2026-08-26) — AS400's third
+        # letter is a finish suffix, not another bike. When the operator
+        # registers the line, the catalog row gets this same name and the DB
+        # marks it found by exact match (pickd idea-154 / bug-020).
+        line_sku = db_sku if db_sku else canonical_sku(normalized_pdf_sku)
 
         # Availability check
         available_qty = total_stock_map.get(db_sku, 0) if db_sku else 0
@@ -878,16 +900,42 @@ def _normalize_customer_name(name: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (name or "").upper())
 
 
+def _seal_customer_account(client: Client, customer_id: str, account: str) -> None:
+    """Fill customers.as400_account when it is still NULL. Never overwrites: the
+    first order that names an account seals it, and a later header that disagrees
+    (a re-keyed account, a shared customer row) does not move it. Non-blocking."""
+    try:
+        (
+            client.table("customers")
+            .update({"as400_account": account})
+            .eq("id", customer_id)
+            .is_("as400_account", "null")
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("Could not seal as400_account %s on customer %s: %s", account, customer_id, e)
+
+
 def _resolve_customer(
     client: Client,
     name: str,
     street: str = None,
     city: str = None,
     state: str = None,
-    zip_code: str = None
+    zip_code: str = None,
+    account: str = None,
 ) -> Optional[str]:
     """
-    Look up a customer by name and address, creating one only if there is no match.
+    Look up a customer, creating one only if there is no match.
+
+    With an AS400 `account` (the bill-to number without leading zeros — see
+    parser.split_account_number) the lookup goes by customers.as400_account FIRST:
+    that is the identity the ERP uses, so a renamed or re-punctuated dealer still
+    resolves to the same row. Only without a sealed match does it fall back to the
+    name + street matching below, and when that path finds or creates a row the
+    account is SEALED onto it — filled when NULL, never overwritten — so the next
+    order from the same dealer takes the short path.
+
     Defensively normalizes customer names to avoid duplicates in the UI.
     """
     clean_name = name.strip()
@@ -897,77 +945,149 @@ def _resolve_customer(
     if not target_name:
         return None
 
-    import re
+    if account:
+        try:
+            by_account = (
+                client.table("customers")
+                .select("id, as400_account")
+                .eq("as400_account", account)
+                .limit(1)
+                .execute()
+            )
+            if by_account.data:
+                return by_account.data[0]["id"]
+        except Exception as e:  # noqa: BLE001 — degrade to name matching, never block
+            log.warning("Customer lookup by as400_account %s failed: %s", account, e)
 
     # Helper to normalize street address for comparison
     def clean_street_str(s):
-        return re.sub(r'[^a-z0-9]', '', s.lower()) if s else ''
+        return re.sub(r"[^a-z0-9]", "", s.lower()) if s else ""
 
+    customer_id = None
     if normalized_street:
         # Match by name and street address.
-        existing = client.table("customers").select("id, name, street, city, state, zip_code").execute()
+        existing = (
+            client.table("customers").select("id, name, street, city, state, zip_code").execute()
+        )
         if existing.data:
             target_street_clean = clean_street_str(normalized_street)
             for row in existing.data:
-                if _normalize_customer_name(row.get("name", "")) == target_name:
-                    if clean_street_str(row.get("street")) == target_street_clean:
-                        # Match found! If other fields are missing, let's update them.
-                        updates = {}
-                        if not row.get("street") and street: updates["street"] = street.strip()
-                        if not row.get("city") and city: updates["city"] = city.strip()
-                        if not row.get("state") and state: updates["state"] = state.strip()
-                        if not row.get("zip_code") and zip_code: updates["zip_code"] = zip_code.strip()
-                        
-                        if updates:
-                            client.table("customers").update(updates).eq("id", row["id"]).execute()
-                            
-                        return row["id"]
-        
-        # If no match, insert new customer with address details
-        insert_data = {
-            "name": clean_name.upper(),
-            "street": street.strip() if street else None,
-            "city": city.strip() if city else None,
-            "state": state.strip() if state else None,
-            "zip_code": zip_code.strip() if zip_code else None,
-        }
-        result = client.table("customers").insert(insert_data).execute()
-        if result.data:
-            return result.data[0]["id"]
+                if _normalize_customer_name(row.get("name", "")) != target_name:
+                    continue
+                if clean_street_str(row.get("street")) == target_street_clean:
+                    # Match found! If other fields are missing, let's update them.
+                    updates = {}
+                    if not row.get("street") and street:
+                        updates["street"] = street.strip()
+                    if not row.get("city") and city:
+                        updates["city"] = city.strip()
+                    if not row.get("state") and state:
+                        updates["state"] = state.strip()
+                    if not row.get("zip_code") and zip_code:
+                        updates["zip_code"] = zip_code.strip()
+                    if updates:
+                        client.table("customers").update(updates).eq("id", row["id"]).execute()
+                    customer_id = row["id"]
+                    break
+
+        if customer_id is None:
+            # If no match, insert new customer with address details
+            insert_data = {
+                "name": clean_name.upper(),
+                "street": street.strip() if street else None,
+                "city": city.strip() if city else None,
+                "state": state.strip() if state else None,
+                "zip_code": zip_code.strip() if zip_code else None,
+            }
+            if account:
+                insert_data["as400_account"] = account
+            result = client.table("customers").insert(insert_data).execute()
+            return result.data[0]["id"] if result.data else None
     else:
         # Fallback to name-only match.
         existing = client.table("customers").select("id, name, street").execute()
         if existing.data:
             # First look for a row with matching name and NO street address (generic)
             for row in existing.data:
-                if _normalize_customer_name(row.get("name", "")) == target_name and not row.get("street"):
-                    return row["id"]
+                if _normalize_customer_name(row.get("name", "")) == target_name and not row.get(
+                    "street"
+                ):
+                    customer_id = row["id"]
+                    break
             # Otherwise return the first matching name row
-            for row in existing.data:
-                if _normalize_customer_name(row.get("name", "")) == target_name:
-                    return row["id"]
-            
-        # Create new customer with name only
-        result = client.table("customers").insert({"name": clean_name.upper()}).execute()
-        if result.data:
-            return result.data[0]["id"]
+            if customer_id is None:
+                for row in existing.data:
+                    if _normalize_customer_name(row.get("name", "")) == target_name:
+                        customer_id = row["id"]
+                        break
 
-    return None
+        if customer_id is None:
+            # Create new customer with name only
+            insert_data = {"name": clean_name.upper()}
+            if account:
+                insert_data["as400_account"] = account
+            result = client.table("customers").insert(insert_data).execute()
+            return result.data[0]["id"] if result.data else None
+
+    if customer_id and account:
+        _seal_customer_account(client, customer_id, account)
+    return customer_id
 
 
-def _save_shipping_address(client: Client, customer_id: str, ship: dict) -> None:
+def _normalized_address(fields: dict) -> str:
+    """Local mirror of customer_addresses.normalized_address — a generated column,
+    lower(trim(street)) || '|' || city || '|' || state || '|' || zip_code, each
+    lowered and trimmed, NULL → ''. Lets a stored row be compared with a freshly
+    parsed Ship-to without a round-trip; keep it in sync with the DB definition
+    (pickd migration 20260403220000_customer_addresses.sql)."""
+    return "|".join(
+        (fields.get(k) or "").strip().lower() for k in ("street", "city", "state", "zip_code")
+    )
+
+
+def _find_address_id(client: Client, customer_id: str, fields: dict) -> Optional[str]:
+    """id of the customer's address row equal to `fields` (street/city/state/zip),
+    for an upsert whose response came back without data. NULL columns need `is`,
+    not `eq` — PostgREST has no eq.null."""
+    query = client.table("customer_addresses").select("id").eq("customer_id", customer_id)
+    for col in ("street", "city", "state", "zip_code"):
+        value = fields.get(col)
+        query = query.is_(col, "null") if value is None else query.eq(col, value)
+    result = query.limit(1).execute()
+    return result.data[0]["id"] if result.data else None
+
+
+def _save_shipping_address(
+    client: Client, customer_id: str, ship: dict, ship_to: str = None
+) -> Optional[str]:
     """
-    Persist the parsed Ship-to address, mirroring the web Orders view:
+    Persist the parsed Ship-to address, mirroring the web Orders view, and return
+    the customer_addresses.id this order ships to (None on failure / no street):
       1. customers   — update the customer's main address fields.
-      2. customer_addresses — upsert into the address history (dedup via the
-         unique (customer_id, normalized_address) constraint); label = Ship-to name.
+      2. customer_addresses — the row for this Ship-to.
+
+    Which row depends on whether the address has a FedEx key. `ship_to` is the
+    2-digit AS400 suffix; with it, and a customer that has a sealed as400_account
+    and is not ship_to_varies, (account, suffix) names a ship-to SLOT whose
+    fedex_recipient_id is account + suffix ('1049500' — the convention FedEx Ship
+    Manager already keys 951 recipients on). The watcher never WRITES that id — a
+    DB trigger derives it from as400_ship_to — it only computes it to LOOK UP the
+    slot:
+      - slot found with the same address → nothing to write, return its id;
+      - slot found with another address → the dealer moved: update that row in
+        place, no second row (the trigger nulls fedex_synced_at → re-sync);
+      - no slot → upsert by (customer_id, normalized_address) carrying
+        as400_ship_to, and the trigger fills the id.
+    A ship_to_varies customer (consumer direct, warranty, Facebook…) or an order
+    without the key keeps the plain upsert by address and never gets
+    as400_ship_to: a one-off recipient must not claim the channel's Recipient ID.
 
     Non-blocking: any failure is logged and swallowed so order creation succeeds.
     'street' is required (customer_addresses.street is NOT NULL).
     """
     street = (ship.get("street") or "").strip()
     if not street:
-        return
+        return None
 
     address_fields = {
         "street": street,
@@ -983,12 +1103,48 @@ def _save_shipping_address(client: Client, customer_id: str, ship: dict) -> None
     except Exception as e:  # noqa: BLE001
         log.warning(f"Could not update customer address: {e}")
 
-    entry = {
-        "customer_id": customer_id,
-        "label": (ship.get("name") or "").strip() or None,
-        **address_fields,
-    }
+    label = (ship.get("name") or "").strip() or None
+
+    # One read: does this customer carry the key, and is it a channel?
+    account, varies = None, False
     try:
+        cust = (
+            client.table("customers")
+            .select("as400_account, ship_to_varies")
+            .eq("id", customer_id)
+            .limit(1)
+            .execute()
+        )
+        if cust.data:
+            account = cust.data[0].get("as400_account")
+            varies = bool(cust.data[0].get("ship_to_varies"))
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Could not read customer {customer_id} for the FedEx key: {e}")
+
+    keyed = bool(ship_to and account and not varies)
+    try:
+        if keyed:
+            rid = account.lstrip("0") + ship_to
+            slot = (
+                client.table("customer_addresses")
+                .select("id, street, city, state, zip_code")
+                .eq("fedex_recipient_id", rid)
+                .limit(1)
+                .execute()
+            )
+            if slot.data:
+                row = slot.data[0]
+                if _normalized_address(row) != _normalized_address(address_fields):
+                    client.table("customer_addresses").update(
+                        {**address_fields, "label": label}
+                    ).eq("id", row["id"]).execute()
+                    log.info("Ship-to slot %s moved: %s", rid, street)
+                return row["id"]
+
+        entry = {"customer_id": customer_id, "label": label, **address_fields}
+        if keyed:
+            entry["as400_ship_to"] = ship_to
+
         # Mark this address as the default only when the customer has none yet —
         # never downgrade an existing default (respects one_default_per_customer).
         existing_default = (
@@ -1002,11 +1158,17 @@ def _save_shipping_address(client: Client, customer_id: str, ship: dict) -> None
         if not existing_default.data:
             entry["is_default"] = True
 
-        client.table("customer_addresses").upsert(
-            entry, on_conflict="customer_id,normalized_address"
-        ).execute()
+        result = (
+            client.table("customer_addresses")
+            .upsert(entry, on_conflict="customer_id,normalized_address")
+            .execute()
+        )
+        if result.data:
+            return result.data[0]["id"]
+        return _find_address_id(client, customer_id, address_fields)
     except Exception as e:  # noqa: BLE001
         log.warning(f"Could not save customer_addresses entry: {e}")
+        return None
 
 
 def _log_import(

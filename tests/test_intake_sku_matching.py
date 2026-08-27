@@ -235,16 +235,19 @@ def test_two_letter_colour_is_not_a_sibling_of_a_different_colour():
 # --- a line the catalog does not know is written in the canonical spelling ------
 
 
-def test_not_found_line_carries_the_canonical_spelling():
+def test_not_found_line_carries_the_two_letter_canonical_spelling():
     # '03 3768 BLD' is not in the catalog: the line used to be written as the
-    # bare matching key '033768BL' (the parser's 2-letter guess), and when the
-    # operator registered it as '03-3768BLD' the order line never matched.
+    # bare matching key '033768BL', and for a while as the paper's '03-3768BLD'.
+    # The box says BL (Rafael, 2026-08-26): the third letter is a finish suffix,
+    # so the line is written as the 2-letter canonical name the register form
+    # will create, and the order matches it exactly afterwards.
     client = _client_with_catalog([])
     items = _to_cart_items(
         client, [{"sku": "033768BL", "raw_sku": "03 3768 BLD", "qty": 1, "description": "d"}]
     )
     assert items[0]["sku_not_found"] is True
-    assert items[0]["sku"] == "03-3768BLD"
+    assert items[0]["sku"] == "03-3768BL"
+    assert items[0]["raw_sku"] == "03 3768 BLD"  # what the paper said is kept
 
 
 def test_not_found_part_line_is_padded_and_dashed():
