@@ -314,7 +314,8 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
             street=addr.get("street"),
             city=addr.get("city"),
             state=addr.get("state"),
-            zip_code=addr.get("zip_code")
+            zip_code=addr.get("zip_code"),
+            account=order_data.get("as400_account"),
         )
         if customer_id:
             combinable = find_combinable_order_by_customer(

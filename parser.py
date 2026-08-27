@@ -12,7 +12,7 @@ Handles the specific format of the order inquiry PDFs:
 
 import re
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 def normalize_sku(raw_sku: str) -> str:
@@ -78,6 +78,38 @@ def parse_account_number(text: str) -> Optional[str]:
     return None
 
 
+_DIGITS = re.compile(r"^[0-9]+$")
+
+
+def split_account_number(raw: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Split the raw header value into (account, ship_to):
+        '0010495 00'   → ('10495', '00')
+        '0000991 00'   → ('991', '00')
+        '0010495'      → ('10495', None)     no 2-digit suffix
+        '0000000 00'   → (None, '00')        an all-zero account is no account
+        None / '' / 'VOID' → (None, None)
+
+    The account is the AS400 bill-to number WITHOUT leading zeros — the shape
+    customers.as400_account stores (CHECK ^[1-9][0-9]{0,6}$) and the first half of
+    the FedEx Ship Manager Recipient ID (account + suffix: '1049500'). The suffix is
+    the ship-to slot and keeps its zeros: '00' is a real value, and a dealer with a
+    second store is '01'. Extra spaces are tolerated; anything after the second
+    token is ignored. A token longer than seven digits is not an AS400 account (and
+    would fail the DB CHECK), so it is dropped rather than written.
+    """
+    tokens = (raw or "").split()
+    if not tokens or not _DIGITS.match(tokens[0]):
+        return (None, None)
+    account = tokens[0].lstrip("0") or None
+    if account and len(account) > 7:
+        account = None
+    suffix = tokens[1] if len(tokens) > 1 else None
+    if suffix is not None and not (len(suffix) == 2 and _DIGITS.match(suffix)):
+        suffix = None
+    return (account, suffix)
+
+
 def parse_order_subtotal(text: str) -> Optional[float]:
     """
     Extract the order Sub-Total from the header, e.g. 'Sub-Total   4850.35'.
@@ -133,25 +165,25 @@ def parse_customer_address(text: str) -> Optional[dict]:
                     if zip_match:
                         street_lines = [lines[idx + o].strip() for o in range(1, offset)]
                         street = " ".join(street_lines)
-                        
+
                         zip_code = zip_match.group(1)
-                        rem = candidate_line[:zip_match.start()].strip()
+                        rem = candidate_line[: zip_match.start()].strip()
                         state_match = re.search(r"\b([A-Z]{2})\s*$", rem, re.IGNORECASE)
                         if state_match:
                             state = state_match.group(1).upper()
-                            city = rem[:state_match.start()].replace(",", "").strip()
+                            city = rem[: state_match.start()].replace(",", "").strip()
                             return {
                                 "street": street,
                                 "city": city,
                                 "state": state,
-                                "zip_code": zip_code
+                                "zip_code": zip_code,
                             }
                         else:
                             return {
                                 "street": street,
                                 "city": rem.replace(",", "").strip(),
                                 "state": "",
-                                "zip_code": zip_code
+                                "zip_code": zip_code,
                             }
     return None
 
@@ -481,7 +513,9 @@ def parse_order(text: str) -> dict:
     Returns:
         {
             'order_number': str | None,
-            'account_number': str | None,
+            'account_number': str | None,  # raw header value, e.g. '0010495 00'
+            'as400_account': str | None,   # bill-to account without leading zeros ('10495')
+            'as400_ship_to': str | None,   # 2-digit ship-to suffix ('00'); FedEx ID = account+suffix
             'customer_name': str | None,
             'customer_address': dict | None,
             'items': [ { sku, qty, qty_ordered, raw_sku, warehouse, description, unit_price, extend_price } ],
@@ -493,9 +527,13 @@ def parse_order(text: str) -> dict:
             'raw_text': str
         }
     """
+    account_number = parse_account_number(text)
+    as400_account, as400_ship_to = split_account_number(account_number)
     return {
         "order_number": parse_order_number(text),
-        "account_number": parse_account_number(text),
+        "account_number": account_number,
+        "as400_account": as400_account,
+        "as400_ship_to": as400_ship_to,
         "customer_name": parse_customer_name(text),
         "customer_address": parse_customer_address(text),
         "items": parse_items(text),

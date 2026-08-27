@@ -54,6 +54,51 @@ sirve para DDL (PostgREST no expone DDL). Corre en `update.sh` después del `git
 pull`; si `SUPABASE_DB_URL` no está seteada, se omite sin fallar. Coexiste con la
 migración propia de PickD (ambas usan `IF NOT EXISTS`).
 
+### Cuenta AS400 y ship-to → la llave de FedEx (`fedex_recipient_id`)
+
+El header `Order Number: 880036   Account Number: 0010495 00` trae la cuenta bill-to
+(7 dígitos) y el sufijo ship-to (2). `parser.split_account_number` los separa en
+`("10495", "00")` y `parse_order()` los expone como `as400_account` y `as400_ship_to`
+(`account_number` sigue siendo el valor crudo). El Recipient ID que el ship station
+teclea en FedEx Ship Manager es `cuenta sin ceros + sufijo` = `1049500`, y FSM ya tiene
+951 destinatarios con esa convención — por eso la llave se guarda y no se inventa.
+
+- **Cuenta → `customers.as400_account`.** `_resolve_customer` busca **primero por
+  cuenta**; solo sin match cae al nombre + calle de siempre, y al encontrar o crear la
+  fila **sella** la cuenta (`UPDATE … IS NULL`: rellena si está vacía, nunca la pisa).
+- **Sufijo → `customer_addresses.as400_ship_to`.** El watcher **nunca escribe
+  `fedex_recipient_id`**: lo deriva un trigger de la DB a partir del sufijo y la cuenta
+  del cliente. Localmente solo se calcula para *buscar* el slot.
+- **Regla del slot que se mudó:** la llave identifica un ship-to, no un cliente (dos
+  tiendas = `xxxx00` y `xxxx01`). Si ya existe una dirección con ese `fedex_recipient_id`
+  y otra calle, es el mismo dealer que se mudó → se **actualiza esa fila** (el trigger
+  pone `fedex_synced_at = NULL`), no se crea otra. Con la misma dirección no se escribe
+  nada. Sin slot → upsert por `(customer_id, normalized_address)` con `as400_ship_to`.
+- **`customers.ship_to_varies`** (consumidor directo, Facebook, garantía, eBay…): el
+  destinatario cambia en cada orden, así que sus direcciones se guardan como siempre y
+  **nunca** llevan `as400_ship_to` ni Recipient ID. También se omite si el cliente no
+  tiene cuenta sellada o el header no trae sufijo.
+- **La orden** guarda `picking_lists.as400_account_number` (crudo, para auditoría) y
+  `ship_to_address_id` (la fila que devuelve `_save_shipping_address`). Ambas se omiten
+  del insert cuando no se conocen.
+
+Las columnas, los CHECKs, el índice único parcial y el trigger viven en la migración
+`20260826230000_fedex_recipient_key.sql` de Pickd — se aplica en prod **antes** de
+desplegar el watcher. `migrations.py` solo repite los `ADD COLUMN IF NOT EXISTS` por si
+el watcher se actualiza antes que ella.
+
+**Backfill, una sola vez tras actualizar en la MacBook de Bay 2** (donde vive
+`.scanned_orders.json` con el `raw_text` de cada captura):
+
+```bash
+./venv/bin/python3 scripts/backfill_account_numbers.py          # dry-run, solo imprime
+./venv/bin/python3 scripts/backfill_account_numbers.py --apply
+```
+
+Re-parsea el header de cada orden en caché, busca la fila por `order_number` y rellena
+lo que esté NULL (header crudo, cuenta del cliente, sufijo de la dirección, enlace
+orden → dirección). Es idempotente: una segunda pasada no toca nada.
+
 ## Estructura
 
 | Archivo | Descripcion |
@@ -62,6 +107,9 @@ migración propia de PickD (ambas usan `IF NOT EXISTS`).
 | `extractor.py` | Extraccion de texto y hash de PDFs |
 | `parser.py` | Parseo de texto a datos estructurados (orden, cliente, items) |
 | `supabase_client.py` | Operaciones contra Supabase (CRUD picking lists, clientes, inventario) |
+| `pipeline.py` | Texto de orden → Supabase (create/append/reopen/combine); lo usan watcher y app |
+| `migrations.py` | DDL idempotente que el watcher necesita (`ADD COLUMN IF NOT EXISTS`) |
+| `scripts/backfill_account_numbers.py` | One-off: sella cuenta AS400 y ship-to en órdenes ya capturadas |
 | `tests/` | Tests del proyecto |
 
 ## Variables de entorno

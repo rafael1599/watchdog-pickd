@@ -45,6 +45,37 @@ MIGRATIONS: list[tuple[str, str]] = [
             'AS400 document Order Date (ISO yyyy-mm-dd) captured at import. NULL when unknown.';
         """,
     ),
+    # idea-153: the AS400 account and ship-to suffix that FedEx Ship Manager keys
+    # its Recipient ID on. Pickd's migration 20260826230000_fedex_recipient_key.sql
+    # is the source of truth — the CHECKs, the partial unique index, the FK and the
+    # trigger that derives fedex_recipient_id live THERE, on purpose. These are
+    # belt-and-braces, column-only: a watcher updated ahead of that migration must
+    # never write into a missing column, and whichever runs first the other no-ops.
+    (
+        "customers.as400_account",
+        "ALTER TABLE customers ADD COLUMN IF NOT EXISTS as400_account text;",
+    ),
+    (
+        "customers.ship_to_varies",
+        "ALTER TABLE customers "
+        "ADD COLUMN IF NOT EXISTS ship_to_varies boolean NOT NULL DEFAULT false;",
+    ),
+    (
+        "customer_addresses.as400_ship_to",
+        "ALTER TABLE customer_addresses ADD COLUMN IF NOT EXISTS as400_ship_to text;",
+    ),
+    (
+        "customer_addresses.fedex_recipient_id",
+        "ALTER TABLE customer_addresses ADD COLUMN IF NOT EXISTS fedex_recipient_id text;",
+    ),
+    (
+        "picking_lists.as400_account_number",
+        "ALTER TABLE picking_lists ADD COLUMN IF NOT EXISTS as400_account_number text;",
+    ),
+    (
+        "picking_lists.ship_to_address_id",
+        "ALTER TABLE picking_lists ADD COLUMN IF NOT EXISTS ship_to_address_id uuid;",
+    ),
 ]
 
 

@@ -58,3 +58,23 @@ def test_source_order_date_is_in_the_migration_set():
     assert "picking_lists.source_order_date" in names
     ddl = dict(migrations.MIGRATIONS)["picking_lists.source_order_date"]
     assert "IF NOT EXISTS" in ddl  # idempotent — safe to run on every update
+
+
+def test_fedex_recipient_columns_are_in_the_migration_set():
+    # Every column the watcher writes for the AS400 account / FedEx key must be
+    # ensured here too, so an update ahead of Pickd's migration never writes into
+    # a missing column. Column-only: the CHECKs, the unique index and the trigger
+    # that derives fedex_recipient_id belong to Pickd's migration, not here.
+    ddl = dict(migrations.MIGRATIONS)
+    for name in (
+        "customers.as400_account",
+        "customers.ship_to_varies",
+        "customer_addresses.as400_ship_to",
+        "customer_addresses.fedex_recipient_id",
+        "picking_lists.as400_account_number",
+        "picking_lists.ship_to_address_id",
+    ):
+        assert name in ddl, name
+        assert "IF NOT EXISTS" in ddl[name]  # idempotent — safe to run on every update
+        assert "TRIGGER" not in ddl[name].upper()
+        assert "CONSTRAINT" not in ddl[name].upper()
