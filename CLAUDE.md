@@ -138,7 +138,7 @@ ruff format --check .
 
 Los skills viven en el repo central `rafael1599/skills` y se conectan con un symlink **por skill** en `.claude/skills/<nombre>/` (Claude Code solo descubre SKILL.md a un nivel de profundidad).
 
-- **Local (Mac):** symlinks hacia el repo central. Para actualizar: `git pull` en ese repo.
+- **Local (Mac):** symlinks hacia el repo central. Para actualizar: `git pull` en ese repo. Para (re)generarlos (p. ej. si el repo central se mueve): `bash .claude/hooks/link-skills.sh --local`.
 - **Claude Code web:** el hook SessionStart `.claude/hooks/link-skills.sh` crea los symlinks automaticamente al iniciar la sesion. Requiere el repo `skills` agregado al environment. Para habilitar mas skills, editar la lista `SKILLS` del script.
 
 ### Preferencias de conexion
