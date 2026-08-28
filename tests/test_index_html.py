@@ -30,24 +30,35 @@ def _served_script() -> str:
 
 
 def test_js_strings_hold_no_raw_newline():
-    """A quote left open at the end of a line = an escape Python ate. Cheap parser:
-    outside template literals, a ' or " string must close on its own line."""
+    """A ' or " string that crosses a real newline = an escape Python ate. Template
+    literals may span lines; // and /* */ comments are skipped outside strings."""
     script = _served_script()
-    for i, line in enumerate(script.split("\n"), 1):
-        for quote in ("'", '"'):
+    line, opened, i = 1, None, 0
+    while i < len(script):
+        ch = script[i]
+        nxt = script[i + 1] if i + 1 < len(script) else ""
+        if ch == "\n":
+            assert opened not in ("'", '"'), f"line {line}: {opened}-string crosses a newline"
+            line += 1
+        elif ch == "\\":
+            i += 2
+            continue
+        elif opened is None:
+            if ch == "/" and nxt == "/":
+                i = script.find("\n", i)
+                i = len(script) if i == -1 else i
+                continue
+            if ch == "/" and nxt == "*":
+                j = script.find("*/", i + 2)
+                seg = script[i : j if j != -1 else len(script)]
+                line += seg.count("\n")
+                i = len(script) if j == -1 else j + 2
+                continue
+            if ch in ("'", '"', "`"):
+                opened = ch
+        elif ch == opened:
             opened = None
-            j = 0
-            while j < len(line):
-                ch = line[j]
-                if ch == "\\":
-                    j += 2
-                    continue
-                if opened is None and ch in ("'", '"', "`"):
-                    opened = ch
-                elif opened == ch:
-                    opened = None
-                j += 1
-            assert opened != quote, f"line {i}: {quote}-string never closes: {line.strip()[:90]}"
+        i += 1
 
 
 def test_the_newline_escape_survives_python():
