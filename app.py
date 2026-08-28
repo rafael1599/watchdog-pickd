@@ -1390,7 +1390,7 @@ async function runMaintenance(id, apply) {
     const written = new Set(['headers','accounts','addresses','links']);
     const rows = Object.entries(data.counts || {}).map(([k, v]) =>
       `<b>${v}</b><span>${labels[k] || k}${written.has(k) ? would : ''}</span>`).join('');
-    const lines = (data.lines || []).join('\n') + (data.truncated ? `\n… and ${data.truncated} more` : '');
+    const lines = (data.lines || []).join('\\n') + (data.truncated ? `\\n… and ${data.truncated} more` : '');
     out.innerHTML = `<p class="${apply ? 'ok' : 'muted'}">${apply ? 'Applied' : 'Preview'} in ${data.seconds}s.${apply ? '' : ' Nothing was written.'}</p>
       <div class="maint-counts">${rows}</div>
       ${lines ? `<details><summary class="muted" style="cursor:pointer; font-size:.8rem;">Per-order detail</summary><div class="maint-lines">${lines}</div></details>` : ''}`;
