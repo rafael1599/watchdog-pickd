@@ -136,10 +136,5 @@ ruff format --check .
 
 ## Skills
 
-Los skills viven en el repo central `rafael1599/skills` y se conectan con un symlink **por skill** en `.claude/skills/<nombre>/` (Claude Code solo descubre SKILL.md a un nivel de profundidad).
+Las skills **globales** vienen del plugin `globals@rafael-skills` (marketplace `rafael1599/skills`), declarado en `.claude/settings.json`: Claude Code lo instala solo al abrir el proyecto, también en Claude Code web y en otra máquina. Se invocan como `/globals:<skill>` (p. ej. `/globals:commit-craft`). Tras un push al repo de skills: `claude plugin marketplace update rafael-skills && claude plugin update globals@rafael-skills`. Nunca copiar ni enlazar skills globales a mano (el esquema de symlinks + hook `link-skills.sh` se retiró el 29 ago 2026).
 
-- **Local (Mac):** symlinks hacia el repo central. Para actualizar: `git pull` en ese repo. Para (re)generarlos (p. ej. si el repo central se mueve): `bash .claude/hooks/link-skills.sh --local`.
-- **Claude Code web:** el hook SessionStart `.claude/hooks/link-skills.sh` crea los symlinks automaticamente al iniciar la sesion. Requiere el repo `skills` agregado al environment. Para habilitar mas skills, editar la lista `SKILLS` del script.
-
-### Preferencias de conexion
-- Siempre usar **symlink** para conectar skills (nunca git clone dentro del proyecto)

@@ -1,14 +1,13 @@
 {
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/link-skills.sh"
-          }
-        ]
+  "extraKnownMarketplaces": {
+    "rafael-skills": {
+      "source": {
+        "source": "github",
+        "repo": "rafael1599/skills"
       }
-    ]
+    }
+  },
+  "enabledPlugins": {
+    "globals@rafael-skills": true
   }
 }
