@@ -497,12 +497,21 @@ def parse_ship_via(text: str) -> Optional[str]:
     We take the value right after 'Ship Via' up to the next column gap (2+ spaces),
     so a multi-word carrier ('UPS GROUND') stays intact while the neighbouring
     'Shipped From ...' column is not swallowed. Returns None if absent/empty.
+
+    An EMPTY Ship Via is the case that needs the explicit cut (real order 881310,
+    2026-08-28): with nothing in the field, everything to the right collapses into
+    one token once the leading spaces are stripped, and the carrier came out as
+    'Shipped From New Jersey' — a nonsense chip on the card, and a string that
+    classify_shipping then reads for carrier hints. So the neighbouring label is
+    removed by name BEFORE the column split, never by counting spaces.
     """
-    match = re.search(r"Ship\s+Via\b[ \t]*(.+)$", text, re.IGNORECASE | re.MULTILINE)
+    match = re.search(r"Ship\s+Via\b(.*)$", text, re.IGNORECASE | re.MULTILINE)
     if not match:
         return None
+    # Drop the column to the right, whatever the gap width.
+    rest = re.split(r"Shipped\s+From\b", match.group(1), flags=re.IGNORECASE)[0]
     # First column only: split on a 2+ space gap (the column separator).
-    value = re.split(r"\s{2,}", match.group(1).strip())[0].strip()
+    value = re.split(r"\s{2,}", rest.strip())[0].strip()
     return value or None
 
 
