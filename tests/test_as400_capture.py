@@ -8,6 +8,7 @@ flow and the multi-page accumulation without driving Mocha.
 import pytest
 
 from as400_capture import (
+    STATE_CUSTOMER_DISPLAY,
     STATE_DISCONNECTED,
     STATE_LOGIN,
     STATE_MENU,
@@ -22,6 +23,7 @@ from as400_capture import (
     _has_end_marker,
     _is_invalid_order,
     _is_message_info_screen,
+    _is_order_header_screen,
     _is_void_order,
     bootstrap_session,
     capture_order,
@@ -89,6 +91,59 @@ ORDER_ITEMS_END_SCREEN = """                            O R D E R   I N Q U I R 
  Quant  Quant  Stock #   W/H   Description                       Unit    Extend
      1      1  03 4068 BK  F   EXPLORER A2 17 2025 GLOSS BLAC  388.95    388.95
                                 END OF ORDER                             388.95"""
+
+
+# The FULL SALESN menu (Rafael, 2026-09-01). The old fixture only listed the first
+# four options; six more exist, including Order Entry and Sign Off.
+FULL_MENU_SCREEN = """ COMMAND                      SALESN Options                                 XT
+
+
+  01. Customer Inquiry
+  02. Stock File Inquiry
+  03. Order Inquiry
+  04. Accounts Receivable Inquiry
+
+  06. Display Print Status
+  07. Set Terminal Functions
+
+
+  09. Order Entry
+  10. Order Turn - California
+
+
+
+      24. Sign Off
+
+
+ Ready for option number or command"""
+
+# CUSTOMER DISPLAY — menu option 01 (Rafael, 2026-09-01). This is where the dealer's
+# phone and e-mail live; the order screens carry neither. Reached with 1 → ENTER →
+# customer number → TAB → 00 → ENTER. Its own legend gives Cmd7 EXIT as the way out.
+CUSTOMER_DISPLAY_SCREEN = """                       C U S T O M E R    D I S P L A Y
+   cfvdet01
+  Account Number: 0009981 00
+
+  Name           SHREWSBURY BICYCLES INC.
+  Address        765 BROAD STREET
+
+  City           SHREWSBURY       NJ  07702
+  Phone No       732 7412799
+  Fax No                       Salesman ID   179 LAMBERT/PARSONS
+  EMAIL Address  INFO@SHREWSBURYBICYCLES.COM
+  Cr Limit - Bikes     10000.00
+  Cr Limit - Parts          .00
+  Terms Code         28 NET 30 DAYS
+
+    Size of Store:
+    # of Locations:
+    Bike Buyer:      ACT# 2385  ROUT# 0353
+    Parts Buyer:
+    Other Buyer:
+
+ ---- Lines ---
+ Cmd1    Cmd2  Cmd3        Cmd4     Cmd5     Cmd10  Cmd11  Cmd12    Cmd6   Cmd7
+  Product Comp  Closest Dlr POP Info CallBack Top10  Commit PreSeas  Prior  EXIT"""
 
 
 class FakeDriver:
@@ -186,6 +241,75 @@ def test_raises_when_marker_never_appears():
     driver = FakeDriver([READY, "ORDER INQUIRY"] + [f"ITEMS PAGE {n}" for n in range(50)])
     with pytest.raises(CaptureError):
         capture_order("999", driver, page_wait=0, max_pages=5)
+
+
+# ── Continuing from an order already on screen (operator report 2026-09-01) ──
+# "Cuando busco una orden, aunque ya esté en AS400 y el watcher la vea, la vuelve a
+# buscar, retrocediendo un paso en el proceso." The pre-check read IS the header;
+# F6 + re-typing walks back to the search screen to reach the page already shown.
+
+
+def test_is_order_header_screen_detector():
+    assert _is_order_header_screen(ORDER_HEADER_SCREEN, "880009")
+    # A different order on screen is not ours.
+    assert not _is_order_header_screen(ORDER_HEADER_SCREEN, "880010")
+    # Same order, but the ITEMS view — continuing from it would capture an order
+    # that starts in the middle.
+    assert not _is_order_header_screen(ORDER_ITEMS_END_SCREEN, "880009")
+    # Screens with no order on them.
+    assert not _is_order_header_screen(ORDER_SEARCH_SCREEN, "880009")
+    assert not _is_order_header_screen(INVALID_ORDER_SCREEN, "999999")
+    assert not _is_order_header_screen(READY, "880009")
+    assert not _is_order_header_screen(ORDER_HEADER_SCREEN, None)
+    # 5250 letter-spacing must not break the match.
+    assert _is_order_header_screen("O r d e r  N u m b e r :  8 8 0 0 0 9\n Bill ACME", "880009")
+
+
+def test_continues_from_the_order_already_on_screen():
+    driver = FakeDriver([ORDER_HEADER_SCREEN, "ITEM 1\nEND OF ORDER"])
+    text = capture_order("880009", driver, page_wait=0)
+
+    assert driver.keys == ["f5"]  # straight to the items view — no F6
+    assert driver.typed is None  # nothing re-typed
+    assert "Order Number: 880009" in text
+    assert "END OF ORDER" in text
+
+
+def test_does_not_continue_from_a_different_order():
+    driver = FakeDriver(
+        [ORDER_HEADER_SCREEN, "O R D E R  I N Q U I R Y\nCUSTOMER HEADER", "ITEM\nEND OF ORDER"]
+    )
+    capture_order("880010", driver, page_wait=0)
+
+    assert driver.keys == ["f6", "f5"]
+    assert driver.typed == "880010"
+
+
+def test_does_not_continue_from_an_items_page_of_the_same_order():
+    # The screen shows order 880009 but we are mid-order: reusing it would drop
+    # every line above the current page.
+    driver = FakeDriver([ORDER_ITEMS_END_SCREEN, ORDER_HEADER_SCREEN, "ITEM\nEND OF ORDER"])
+    capture_order("880009", driver, page_wait=0)
+
+    assert driver.keys == ["f6", "f5"]
+    assert driver.typed == "880009"
+
+
+def test_continuing_can_be_turned_off():
+    # AS400_REUSE_HEADER=0 on Bay 2 restores the old path without a deploy.
+    driver = FakeDriver([ORDER_HEADER_SCREEN, ORDER_HEADER_SCREEN, "ITEM\nEND OF ORDER"])
+    capture_order("880009", driver, page_wait=0, reuse_header=False)
+
+    assert driver.keys == ["f6", "f5"]
+    assert driver.typed == "880009"
+
+
+def test_void_order_already_on_screen_still_skips_before_f5():
+    # The guards run on the reused screen exactly as on a freshly typed one.
+    driver = FakeDriver([VOID_HEADER])
+    with pytest.raises(OrderVoidSkip):
+        capture_order("880138", driver, page_wait=0, reuse_header=True)
+    assert "f5" not in driver.keys
 
 
 class LaggyTerminalDriver:
@@ -422,11 +546,48 @@ def test_bootstrap_skips_login_when_already_logged_in():
     assert driver.actions == []  # no re-login
 
 
-def test_bootstrap_unknown_screen_requires_manual_login():
+def test_bootstrap_unknown_screen_tries_the_operator_way_out_once():
+    # An unrecognized screen is no longer an immediate give-up: F6·F6·F7 is the
+    # operator's own way back to the SALESN menu from anywhere (Rafael 2026-09-01).
+    # This screen never changes, so after ONE attempt it still asks for a human —
+    # and it must not keep hammering keys at a terminal nobody is watching.
     driver = StatefulDriver("MAIN MENU\n1. Inventory\n2. Customers")
     with pytest.raises(AS400ManualLoginRequired):
         bootstrap_session(driver, launch_wait=0, step_wait=0)
-    assert driver.actions == []
+    assert driver.keys == ["f6", "f6", "f7"]
+    assert driver.typed is None
+
+
+def test_bootstrap_unsticks_an_unknown_screen_back_to_the_order_view():
+    # Unknown screen → F6·F6·F7 lands on the menu → 3 → order search.
+    screens = iter(["SOME OTHER PROGRAM", MENU_SCREEN, READY])
+    driver = FakeDriver()
+    driver.copy_screen = lambda: next(screens)
+    assert bootstrap_session(driver, launch_wait=0, step_wait=0) == STATE_ORDER_SEARCH
+    assert driver.keys[:3] == ["f6", "f6", "f7"]
+
+
+def test_bootstrap_never_hammers_the_dead_end_message_screen():
+    # 'ADDITIONAL MESSAGE INFORMATION': no key works, only a re-login escapes it.
+    # Trying F6·F6·F7 here would be pressing keys into a screen that cannot answer.
+    driver = StatefulDriver(ADDL_MSG_SCREEN)
+    with pytest.raises(AS400ManualLoginRequired):
+        bootstrap_session(driver, launch_wait=0, step_wait=0)
+    assert driver.keys == []
+
+
+def test_customer_display_is_classified_and_exited_with_f7():
+    assert classify_screen(CUSTOMER_DISPLAY_SCREEN) == STATE_CUSTOMER_DISPLAY
+    screens = iter([CUSTOMER_DISPLAY_SCREEN, MENU_SCREEN, READY])
+    driver = FakeDriver()
+    driver.copy_screen = lambda: next(screens)
+    assert bootstrap_session(driver, launch_wait=0, step_wait=0) == STATE_ORDER_SEARCH
+    assert driver.keys[0] == "f7"  # EXIT, per the screen's own legend
+
+
+def test_full_menu_still_classifies_as_the_menu():
+    # Ten options instead of four — the markers must not depend on the short list.
+    assert classify_screen(FULL_MENU_SCREEN) == STATE_MENU
 
 
 def test_bootstrap_runs_login_then_verifies_order_screen():
@@ -441,7 +602,9 @@ def test_bootstrap_runs_login_then_verifies_order_screen():
 
 
 def test_bootstrap_raises_if_login_does_not_reach_order_screen():
-    screens = iter(["Sign On\nPassword", "MAIN MENU"])
+    # Third screen: after the login macro the view is still unknown, the one
+    # unstick attempt is spent on it, and it stays unknown → a human is needed.
+    screens = iter(["Sign On\nPassword", "MAIN MENU", "MAIN MENU"])
     driver = FakeDriver()
     driver.copy_screen = lambda: next(screens)
     with pytest.raises(AS400ManualLoginRequired):

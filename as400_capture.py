@@ -50,6 +50,7 @@ STATE_DISCONNECTED = "disconnected"  # Mocha can't reach the host / session ende
 STATE_LOGIN = "login"  # AS400 sign-on screen
 STATE_MENU = "menu"  # SALESN options menu (pick 3 = Order Inquiry)
 STATE_MESSAGE = "message"  # transient "Message Display / Press Enter to continue"
+STATE_CUSTOMER_DISPLAY = "customer_display"  # CUSTOMER DISPLAY (menu option 01)
 STATE_ORDER_SEARCH = "order_search"  # logged in, ready to type an order number
 STATE_ORDER_INQUIRY = "order_inquiry"  # viewing an order
 STATE_UNKNOWN = "unknown"  # unrecognized → ask the user to log in manually
@@ -73,6 +74,10 @@ LOGIN_MARKERS = ("SIGNON", "PASSWORD")
 # the order-screen substring checks, or the menu would look like an order view.
 MENU_MARKERS = ("SALESNOPTIONS", "READYFOROPTION")
 MESSAGE_MARKERS = ("PRESSENTERTOCONTINUE",)
+# Option 01 of the SALESN menu. Reachable by hand (it holds the dealer's phone and
+# e-mail), so the daemon can find the terminal parked here. Its own legend says
+# Cmd7 EXIT, which is the way back to the menu.
+CUSTOMER_MARKERS = ("CUSTOMERDISPLAY",)
 
 # States from which a capture can start (logged in, on an order view).
 _READY_STATES = (STATE_ORDER_SEARCH, STATE_ORDER_INQUIRY)
@@ -98,6 +103,8 @@ def classify_screen(text: str) -> str:
         return STATE_MENU
     if any(m in norm for m in MESSAGE_MARKERS):
         return STATE_MESSAGE
+    if any(m in norm for m in CUSTOMER_MARKERS):
+        return STATE_CUSTOMER_DISPLAY
     if "ORDERINQUIRY" in norm:
         return STATE_ORDER_INQUIRY
     if "ORDERNUMBER" in norm:
@@ -157,6 +164,51 @@ def _is_message_info_screen(text: str) -> bool:
     """
     norm = re.sub(r"\s+", "", text.upper())
     return "ADDITIONALMESSAGEINFORMATION" in norm
+
+
+# Column heading of the ITEMS view ('Quant Quant Stock # W/H Description ...'),
+# normalized to alphanumerics. The items page repeats the very same 'Order Number:'
+# line as the header, so this is what tells the two views apart.
+_ITEMS_VIEW_MARKERS = ("QUANTQUANT", "STOCKWH")
+
+
+def _alnum(text: str) -> str:
+    """Alphanumerics only, upper-cased — 5250 spaces letters out ('O r d e r')."""
+    return re.sub(r"[^A-Za-z0-9]", "", text or "").upper()
+
+
+def _screen_order_number(text: str):
+    """The order number this screen is showing, or None (empty search screen,
+    'Invalid Order Number' — both clear the field, so there are no digits)."""
+    m = re.search(r"ORDERNUMBER(\d+)", _alnum(text))
+    return m.group(1) if m else None
+
+
+def _is_order_header_screen(text: str, order_number) -> bool:
+    """True when the screen is ALREADY the header (page 1) of exactly this order.
+
+    Both halves matter:
+      - it names THIS order number (a stale screen showing the previous order is
+        not ours), and
+      - it is the HEADER, not an items page. The items view carries the same
+        'Order Number:' line, and continuing from one would capture an order that
+        starts in the middle — so its column heading disqualifies the screen.
+    """
+    if not order_number:
+        return False
+    if _screen_order_number(text) != str(order_number).strip():
+        return False
+    norm = _alnum(text)
+    return not any(m in norm for m in _ITEMS_VIEW_MARKERS)
+
+
+def _reuse_header_default() -> bool:
+    """Whether capture_order may continue from an order already on screen.
+
+    Read at call time (not import) so a .env loaded later still wins, and so the
+    Bay 2 machine can switch it off without a deploy: AS400_REUSE_HEADER=0.
+    """
+    return os.getenv("AS400_REUSE_HEADER", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _looks_like_order_screen(text: str) -> bool:
@@ -356,12 +408,34 @@ def run_login(driver, login_steps=DEFAULT_LOGIN_STEPS, step_wait: float = 0.6):
         time.sleep(step_wait)
 
 
-def _advance_toward_order_screen(driver, state, login_steps, step_wait) -> bool:
+def unstick_to_menu(driver, step_wait: float = 0.6) -> None:
+    """The operator's own way out of any screen: F6, F6, then F7.
+
+    Rafael, 2026-09-01: "para salir al menú principal es presionando primero F6 dos
+    veces y después F7, desde cualquier menú en el que se esté". F6 is RETURN TO
+    SELECT and F7 is EXIT, so this walks back out of whatever view the terminal is
+    parked in and lands on the SALESN options list.
+
+    It does NOT rescue the 'ADDITIONAL MESSAGE INFORMATION' dead end, where no key
+    works at all — the caller checks for that screen first and never gets here.
+    """
+    for key in ("f6", "f6", "f7"):
+        driver.key(key)
+        time.sleep(step_wait)
+
+
+def _advance_toward_order_screen(
+    driver, state, login_steps, step_wait, allow_unstick=False
+) -> bool:
     """Take the known keystroke for `state` to move one step toward the order screen.
 
     Confirmed login flow (see docs §3.1): sign-on → Message Display → SALESN menu
     → Order Inquiry. Returns True if it acted, False if the state has no known move
     (caller then asks for manual login).
+
+    `allow_unstick` lets an UNRECOGNIZED screen try the operator's F6·F6·F7 way back
+    to the menu instead of giving up. It is offered once per session bootstrap: if
+    the screen is still unknown afterwards, a human really is needed.
     """
     if state == STATE_LOGIN:
         run_login(driver, login_steps=login_steps, step_wait=step_wait)
@@ -371,6 +445,10 @@ def _advance_toward_order_screen(driver, state, login_steps, step_wait) -> bool:
         driver.key("enter")
     elif state == STATE_MESSAGE:
         driver.key("enter")  # "Press Enter to continue"
+    elif state == STATE_CUSTOMER_DISPLAY:
+        driver.key("f7")  # EXIT, per the screen's own legend → back to the menu
+    elif state == STATE_UNKNOWN and allow_unstick:
+        unstick_to_menu(driver, step_wait=step_wait)
     else:
         return False
     return True
@@ -400,8 +478,10 @@ def bootstrap_session(
     time.sleep(launch_wait)
     driver.focus()
 
+    unstick_used = False
     for _ in range(max_steps):
-        state = classify_screen(driver.copy_screen())
+        screen = driver.copy_screen()
+        state = classify_screen(screen)
         log.info("AS400 connect: screen state=%s", state)
 
         if state == STATE_DISCONNECTED:
@@ -411,12 +491,24 @@ def bootstrap_session(
             )
         if state in _READY_STATES:
             return state
+        if _is_message_info_screen(screen):
+            # The one screen no key escapes (operator, 2026-06-11). Don't hammer it.
+            raise AS400ManualLoginRequired(
+                "The AS400 is on the 'ADDITIONAL MESSAGE INFORMATION' screen, where no "
+                "key works. Close the session and log back in, then try again."
+            )
 
-        if not _advance_toward_order_screen(driver, state, login_steps, step_wait):
+        allow_unstick = state == STATE_UNKNOWN and not unstick_used
+        if not _advance_toward_order_screen(
+            driver, state, login_steps, step_wait, allow_unstick=allow_unstick
+        ):
             raise AS400ManualLoginRequired(
                 "I don't recognize the current AS400 screen. Log in manually "
                 "to the order-search screen, then try again."
             )
+        if allow_unstick:
+            unstick_used = True
+            log.info("AS400 connect: unknown screen — tried F6·F6·F7 back to the menu")
         time.sleep(step_wait)
 
     raise AS400ManualLoginRequired(
@@ -432,6 +524,7 @@ def capture_order(
     max_pages: int = 25,
     poll_interval: float = 0.3,
     refresh_timeout: float = 5.0,
+    reuse_header=None,
 ) -> str:
     """
     Capture a full order from the AS400 screen into one text blob.
@@ -456,7 +549,8 @@ def capture_order(
     # Verify the screen BEFORE driving it: never type an order number into a
     # disconnected or unrecognized view (that's how a dead session silently
     # swallowed keystrokes and still looked "fine").
-    state = classify_screen(driver.copy_screen())
+    screen = driver.copy_screen()
+    state = classify_screen(screen)
     if state == STATE_DISCONNECTED:
         raise AS400Disconnected(
             "The AS400 isn't connected. Log in manually in Mocha, then try again."
@@ -467,14 +561,33 @@ def capture_order(
             "unknown view). Log in manually, then try again."
         )
 
-    # F6 opens a fresh order search before each new order.
-    driver.key("f6")
-    time.sleep(page_wait)
+    if reuse_header is None:
+        reuse_header = _reuse_header_default()
 
-    # Page 1: customer header. Typing the last digit surfaces it automatically.
-    driver.type_text(str(order_number))
-    time.sleep(page_wait)
-    header = driver.copy_screen()
+    if reuse_header and _is_order_header_screen(screen, order_number):
+        # The screen we just read IS this order's header — the operator looked the
+        # order up in Mocha before hitting capture, or a previous attempt left it
+        # there. Pressing F6 and re-typing the number walks BACK to the search
+        # screen to arrive at the page already in front of us: a third of the
+        # capture, and two keystrokes into a terminal shared with a person. Carry
+        # on from here; every guard below still runs on this same text (VOID,
+        # message screen, invalid number, wrong view), so nothing is skipped —
+        # only the round trip is.
+        header = screen
+        log.info(
+            "AS400 #%s already on screen — continuing from it (no F6 / re-type)",
+            order_number,
+        )
+    else:
+        # F6 opens a fresh order search before each new order.
+        driver.key("f6")
+        time.sleep(page_wait)
+
+        # Page 1: customer header. Typing the last digit surfaces it automatically.
+        driver.type_text(str(order_number))
+        time.sleep(page_wait)
+        header = driver.copy_screen()
+
     pages = [header]
     log.info("AS400 header captured: %d chars", len(header))
 
