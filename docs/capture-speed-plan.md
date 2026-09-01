@@ -81,6 +81,11 @@ que ya estaba), y el auto-archive re-archivaba en cada poll hasta 48 MB / 9.210 
 
 ## 4. Reglas del juego para esta tanda
 
+0. **Todo vive en `main`, así que un `update.sh` trae TODAS las fases de golpe.** El orden de
+   despliegue no lo da git: lo dan los interruptores. `AS400_SINGLE_SCRIPT=0` (F2/F3) y
+   `AS400_REUSE_HEADER=0` (F1b) dejan el código nuevo instalado pero dormido, que es lo que permite
+   medir el «antes» en la máquina real y volver atrás sin otro viaje a Bay 2. F1c y F1d no llevan
+   interruptor a propósito: sólo actúan donde antes nos rendíamos o donde saltábamos un número real.
 1. **Cada constante de tiempo pasa a `.env`, con el valor de hoy como default.** Hoy
    `page_wait`, `poll_interval` y `refresh_timeout` están hardcodeados en la firma de
    `capture_order`: ajustar un número es un despliegue, y cada despliegue es una visita a

@@ -234,6 +234,16 @@ def _is_order_header_screen(text: str, order_number) -> bool:
     return not any(m in norm for m in _ITEMS_VIEW_MARKERS)
 
 
+def _single_script_enabled() -> bool:
+    """Whether a screen read is one osascript (plan F2/F3) or the old three.
+
+    The revert lever for the biggest change to how the terminal is driven, and the
+    way to measure the BEFORE on the Bay 2 Mac: with AS400_SINGLE_SCRIPT=0 the F0
+    log records the old shape, so "half the time" is a comparison and not a claim.
+    """
+    return os.getenv("AS400_SINGLE_SCRIPT", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _reuse_header_default() -> bool:
     """Whether capture_order may continue from an order already on screen.
 
@@ -469,13 +479,21 @@ class MochaDriver:
         # otherwise bring the running process to the front by name. Only when it
         # isn't already in front — and the settle pause runs inside the script, so
         # an emulator that was already up costs one Apple event and no sleep.
-        self._osascript(
-            build_focus_script(
-                self.app_name,
-                self.bundle_id,
-                _env_float("AS400_FOCUS_SETTLE", FOCUS_SETTLE_DEFAULT),
+        settle = _env_float("AS400_FOCUS_SETTLE", FOCUS_SETTLE_DEFAULT)
+        if not _single_script_enabled():
+            self._focus_the_old_way(settle)
+            return
+        self._osascript(build_focus_script(self.app_name, self.bundle_id, settle))
+
+    def _focus_the_old_way(self, settle: float) -> None:
+        """Pre-F3: activate unconditionally, then sleep in Python."""
+        if self.bundle_id:
+            self._osascript(f'tell application id "{self.bundle_id}" to activate')
+        else:
+            self._osascript(
+                f'tell application "System Events" to set frontmost of process "{self.app_name}" to true'
             )
-        )
+        time.sleep(settle)
 
     def type_text(self, text: str):
         # Escaped for the AppleScript string literal: a quote or a backslash in the
@@ -504,15 +522,22 @@ class MochaDriver:
         sentinel = f"__PICKD_NO_COPY__{time.time()}"
         subprocess.run(["pbcopy"], input=sentinel, text=True, check=True, timeout=clip_timeout)
 
-        self._osascript(
-            build_copy_screen_script(
-                self.app_name,
-                self.bundle_id,
-                _env_float("AS400_FOCUS_SETTLE", FOCUS_SETTLE_DEFAULT),
-                _env_float("AS400_SELECT_DELAY", SELECT_DELAY_DEFAULT),
-                _env_float("AS400_COPY_DELAY", COPY_DELAY_DEFAULT),
+        settle = _env_float("AS400_FOCUS_SETTLE", FOCUS_SETTLE_DEFAULT)
+        select_delay = _env_float("AS400_SELECT_DELAY", SELECT_DELAY_DEFAULT)
+        copy_delay = _env_float("AS400_COPY_DELAY", COPY_DELAY_DEFAULT)
+        if _single_script_enabled():
+            self._osascript(
+                build_copy_screen_script(
+                    self.app_name, self.bundle_id, settle, select_delay, copy_delay
+                )
             )
-        )
+        else:
+            # Pre-F2: three processes and three Python sleeps.
+            self._focus_the_old_way(settle)
+            self._osascript('tell application "System Events" to keystroke "a" using command down')
+            time.sleep(select_delay)
+            self._osascript('tell application "System Events" to keystroke "c" using command down')
+            time.sleep(copy_delay)
 
         out = subprocess.run(
             ["pbpaste"], capture_output=True, text=True, check=True, timeout=clip_timeout

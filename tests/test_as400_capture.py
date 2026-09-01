@@ -438,6 +438,22 @@ def test_a_screen_read_is_one_osascript_call(monkeypatch):
     assert "frontmost" in scripts[0]
 
 
+def test_the_old_three_call_shape_is_one_env_var_away(monkeypatch):
+    # AS400_SINGLE_SCRIPT=0 is both the revert lever and how the BEFORE gets
+    # measured on Bay 2: everything ships on main, so update.sh brings every phase
+    # at once and only a switch keeps the baseline honest.
+    monkeypatch.setenv("AS400_SINGLE_SCRIPT", "0")
+    monkeypatch.setattr("as400_capture.time.sleep", lambda s: None)
+    driver = MochaDriver(app_name="Mocha TN5250")
+    scripts = []
+    driver._osascript = scripts.append
+    monkeypatch.setattr("as400_capture.subprocess.run", lambda *a, **k: _FakeRun("SCREEN TEXT"))
+
+    assert driver.copy_screen() == "SCREEN TEXT"
+    assert len(scripts) == 3  # activate, Cmd+A, Cmd+C
+    assert "frontmost" not in scripts[0] or "is not" not in scripts[0]  # unconditional activate
+
+
 def test_a_read_that_did_not_copy_still_raises(monkeypatch):
     # The sentinel is what makes skipping the activation safe: if Cmd+A/Cmd+C went
     # anywhere else, the clipboard still holds it and we fail loudly instead of
