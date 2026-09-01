@@ -8,7 +8,7 @@ Daemon que monitorea una carpeta (`~/send-to-pickd/`) por archivos PDF de ordene
 - Deteccion de duplicados via hash SHA-256
 - Creacion, append, reopen y combinacion de ordenes
 - Resolucion de SKUs contra inventario (con fuzzy matching)
-- Asignacion automatica de ubicaciones (prioridad: PALLET > LINE > TOWER)
+- Asignacion automatica de ubicaciones (RETURN TO STOCK antes que nada; luego PALLET > LINE > TOWER)
 - Auto-start via launchd (macOS)
 
 ## Como correr

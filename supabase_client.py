@@ -594,6 +594,14 @@ def _variant_base(norm_sku: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+RETURN_TO_STOCK_LOCATION = "RETURN TO STOCK"
+
+
+def _is_return_to_stock(entry: dict) -> bool:
+    """The floor a cancelled order's units land on — picked before any shelf."""
+    return (entry.get("location") or "").strip().upper() == RETURN_TO_STOCK_LOCATION
+
+
 def _pick_by_stock(matches: list, available: dict, requested_qty: int) -> Optional[str]:
     """Choose the catalog SKU for one order line among its variant siblings.
 
@@ -839,10 +847,26 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
             active_candidates = in_stock if in_stock else None
 
             if active_candidates:
-                # Sort: Priority first (Pallet=0), then units_each (fewer is better),
-                # then effective quantity (more is better)
+                # Sort: RETURN TO STOCK first, then priority (Pallet=0), then
+                # units_each (fewer is better), then effective quantity (more is
+                # better).
+                #
+                # RETURN TO STOCK is the floor where a cancelled order's units
+                # wait for somebody to walk them back to their shelf. They owe
+                # that trip either way, so the next order that needs the SKU is
+                # the trip — pointing the picker at a full row instead just
+                # grows the pile (Rafael, 2026-09-01). Matched by name, not by
+                # picking_order: 420 says *when* on the walk (right after ROW
+                # 43), not that it wins. Mirror of `isReturnToStock` in
+                # pickd's src/features/picking/utils/pickLocation.ts — the app
+                # re-plans the route from live stock, so both have to agree.
                 active_candidates.sort(
-                    key=lambda x: (x["priority"], x["units_each"], -x["effective_qty"])
+                    key=lambda x: (
+                        0 if _is_return_to_stock(x["entry"]) else 1,
+                        x["priority"],
+                        x["units_each"],
+                        -x["effective_qty"],
+                    )
                 )
 
                 best_match = active_candidates[0]["entry"]
