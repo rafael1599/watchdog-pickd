@@ -406,14 +406,14 @@ crece dentro del bucle antes de acelerarlo; mirado, no crece.
 - **1 sep 2026** — Rafael reporta que la captura retrocede a la pantalla de búsqueda aunque la
   orden ya esté delante. Confirmado en `capture_order` y corregido (F1b): la pantalla ya leída se
   reutiliza cuando es el header de esa misma orden. Es −3,1 s de −4,9 s del objetivo total.
-- **2 sep 2026** — **F7 no tenía key code**: la recuperación F6·F6·F7 no podía ejecutarse y murió
+- **1 sep 2026** — **F7 no tenía key code**: la recuperación F6·F6·F7 no podía ejecutarse y murió
   con «Unknown key: f7» la primera vez que Rafael la probó. Los drivers falsos de los tests
   aceptaban cualquier tecla, así que 383 tests pasaban sobre código imposible. Ahora validan contra
   la misma tabla que usa el driver real.
-- **2 sep 2026** — **Primera medida real en Bay 2**: 11,95 s → 7,41 s en la misma orden. Un
+- **1 sep 2026** — **Primera medida real en Bay 2**: 11,95 s → 7,41 s en la misma orden. Un
   `osascript` cuesta ahí 0,52 s (3,7× esta Mac), así que el reparto del tiempo es otro: F4 pasa a ser
   contraproducente y **quitar procesos** es lo único que queda grande. De ahí F7.
-- **2 sep 2026** — F4 escrita y **apagada**; F5 se queda en dos líneas de `.env` tras medir que la
+- **1 sep 2026** — F4 escrita y **apagada**; F5 se queda en dos líneas de `.env` tras medir que la
   caché que proponía ahorraba 0,11 ms.
 - **1 sep 2026** — F2 y F3 escritas: son un solo script, así que se implementan y se despliegan
   juntas. Medida en esta Mac: 1.259 ms → 529 ms por lectura. El test de compilación con `osacompile`

@@ -1,6 +1,6 @@
 # Los huecos del escáner se usan para las fichas de cliente
 
-> Estado: **PROPUESTA**, 2 sep 2026. Nada escrito todavía.
+> Estado: **PROPUESTA**, 1 sep 2026. Nada escrito todavía.
 > Pedido de Rafael: *«cuando no hay órdenes para tomar, se comienza a analizar los detalles de los
 > clientes de las órdenes que se fueron a PickD ese día y se envían, y luego de terminar se deja en
 > la pantalla de búsqueda de órdenes»*.
