@@ -105,6 +105,30 @@ LOGIN_MARKERS = ("SIGNON", "PASSWORD")
 # The SALESN options menu lists "03. Order Inquiry" — so it MUST be matched before
 # the order-screen substring checks, or the menu would look like an order view.
 MENU_MARKERS = ("SALESNOPTIONS", "READYFOROPTION")
+# macOS virtual key codes. The AS400 legends go up to Cmd12, so all twelve
+# function keys are here even though the flow only presses a few: the map had
+# just F5 and F6, so the F6·F6·F7 recovery written for it died on "Unknown key:
+# f7" the first time the operator tried it (2026-09-02). The fake drivers in the
+# tests validate against THIS table, so a key the real driver can't press now
+# fails in the suite instead of on the floor.
+KEY_CODES = {
+    "enter": 36,
+    "return": 36,
+    "tab": 48,
+    "f1": 122,
+    "f2": 120,
+    "f3": 99,
+    "f4": 118,
+    "f5": 96,
+    "f6": 97,
+    "f7": 98,
+    "f8": 100,
+    "f9": 101,
+    "f10": 109,
+    "f11": 103,
+    "f12": 111,
+}
+
 MESSAGE_MARKERS = ("PRESSENTERTOCONTINUE",)
 # Option 01 of the SALESN menu. Reachable by hand (it holds the dealer's phone and
 # e-mail), so the daemon can find the terminal parked here. Its own legend says
@@ -502,9 +526,8 @@ class MochaDriver:
         self._osascript(f'tell application "System Events" to keystroke "{safe}"')
 
     def key(self, name: str):
-        """Press a special key: 'enter', 'tab', 'f5' or 'f6'."""
-        key_codes = {"enter": 36, "return": 36, "tab": 48, "f5": 96, "f6": 97}
-        code = key_codes.get(name.lower())
+        """Press a special key by name — see KEY_CODES."""
+        code = KEY_CODES.get(name.lower())
         if code is None:
             raise ValueError(f"Unknown key: {name}")
         self._osascript(f'tell application "System Events" to key code {code}')

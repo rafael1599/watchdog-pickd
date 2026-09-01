@@ -11,6 +11,7 @@ import subprocess
 import pytest
 
 from as400_capture import (
+    KEY_CODES,
     OSASCRIPT_TIMEOUT_DEFAULT,
     PAGE_WAIT_DEFAULT,
     STATE_CUSTOMER_DISPLAY,
@@ -179,6 +180,11 @@ class FakeDriver:
         self.actions.append(("text", text))
 
     def key(self, name):
+        # The fake used to accept ANY key name, so code could press something the
+        # real driver has no key code for and every test still passed. That is
+        # exactly how the F6·F6·F7 recovery shipped broken: MochaDriver knew only
+        # F5 and F6, and it died on "Unknown key: f7" in front of the operator.
+        assert name.lower() in KEY_CODES, f"MochaDriver cannot press {name!r} — see KEY_CODES"
         self.keys.append(name.lower())
         self.actions.append(("key", name.lower()))
 
@@ -503,6 +509,7 @@ class LaggyTerminalDriver:
 
     def key(self, name):
         name = name.lower()
+        assert name in KEY_CODES, f"MochaDriver cannot press {name!r} — see KEY_CODES"
         self.keys.append(name)
         if name == "f5":
             self.item_idx = 0
@@ -705,6 +712,16 @@ def test_bootstrap_skips_login_when_already_logged_in():
     state = bootstrap_session(driver, launch_wait=0, step_wait=0)
     assert state == STATE_ORDER_SEARCH
     assert driver.actions == []  # no re-login
+
+
+def test_every_key_the_flow_presses_has_a_real_key_code():
+    # F7 was missing (2026-09-02): the recovery written against the operator's
+    # F6·F6·F7 recipe could never run. Presses are asserted through the fakes now,
+    # but this states the contract directly.
+    for name in ("enter", "tab", "f5", "f6", "f7"):
+        assert name in KEY_CODES
+    with pytest.raises(ValueError):
+        MochaDriver(app_name="Mocha TN5250").key("f99")
 
 
 def test_bootstrap_unknown_screen_tries_the_operator_way_out_once():
