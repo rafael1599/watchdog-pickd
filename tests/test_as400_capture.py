@@ -5,6 +5,9 @@ A FakeDriver feeds canned screens so we can assert the F5/ENTER/END OF ORDER
 flow and the multi-page accumulation without driving Mocha.
 """
 
+import shutil
+import subprocess
+
 import pytest
 
 from as400_capture import (
@@ -31,6 +34,8 @@ from as400_capture import (
     _is_order_header_screen,
     _is_void_order,
     bootstrap_session,
+    build_copy_screen_script,
+    build_focus_script,
     capture_order,
     classify_screen,
     run_login,
@@ -361,6 +366,95 @@ def test_type_text_escapes_a_quote_instead_of_breaking_the_script():
     driver._osascript = lambda script: sent.append(script)
     driver.type_text('88"13')
     assert sent == ['tell application "System Events" to keystroke "88\\"13"']
+
+
+# ── One osascript per screen read (plan F2/F3) ──────────────────────────────
+
+_SCRIPTS = {
+    "copy by name": build_copy_screen_script("Mocha TN5250", None, 0.4, 0.15, 0.2),
+    "copy by bundle id": build_copy_screen_script("x", "com.mochasoft.tn5250", 0.4, 0.15, 0.2),
+    "focus by name": build_focus_script("Mocha TN5250", None, 0.4),
+    "focus by bundle id": build_focus_script("x", "com.mochasoft.tn5250", 0.4),
+    "delays at zero": build_copy_screen_script("Mocha TN5250", None, 0, 0, 0),
+}
+
+
+@pytest.mark.skipif(shutil.which("osacompile") is None, reason="macOS only")
+@pytest.mark.parametrize("name", sorted(_SCRIPTS))
+def test_the_generated_applescript_compiles(name, tmp_path):
+    """Compiles it — never runs it (running would grab the keyboard of whatever
+    machine the suite is on). A syntax error here would only ever show up as a
+    dead capture on the Bay 2 Mac."""
+    result = subprocess.run(
+        ["osacompile", "-o", str(tmp_path / "check.scpt"), "-e", _SCRIPTS[name]],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_bundle_id_is_resolved_at_run_time_not_compile_time():
+    # 'tell application id "..."' resolves when the script COMPILES, so on a
+    # machine without that bundle installed the whole read would fail — and this
+    # script is the read now, not just the focus.
+    script = _SCRIPTS["copy by bundle id"]
+    assert "tell application id" not in script
+    assert "every application process whose bundle identifier is" in script
+    assert "isn't running" in script
+
+
+def test_the_read_only_activates_when_the_emulator_is_not_in_front():
+    script = _SCRIPTS["copy by name"]
+    assert (
+        'if (name of first application process whose frontmost is true) is not "Mocha TN5250"'
+        in script
+    )
+    assert 'set frontmost of process "Mocha TN5250" to true' in script
+    assert "delay 0.4" in script  # the settle pause only runs inside the if
+
+
+def test_an_app_name_with_a_quote_is_refused_instead_of_building_a_broken_script():
+    with pytest.raises(CaptureError):
+        build_focus_script('Mocha "TN5250"', None, 0.4)
+
+
+class _FakeRun:
+    def __init__(self, stdout=""):
+        self.stdout = stdout
+
+
+def test_a_screen_read_is_one_osascript_call(monkeypatch):
+    # Three processes used to do this: ~140 ms each just to start, and ~140 ms of
+    # daylight between the select-all and the copy for another app to steal focus.
+    driver = MochaDriver(app_name="Mocha TN5250")
+    scripts = []
+    driver._osascript = scripts.append
+    monkeypatch.setattr("as400_capture.subprocess.run", lambda *a, **k: _FakeRun("SCREEN TEXT"))
+
+    assert driver.copy_screen() == "SCREEN TEXT"
+    assert len(scripts) == 1
+    assert 'keystroke "a" using command down' in scripts[0]
+    assert 'keystroke "c" using command down' in scripts[0]
+    assert "frontmost" in scripts[0]
+
+
+def test_a_read_that_did_not_copy_still_raises(monkeypatch):
+    # The sentinel is what makes skipping the activation safe: if Cmd+A/Cmd+C went
+    # anywhere else, the clipboard still holds it and we fail loudly instead of
+    # parsing whatever another app had.
+    driver = MochaDriver(app_name="Mocha TN5250")
+    driver._osascript = lambda script: None
+    written = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd == ["pbcopy"]:
+            written["sentinel"] = kwargs["input"]
+            return _FakeRun()
+        return _FakeRun(written["sentinel"])  # clipboard never changed
+
+    monkeypatch.setattr("as400_capture.subprocess.run", fake_run)
+    with pytest.raises(CaptureError):
+        driver.copy_screen()
 
 
 class LaggyTerminalDriver:

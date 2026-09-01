@@ -40,6 +40,12 @@ REFRESH_TIMEOUT_DEFAULT = 5.0  # how long to wait for the screen to advance
 # A hung osascript runs on the capture thread WITH capture_lock held, so it
 # freezes the scanner and every manual capture queued behind it.
 OSASCRIPT_TIMEOUT_DEFAULT = 10.0
+# Inside the screen-read script (plan F2/F3): settle after bringing Mocha up, and
+# the two pauses around Cmd+A / Cmd+C. They used to be Python sleeps between three
+# separate osascript processes; now they run inside the one script.
+FOCUS_SETTLE_DEFAULT = 0.4
+SELECT_DELAY_DEFAULT = 0.15
+COPY_DELAY_DEFAULT = 0.2
 
 
 def _env_float(name: str, default: float) -> float:
@@ -331,6 +337,83 @@ def activate_app(name: str) -> None:
     )
 
 
+def _applescript_literal(value: str) -> str:
+    """An app name safe to interpolate into an AppleScript string literal.
+
+    Names come from the environment (MOCHA_APP_NAME / AS400_LAUNCH_TARGET), so a
+    quote there is a misconfiguration, not an attack — but it would build a broken
+    script that fails with an AppleScript syntax error nobody can read.
+    """
+    if not value or '"' in value or "\\" in value:
+        raise CaptureError(
+            f"{value!r} can't be used as an app name in AppleScript (it contains a quote or a "
+            "backslash). Check MOCHA_APP_NAME / AS400_LAUNCH_TARGET."
+        )
+    return value
+
+
+def _activation_lines(app_name, bundle_id, settle: float) -> str:
+    """AppleScript that brings the emulator up ONLY if it isn't already in front.
+
+    Re-activating on every screen read cost an Apple event plus a settle sleep even
+    though Mocha had been in front for the whole capture (plan F3). Asking first is
+    one property read inside the script we are already running.
+    """
+    if bundle_id:
+        bid = _applescript_literal(bundle_id)
+        # Deliberately NOT `tell application id "..." to activate`: AppleScript
+        # resolves that at COMPILE time, so on a machine where the bundle isn't
+        # installed the whole script fails to compile — and this script is now the
+        # screen read itself, not just the focus. Asking System Events for the
+        # process resolves at run time and fails with a sentence instead.
+        return (
+            f'  set targets to (every application process whose bundle identifier is "{bid}")\n'
+            f'  if targets is {{}} then error "The emulator ({bid}) isn\'t running."\n'
+            "  set target to item 1 of targets\n"
+            "  if not (frontmost of target) then\n"
+            "    set frontmost of target to true\n"
+            f"    delay {settle}\n"
+            "  end if"
+        )
+    name = _applescript_literal(app_name)
+    return (
+        f'  if (name of first application process whose frontmost is true) is not "{name}" then\n'
+        f'    set frontmost of process "{name}" to true\n'
+        f"    delay {settle}\n"
+        "  end if"
+    )
+
+
+def build_focus_script(app_name, bundle_id, settle: float) -> str:
+    """Bring the emulator to the front if it isn't already. One osascript."""
+    return (
+        'tell application "System Events"\n'
+        + _activation_lines(app_name, bundle_id, settle)
+        + "\nend tell"
+    )
+
+
+def build_copy_screen_script(
+    app_name, bundle_id, settle: float, select_delay: float, copy_delay: float
+) -> str:
+    """Focus-if-needed + Cmd+A + Cmd+C as ONE script (plan F2).
+
+    Three separate osascript processes used to do this. Each one costs ~140 ms just
+    to start, and between the select-all and the copy there were ~140 ms of daylight
+    in which another app could take the focus and receive the Cmd+C. One script
+    closes that window and removes the biggest constant cost of a screen read.
+    """
+    return (
+        'tell application "System Events"\n'
+        + _activation_lines(app_name, bundle_id, settle)
+        + '\n  keystroke "a" using command down\n'
+        f"  delay {select_delay}\n"
+        '  keystroke "c" using command down\n'
+        f"  delay {copy_delay}\n"
+        "end tell"
+    )
+
+
 class MochaDriver:
     """
     macOS keystroke/clipboard driver for Mocha TN5250 using AppleScript (osascript)
@@ -383,14 +466,16 @@ class MochaDriver:
 
     def focus(self):
         # Activate by bundle id when available (reliable for sandboxed apps);
-        # otherwise bring the running process to the front by name.
-        if self.bundle_id:
-            self._osascript(f'tell application id "{self.bundle_id}" to activate')
-        else:
-            self._osascript(
-                f'tell application "System Events" to set frontmost of process "{self.app_name}" to true'
+        # otherwise bring the running process to the front by name. Only when it
+        # isn't already in front — and the settle pause runs inside the script, so
+        # an emulator that was already up costs one Apple event and no sleep.
+        self._osascript(
+            build_focus_script(
+                self.app_name,
+                self.bundle_id,
+                _env_float("AS400_FOCUS_SETTLE", FOCUS_SETTLE_DEFAULT),
             )
-        time.sleep(0.4)
+        )
 
     def type_text(self, text: str):
         # Escaped for the AppleScript string literal: a quote or a backslash in the
@@ -407,21 +492,27 @@ class MochaDriver:
         self._osascript(f'tell application "System Events" to key code {code}')
 
     def copy_screen(self) -> str:
-        """Focus Mocha, select all (Cmd+A), copy (Cmd+C), read the clipboard.
+        """Read the whole AS400 screen: focus if needed, Cmd+A, Cmd+C, clipboard.
 
-        Writes a sentinel to the clipboard first; if Cmd+A/Cmd+C didn't replace it,
-        the copy went nowhere (wrong window focused, or Mocha doesn't copy via
-        Cmd+A) — we raise instead of looping forever on stale clipboard content.
+        ONE osascript does the keyboard half (plan F2/F3). Writes a sentinel to the
+        clipboard first; if Cmd+A/Cmd+C didn't replace it, the copy went nowhere
+        (wrong window focused, or Mocha doesn't copy via Cmd+A) — we raise instead
+        of looping forever on stale clipboard content. That sentinel is exactly what
+        makes the fast path safe: skipping the activation can only fail loudly.
         """
-        self.focus()
         clip_timeout = _env_float("AS400_OSASCRIPT_TIMEOUT", OSASCRIPT_TIMEOUT_DEFAULT)
         sentinel = f"__PICKD_NO_COPY__{time.time()}"
         subprocess.run(["pbcopy"], input=sentinel, text=True, check=True, timeout=clip_timeout)
 
-        self._osascript('tell application "System Events" to keystroke "a" using command down')
-        time.sleep(0.15)
-        self._osascript('tell application "System Events" to keystroke "c" using command down')
-        time.sleep(0.2)
+        self._osascript(
+            build_copy_screen_script(
+                self.app_name,
+                self.bundle_id,
+                _env_float("AS400_FOCUS_SETTLE", FOCUS_SETTLE_DEFAULT),
+                _env_float("AS400_SELECT_DELAY", SELECT_DELAY_DEFAULT),
+                _env_float("AS400_COPY_DELAY", COPY_DELAY_DEFAULT),
+            )
+        )
 
         out = subprocess.run(
             ["pbpaste"], capture_output=True, text=True, check=True, timeout=clip_timeout

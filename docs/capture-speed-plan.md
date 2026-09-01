@@ -205,19 +205,29 @@ debería llegar a esa pantalla — pero **una página de ítems a medio pintar s
 consiste precisamente en leer antes. Sin este guardia, acelerar la lectura convierte un frame a
 medio pintar en un número saltado para siempre, en silencio.
 
-### F2 — Una sola llamada a `osascript` por lectura (−1,1 s por orden; riesgo bajo)
+### F2 — Una sola llamada a `osascript` por lectura · **implementada, sin desplegar**
 Un script que hace las tres cosas: activar Mocha si hace falta, Cmd+A, `delay`, Cmd+C.
 De 3 procesos a 1 por lectura.
 
 Además **cierra un agujero real**: hoy pasan ~140 ms entre el Cmd+A y el Cmd+C, en procesos
 distintos; si el foco cambia en medio, el Cmd+C se ejecuta en otra app. Menos ventana, no más.
 
-Verificación: la suite entera verde; en Bay 2, la lectura baja de ~1,19 s a ~0,5 s en el log de F0.
+**Medido en esta Mac** (mismos Apple events, sin pulsar teclas): una lectura pasa de
+**1.259 ms a 529 ms**, es decir **−730 ms por lectura** — más de lo estimado. Con 4 lecturas en una
+orden de 2 páginas son **~2,9 s**.
 
-### F3 — No re-enfocar en cada lectura (−0,4 s por lectura ≈ −1,2 s por orden)
-`copy_screen` llama a `focus()` siempre: un System Events (140 ms) + `sleep(0.4)`. Dentro del
-script único de F2 se comprueba `frontmost` y sólo se activa cuando no lo está (y entonces sí se
-espera el settle).
+Verificación: la suite entera verde, y **los scripts se compilan dentro de los tests**
+(`osacompile`, que compila sin ejecutar — ejecutarlos robaría el teclado de la máquina donde corra
+la suite). Ese test ya sirvió: `tell application id "…"` se resuelve **al compilar**, así que en una
+máquina sin ese bundle instalado no fallaba la activación, fallaba **la lectura entera**. La
+activación por bundle id ahora se resuelve en tiempo de ejecución y, si el emulador no está
+corriendo, el error es una frase en vez de un error de sintaxis.
+
+### F3 — No re-enfocar en cada lectura · **implementada, sin desplegar** (va dentro de F2)
+`copy_screen` llamaba a `focus()` siempre: un System Events (140 ms) + `sleep(0.4)`. Dentro del
+script único de F2 se comprueba `frontmost` y sólo se activa cuando no lo está — y **el settle se
+espera dentro del script**, así que un emulador que ya estaba delante no cuesta ningún sleep. Los
+730 ms medidos arriba son las dos fases juntas: no se pueden separar, porque son el mismo script.
 
 Riesgo: si Mocha no está al frente y no lo detectamos, Cmd+A/Cmd+C copian **otra app** → texto
 basura. Tres guardias ya existentes lo atrapan, ninguno se afloja: el centinela del portapapeles,
@@ -300,6 +310,10 @@ segundos**, con casos 0 / 0,5 / 2 / 6 s y uno que no refresca nunca.
 - **1 sep 2026** — Rafael reporta que la captura retrocede a la pantalla de búsqueda aunque la
   orden ya esté delante. Confirmado en `capture_order` y corregido (F1b): la pantalla ya leída se
   reutiliza cuando es el header de esa misma orden. Es −3,1 s de −4,9 s del objetivo total.
+- **1 sep 2026** — F2 y F3 escritas: son un solo script, así que se implementan y se despliegan
+  juntas. Medida en esta Mac: 1.259 ms → 529 ms por lectura. El test de compilación con `osacompile`
+  atrapó que `tell application id` se resuelve al compilar; la activación por bundle id pasó a
+  resolverse en tiempo de ejecución.
 - **1 sep 2026** — F0 y F1 escritas y commiteadas. Ya son cinco fases en el repo y **cero
   desplegadas**: el orden de despliegue (1: F0+F1 · 2: F1b+F1c+F1d · 3: F2+F3 · 4: F4) importa
   precisamente porque el número base tiene que salir antes de que F1b lo cambie.
