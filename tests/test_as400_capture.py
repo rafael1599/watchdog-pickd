@@ -200,7 +200,9 @@ def test_single_item_page_stops_immediately():
     )
     text = capture_order("880005", driver, page_wait=0)
 
-    assert driver.focused
+    # No explicit focus() any more: the screen read brings the emulator up itself,
+    # in the same script, so calling both was two Apple events asking one question.
+    assert not driver.focused
     assert driver.typed == "880005"
     # F6 (new search), F5 once to enter items, no ENTER (marker on first items page)
     assert driver.keys == ["f6", "f5"]
@@ -460,7 +462,35 @@ def test_the_old_three_call_shape_is_one_env_var_away(monkeypatch):
     assert "frontmost" not in scripts[0] or "is not" not in scripts[0]  # unconditional activate
 
 
+def test_the_clipboard_is_polled_not_slept_on(monkeypatch):
+    # As soon as the copy lands the read returns; it does not sit out a fixed
+    # 0.2s. Two pbpaste calls here: the sentinel, then the screen.
+    monkeypatch.setenv("AS400_CLIP_POLL", "0")
+    driver = MochaDriver(app_name="Mocha TN5250")
+    driver._osascript = lambda script: None
+    reads = {"n": 0}
+    written = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd == ["pbcopy"]:
+            written["sentinel"] = kwargs["input"]
+            return _FakeRun()
+        reads["n"] += 1
+        return _FakeRun(written["sentinel"] if reads["n"] == 1 else "SCREEN TEXT")
+
+    monkeypatch.setattr("as400_capture.subprocess.run", fake_run)
+    assert driver.copy_screen() == "SCREEN TEXT"
+    assert reads["n"] == 2
+
+
+def test_the_copy_script_no_longer_sleeps_after_the_copy():
+    # The trailing delay is what the clipboard poll replaces.
+    script = build_copy_screen_script("Mocha TN5250", None, 0.4, 0.15, 0.0)
+    assert script.rstrip().endswith('keystroke "c" using command down\n  delay 0.0\nend tell')
+
+
 def test_a_read_that_did_not_copy_still_raises(monkeypatch):
+    monkeypatch.setenv("AS400_CLIP_TIMEOUT", "0")
     # The sentinel is what makes skipping the activation safe: if Cmd+A/Cmd+C went
     # anywhere else, the clipboard still holds it and we fail loudly instead of
     # parsing whatever another app had.

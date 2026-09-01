@@ -51,7 +51,11 @@ SETTLE_POLL_DEFAULT = 0.0  # extra pause between those reads; the read IS the in
 REFRESH_DEADLINE_DEFAULT = 25.0  # wall clock — see the comment in _await_changed_page
 FOCUS_SETTLE_DEFAULT = 0.4
 SELECT_DELAY_DEFAULT = 0.15
-COPY_DELAY_DEFAULT = 0.2
+# Nothing sleeps after Cmd+C any more: the clipboard is polled until it stops
+# being the sentinel, which is an answer instead of a guess (see _read_clipboard).
+COPY_DELAY_DEFAULT = 0.0
+CLIP_TIMEOUT_DEFAULT = 1.0  # five times more patient than the 0.2s sleep it replaces
+CLIP_POLL_DEFAULT = 0.02
 
 
 def _env_float(name: str, default: float) -> float:
@@ -609,18 +613,35 @@ class MochaDriver:
             self._osascript('tell application "System Events" to keystroke "a" using command down')
             time.sleep(select_delay)
             self._osascript('tell application "System Events" to keystroke "c" using command down')
-            time.sleep(copy_delay)
+            if copy_delay:
+                time.sleep(copy_delay)
 
-        out = subprocess.run(
-            ["pbpaste"], capture_output=True, text=True, check=True, timeout=clip_timeout
-        ).stdout
-        if out == sentinel:
-            raise CaptureError(
-                "Cmd+A/Cmd+C didn't copy the AS400 screen (the clipboard didn't change). "
-                "Make sure Mocha stays in front and copies with Cmd+A+Cmd+C; "
-                "if Mocha copies a different way (Edit menu), let me know which."
-            )
-        return out
+        return self._read_clipboard(sentinel, clip_timeout)
+
+    def _read_clipboard(self, sentinel: str, run_timeout: float) -> str:
+        """Wait for the clipboard to stop being the sentinel — ask, don't guess.
+
+        The old shape slept a flat 0.2s after Cmd+C and then read once: too long
+        when the copy lands in 30 ms, and a hard failure when it takes 250. Polling
+        returns as soon as the copy is really there AND waits five times longer
+        before giving up, so it is both faster and more forgiving than the sleep.
+        """
+        deadline = time.monotonic() + _env_float("AS400_CLIP_TIMEOUT", CLIP_TIMEOUT_DEFAULT)
+        poll = _env_float("AS400_CLIP_POLL", CLIP_POLL_DEFAULT)
+        while True:
+            out = subprocess.run(
+                ["pbpaste"], capture_output=True, text=True, check=True, timeout=run_timeout
+            ).stdout
+            if out != sentinel:
+                return out
+            if time.monotonic() >= deadline:
+                raise CaptureError(
+                    "Cmd+A/Cmd+C didn't copy the AS400 screen (the clipboard didn't change). "
+                    "Make sure Mocha stays in front and copies with Cmd+A+Cmd+C; "
+                    "if Mocha copies a different way (Edit menu), let me know which."
+                )
+            if poll:
+                time.sleep(poll)
 
 
 def run_login(driver, login_steps=DEFAULT_LOGIN_STEPS, step_wait: float = 0.6):
@@ -828,7 +849,9 @@ def capture_order(
             stats["stale"],
         )
 
-    driver.focus()
+    # No focus() here: the read below brings the emulator up itself if it isn't
+    # already, in the same script. Calling both meant two Apple events asking the
+    # same question at the start of every capture.
 
     # Verify the screen BEFORE driving it: never type an order number into a
     # disconnected or unrecognized view (that's how a dead session silently

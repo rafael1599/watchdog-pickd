@@ -273,11 +273,15 @@ Se enciende a propósito, mirando el log.
 **Y cuesta menos de lo que estimé.** Con la lectura ya en 0,53 s, comprobar que la pantalla está
 quieta (una segunda lectura idéntica) cuesta casi lo mismo que el `sleep(0.8)` que sustituye:
 
-| | scanner, orden de 2 páginas |
-|---|---|
-| hoy (F1+F2+F3) | 6,02 s |
-| F4 con `AS400_SETTLED_READS=2` (default) | 5,21 s |
-| F4 con `AS400_SETTLED_READS=1` | 3,62 s |
+| | scanner | captura manual |
+|---|---|---|
+| con F6 puesta (lectura de 0,40 s) | 5,22 s | 2,98 s |
+| **+ F4 con `AS400_SETTLED_READS=2`** | **4,02 s** | **2,18 s** |
+| + F4 con `AS400_SETTLED_READS=1` | 3,22 s | 1,78 s |
+
+(La tabla mejoró respecto a lo que decía ayer: cuanto más barata es la lectura, más rentable sale
+comprobar que la pantalla está quieta. Con lecturas de 0,53 s F4 valía 0,8 s; con las de 0,40 s vale
+1,2 s en el camino del scanner.)
 
 La diferencia entre 5,2 y 3,6 es exactamente la comprobación de estabilidad, y **bajarla a 1 es
 reabrir el fallo de junio por el otro lado**: una página a medio pintar se acepta, se pulsa ENTER, y
@@ -297,6 +301,20 @@ tiempos; el log sí, y ve todas las transiciones de todas las órdenes.
 Verificación: `LaggyTerminalDriver` (tests/test_as400_capture.py) hoy expresa el lag **en número
 de lecturas**, que ya no significa lo mismo cuando una lectura cuesta 4× menos. Pasa a lag **en
 segundos**, con casos 0 / 0,5 / 2 / 6 s y uno que no refresca nunca.
+
+### F6 — Preguntar al portapapeles en vez de dormir · **implementada, sin desplegar**
+Quedaban 0,35 s de espera a ciegas dentro de cada lectura: los dos `delay` del script. El de después
+de `Cmd+C` estaba ahí para dar tiempo a que la copia llegara al portapapeles — y eso **se puede
+comprobar** en vez de suponerlo, porque el centinela ya existe: se sondea `pbpaste` hasta que deja de
+ser el centinela.
+
+Es más rápido **y** más tolerante que el sleep que sustituye: vuelve en cuanto la copia está (unos
+30 ms) y espera hasta 1 s antes de rendirse, cinco veces más que los 0,2 s de antes.
+
+De paso se fue el `focus()` del principio de cada captura: desde F3 la propia lectura levanta Mocha
+si hace falta, en el mismo script, así que eran dos Apple events preguntando lo mismo.
+
+**Medido:** la lectura pasa de **554 ms a 402 ms**. Captura manual **3,5 s → 3,0 s**.
 
 ### F5 — El ritmo alrededor de la captura (sólo `.env`, sin código)
 - `SCAN_FOUND_DELAY_SEC` 5 → 1. La Mac de Bay 2 está casi siempre libre (Rafael, 1 sep 2026) y el
