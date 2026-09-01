@@ -33,7 +33,9 @@ log = logging.getLogger("pickd-pipeline")
 # Carrier hints in the AS400 'Ship Via' field that map to a shipping class. These
 # are LOCAL-ONLY (used to colour the UI); PickD keeps its own auto-classification.
 _FEDEX_HINTS = ("FEDEX", "FDX")
-_REGULAR_HINTS = ("UPS", "TRUCK", "TRK", "FREIGHT", "ABF", "LTL", "GROUND FREIGHT")
+# Grows with the carriers actually seen in the header — never with guesses. Seen
+# so far: FEDEX, R&L (LTL freight, order 880996), and blank.
+_REGULAR_HINTS = ("UPS", "TRUCK", "TRK", "FREIGHT", "ABF", "LTL", "GROUND FREIGHT", "R&L")
 
 # Verification-board heuristic fallback: an order of 5+ total units is "regular"
 # (palletized / big), fewer is small-parcel "fedex". We lack per-SKU weights

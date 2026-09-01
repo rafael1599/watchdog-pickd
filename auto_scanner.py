@@ -202,10 +202,21 @@ def run_scan_step(
     # It will never gain items, so retrying is useless: advance the cursor past it
     # (caching nothing) and move on to the next number. Without this the scanner
     # treated it as not_found and retried the SAME number forever.
+    # ...but ONLY when the header agrees that the order is empty. Pressing ENTER
+    # past the last items page redraws the SAME screen with no lines and the
+    # END OF ORDER row still showing (real order 880996, Rafael 2026-09-01) — a
+    # screen indistinguishable from a VOID one by "number + zero items + last
+    # page". The header's Sub-Total tells them apart: a VOID order has none, a
+    # real order still shows its total, so the parse mismatches. Skipping on that
+    # would advance the cursor past a REAL order, forever, in silence. The loop
+    # stops at the first END OF ORDER so it shouldn't land there — but a half-
+    # painted items page reads the same way, and that gets likelier the faster
+    # the capture reads (see docs/capture-speed-plan.md, F4).
     if (
         meta.get("order_number")
         and not (meta.get("item_count") or 0)
         and preview.get("is_last_page")
+        and not meta.get("total_mismatch")
     ):
         scanned_store.skip(n)
         log.info("auto-scan: #%s is VOID/empty (no items) — skipped past it", n)
