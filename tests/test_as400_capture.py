@@ -525,6 +525,60 @@ def test_the_one_process_read_still_fails_loudly_when_nothing_was_copied(monkeyp
         driver.copy_screen()
 
 
+class MergingDriver(FakeDriver):
+    """A driver that can take the keystrokes inside the read, like MochaDriver."""
+
+    supports_steps = True
+
+    def __init__(self, screens):
+        super().__init__(screens)
+        self.calls = []  # the steps of each read, in order
+
+    def copy_screen(self, steps=()):
+        self.calls.append(list(steps))
+        for kind, value in steps:  # keep the key log comparable with the old path
+            if kind == "key":
+                self.key(value)
+            elif kind == "text":
+                self.type_text(str(value))
+        return super().copy_screen()
+
+
+def test_the_keys_travel_in_the_same_script_as_the_read(monkeypatch):
+    monkeypatch.setenv("AS400_READ_IN_SCRIPT", "1")
+    driver = MergingDriver(
+        [READY, "O R D E R  I N Q U I R Y\nCUSTOMER HEADER", "ITEM\nEND OF ORDER"]
+    )
+    capture_order("880005", driver, page_wait=0)
+
+    # Three reads for a one-page order, and only three Apple Events with them:
+    # the pre-check, F6+number+read, F5+read. It used to be six.
+    assert len(driver.calls) == 3
+    assert driver.calls[0] == []
+    assert driver.calls[1] == [
+        ("key", "f6"),
+        ("wait", 0),
+        ("text", "880005"),
+        ("wait", 0),
+    ]
+    assert driver.calls[2] == [("key", "f5"), ("wait", 0)]
+
+
+def test_merged_and_unmerged_press_exactly_the_same_keys(monkeypatch):
+    screens = [READY, "O R D E R  I N Q U I R Y\nHEADER", "ITEM 1", "ITEM 2\nEND OF ORDER"]
+
+    monkeypatch.delenv("AS400_READ_IN_SCRIPT", raising=False)
+    plain = FakeDriver(list(screens))
+    capture_order("880005", plain, page_wait=0)
+
+    monkeypatch.setenv("AS400_READ_IN_SCRIPT", "1")
+    merged = MergingDriver(list(screens))
+    capture_order("880005", merged, page_wait=0)
+
+    assert merged.keys == plain.keys == ["f6", "f5", "enter"]
+    assert merged.typed == plain.typed == "880005"
+
+
 def test_a_read_that_did_not_copy_still_raises(monkeypatch):
     monkeypatch.setenv("AS400_CLIP_TIMEOUT", "0")
     # The sentinel is what makes skipping the activation safe: if Cmd+A/Cmd+C went

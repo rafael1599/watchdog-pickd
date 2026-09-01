@@ -332,6 +332,32 @@ centinela y el llamador lanza el mismo error de siempre.
 pantallas reales del repo vuelven **byte a byte idénticas** por `the clipboard as text` y que
 `parse_order` las entiende igual — pero el veredicto es del terminal de verdad.
 
+### F8 — Las teclas viajan dentro de la lectura · **con `AS400_READ_IN_SCRIPT=1`**
+El benchmark en Bay 2 puso el dedo en la llaga:
+
+| | Bay 2 |
+|---|---|
+| arrancar un proceso (`/bin/echo`) | **5,6 ms** |
+| `osascript` vacío | 89 ms |
+| **`osascript` + System Events** | **302 ms** |
+
+**Lanzar procesos no es el problema; hablar con System Events sí.** Y una captura hacía **seis**
+llamadas: la lectura previa, F6, teclear el número, la lectura del header, F5 y la lectura de la
+página. Casi dos segundos de puro viaje de ida y vuelta para una secuencia que ya conocíamos entera
+de antemano.
+
+Ahora las teclas viajan **dentro del mismo script** que la lectura que las sigue: F6 + número +
+Cmd+A/Cmd+C es un proceso, y F5 (o ENTER) + la lectura de esa página es otro. De seis llamadas a
+**tres**.
+
+Mismas teclas, mismas esperas, mismos guardias — sólo cambia cuántas veces se cruza la frontera del
+proceso. Hay un test que lo fija comparando los dos caminos: `merged and unmerged press exactly the
+same keys`. Y cualquier driver que no sepa hacerlo (todos los falsos de los tests) las reproduce una
+a una, así que el camino viejo sigue vivo y probado.
+
+Va con el mismo interruptor que F7 (`AS400_READ_IN_SCRIPT=1`), porque llevar teclas dentro del script
+sólo tiene sentido si la lectura también está ahí.
+
 ### F5 — El ritmo alrededor de la captura (sólo `.env`, sin código)
 - `SCAN_FOUND_DELAY_SEC` 5 → 1. La Mac de Bay 2 está casi siempre libre (Rafael, 1 sep 2026) y el
   gate de 60 s de inactividad sigue protegiendo al operador. Cuatro segundos por orden, gratis.

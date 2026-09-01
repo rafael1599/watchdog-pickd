@@ -499,8 +499,41 @@ def build_focus_script(app_name, bundle_id, settle: float) -> str:
     )
 
 
+def _step_lines(steps) -> str:
+    """The F6 / order number / F5 / ENTER that precede a read, as AppleScript.
+
+    Each of these used to be its own osascript — and on the Bay 2 Mac an Apple
+    Event to System Events costs ~300 ms while starting a process costs 6. Six
+    calls per capture was 1.8s of pure round trip for keys we already knew we were
+    going to press in that exact order.
+    """
+    out = []
+    for kind, value in steps:
+        if kind == "key":
+            code = KEY_CODES.get(str(value).lower())
+            if code is None:
+                raise ValueError(f"Unknown key: {value}")
+            out.append(f"  key code {code}")
+        elif kind == "text":
+            digits = str(value)
+            if not digits.isdigit():
+                raise ValueError(f"{value!r} isn't an AS400 order number (they are digits).")
+            out.append(f'  keystroke "{digits}"')
+        elif kind == "wait":
+            out.append(f"  delay {float(value)}")
+        else:
+            raise ValueError(f"Unknown step kind: {kind}")
+    return ("\n".join(out) + "\n") if out else ""
+
+
 def build_read_screen_script(
-    app_name, bundle_id, settle: float, select_delay: float, sentinel: str, timeout: float
+    app_name,
+    bundle_id,
+    settle: float,
+    select_delay: float,
+    sentinel: str,
+    timeout: float,
+    steps=(),
 ) -> str:
     """The ENTIRE screen read as one osascript, text included (plan F7).
 
@@ -519,7 +552,9 @@ def build_read_screen_script(
         f'set the clipboard to "{sentinel}"\n'
         'tell application "System Events"\n'
         + _activation_lines(app_name, bundle_id, settle)
-        + '\n  keystroke "a" using command down\n'
+        + "\n"
+        + _step_lines(steps)
+        + '  keystroke "a" using command down\n'
         f"  delay {select_delay}\n"
         '  keystroke "c" using command down\n'
         "end tell\n"
@@ -557,6 +592,9 @@ def build_copy_screen_script(
 
 
 class MochaDriver:
+    # Can take the keystrokes that precede a read inside the same script.
+    supports_steps = True
+
     """
     macOS keystroke/clipboard driver for Mocha TN5250 using AppleScript (osascript)
     and pbpaste. Only functional on macOS with the emulator open and logged in.
@@ -647,7 +685,7 @@ class MochaDriver:
             raise ValueError(f"Unknown key: {name}")
         self._osascript(f'tell application "System Events" to key code {code}')
 
-    def copy_screen(self) -> str:
+    def copy_screen(self, steps=()) -> str:
         """Read the whole AS400 screen: focus if needed, Cmd+A, Cmd+C, clipboard.
 
         ONE osascript does the keyboard half (plan F2/F3). Writes a sentinel to the
@@ -671,6 +709,7 @@ class MochaDriver:
                     _env_float("AS400_SELECT_DELAY", SELECT_DELAY_DEFAULT),
                     sentinel,
                     _env_float("AS400_CLIP_TIMEOUT", CLIP_TIMEOUT_DEFAULT),
+                    steps,
                 ),
                 capture=True,
             )
@@ -679,6 +718,8 @@ class MochaDriver:
                 raise CaptureError(NO_COPY_MESSAGE)
             return out
 
+        # Without the one-process read there is nowhere to put the prelude: the
+        # caller replays it key by key instead (see _keys_then_read).
         subprocess.run(["pbcopy"], input=sentinel, text=True, check=True, timeout=clip_timeout)
 
         settle = _env_float("AS400_FOCUS_SETTLE", FOCUS_SETTLE_DEFAULT)
@@ -908,13 +949,34 @@ def capture_order(
     # contradiction in the first real log line it produced.
     stats = {"reads": 0, "read_s": 0.0, "wait_s": 0.0, "stale": 0}
 
-    def read_screen() -> str:
+    def read_screen(steps=()) -> str:
         stats["reads"] += 1
         at = time.monotonic()
         try:
-            return driver.copy_screen()
+            return driver.copy_screen(steps) if steps else driver.copy_screen()
         finally:
             stats["read_s"] += time.monotonic() - at
+
+    def send_keys(steps) -> None:
+        for kind, value in steps:
+            if kind == "key":
+                driver.key(value)
+            elif kind == "text":
+                driver.type_text(str(value))
+            elif kind == "wait":
+                time.sleep(float(value))
+
+    def send_and_read(steps) -> str:
+        """The keys that lead to a screen, then that screen — in ONE process when
+        the driver can do it. On Bay 2 each Apple Event to System Events costs
+        ~300 ms, so F6 + typing + reading as three calls was 0.9s of round trip
+        for a sequence we already knew in advance. Identical keys, identical
+        waits; only the number of processes changes. Any driver without
+        `supports_steps` (every fake in the tests) replays it key by key."""
+        if steps and _read_in_script_enabled() and getattr(driver, "supports_steps", False):
+            return read_screen(steps)
+        send_keys(steps)
+        return read_screen()
 
     def log_timing(outcome: str, item_pages: int) -> None:
         total = time.monotonic() - started
@@ -968,17 +1030,15 @@ def capture_order(
             order_number,
         )
     else:
-        # F6 opens a fresh order search before each new order.
-        driver.key("f6")
-        time.sleep(page_wait)
-
         # Page 1: customer header. Typing the last digit surfaces it automatically.
-        search_norm = _norm_screen(screen)
-        driver.type_text(str(order_number))
+        # F6 opens a fresh order search before each new order; it, the number and
+        # the read that follows are one script when the driver allows it.
         if wait_for_settled:
             # Waiting for the header to REPLACE the search screen, not just for
             # 800 ms: reading too early here would hand the search screen to the
             # checks below, which would happily call it an order view and press F5.
+            search_norm = _norm_screen(screen)
+            send_keys([("key", "f6"), ("wait", page_wait), ("text", str(order_number))])
             header, _ = _await_changed_page(
                 read_screen,
                 search_norm,
@@ -988,8 +1048,14 @@ def capture_order(
                 on_stale=lambda: stats.__setitem__("stale", stats["stale"] + 1),
             )
         else:
-            time.sleep(page_wait)
-            header = read_screen()
+            header = send_and_read(
+                [
+                    ("key", "f6"),
+                    ("wait", page_wait),
+                    ("text", str(order_number)),
+                    ("wait", page_wait),
+                ]
+            )
 
     pages = [header]
     log.info("AS400 header captured: %d chars", len(header))
@@ -1029,16 +1095,18 @@ def capture_order(
             f"{order_number} doesn't exist). Go to order search (F7 → 3) and try again."
         )
 
-    # Switch to the items view (once).
-    driver.key("f5")
-
     # The last page we acted on. We only page forward once the screen differs from
     # this, so a not-yet-refreshed (stale) copy never triggers a second ENTER.
     prev_norm = _norm_screen(header)
 
+    # F5 switches to the items view (once); ENTER pages from there. The key now
+    # travels in the same script as the read that follows it.
+    pending_key = "f5"
+
     for i in range(1, max_pages + 1):
         waiting_from = time.monotonic()
         if wait_for_settled:
+            send_keys([("key", pending_key)])
             page, _ = _await_changed_page(
                 read_screen,
                 prev_norm,
@@ -1048,8 +1116,7 @@ def capture_order(
                 on_stale=lambda: stats.__setitem__("stale", stats["stale"] + 1),
             )
         else:
-            time.sleep(page_wait)
-            page = read_screen()
+            page = send_and_read([("key", pending_key), ("wait", page_wait)])
 
             # Wait for the screen to actually advance before trusting it. If it's
             # still showing the previous page, keep polling instead of paging again.
@@ -1095,7 +1162,7 @@ def capture_order(
 
         pages.append(page)
         prev_norm = _norm_screen(page)
-        driver.key("enter")
+        pending_key = "enter"
 
     log_timing("hit the page cap", max_pages)
     raise CaptureError(
