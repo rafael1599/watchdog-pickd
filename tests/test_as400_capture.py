@@ -37,6 +37,7 @@ from as400_capture import (
     bootstrap_session,
     build_copy_screen_script,
     build_focus_script,
+    build_read_screen_script,
     capture_order,
     classify_screen,
     run_login,
@@ -384,6 +385,10 @@ _SCRIPTS = {
     "focus by name": build_focus_script("Mocha TN5250", None, 0.4),
     "focus by bundle id": build_focus_script("x", "com.mochasoft.tn5250", 0.4),
     "delays at zero": build_copy_screen_script("Mocha TN5250", None, 0, 0, 0),
+    "whole read by name": build_read_screen_script("Mocha TN5250", None, 0.4, 0.15, "__S__1", 1.0),
+    "whole read by bundle id": build_read_screen_script(
+        "x", "dk.mochasoft.tn5250", 0.4, 0.15, "__S__1", 1.0
+    ),
 }
 
 
@@ -487,6 +492,37 @@ def test_the_copy_script_no_longer_sleeps_after_the_copy():
     # The trailing delay is what the clipboard poll replaces.
     script = build_copy_screen_script("Mocha TN5250", None, 0.4, 0.15, 0.0)
     assert script.rstrip().endswith('keystroke "c" using command down\n  delay 0.0\nend tell')
+
+
+def test_the_whole_read_can_be_one_process(monkeypatch):
+    # On Bay 2 a process costs ~0.52s, so spawning pbcopy and pbpaste around the
+    # script cost more than the copy itself. This path does the lot in one.
+    monkeypatch.setenv("AS400_READ_IN_SCRIPT", "1")
+    driver = MochaDriver(app_name="Mocha TN5250")
+    scripts = []
+
+    def fake_osascript(script, capture=False):
+        scripts.append(script)
+        return "SCREEN TEXT\n"  # osascript adds the newline
+
+    driver._osascript = fake_osascript
+    monkeypatch.setattr(
+        "as400_capture.subprocess.run", lambda *a, **k: pytest.fail("no process should be spawned")
+    )
+
+    assert driver.copy_screen() == "SCREEN TEXT"
+    assert len(scripts) == 1
+    assert "set the clipboard to" in scripts[0]
+    assert "the clipboard as text" in scripts[0]
+
+
+def test_the_one_process_read_still_fails_loudly_when_nothing_was_copied(monkeypatch):
+    monkeypatch.setenv("AS400_READ_IN_SCRIPT", "1")
+    driver = MochaDriver(app_name="Mocha TN5250")
+    # The script hands back the sentinel it stamped: nothing replaced it.
+    driver._osascript = lambda script, capture=False: script.split('"')[1] + "\n"
+    with pytest.raises(CaptureError):
+        driver.copy_screen()
 
 
 def test_a_read_that_did_not_copy_still_raises(monkeypatch):

@@ -18,6 +18,12 @@ import time
 
 log = logging.getLogger("pickd-as400")
 
+NO_COPY_MESSAGE = (
+    "Cmd+A/Cmd+C didn't copy the AS400 screen (the clipboard didn't change). "
+    "Make sure Mocha stays in front and copies with Cmd+A+Cmd+C; "
+    "if Mocha copies a different way (Edit menu), let me know which."
+)
+
 END_OF_ORDER_MARKER = "END OF ORDER"
 MOCHA_APP_NAME = os.getenv("MOCHA_APP_NAME", "Mocha TN5250")
 
@@ -56,6 +62,9 @@ SELECT_DELAY_DEFAULT = 0.15
 COPY_DELAY_DEFAULT = 0.0
 CLIP_TIMEOUT_DEFAULT = 1.0  # five times more patient than the 0.2s sleep it replaces
 CLIP_POLL_DEFAULT = 0.02
+# Doing the whole read inside one osascript — sentinel, keys, clipboard wait and
+# the text itself — instead of spawning pbcopy/pbpaste around it (plan F7).
+READ_IN_SCRIPT_DEFAULT = False
 
 
 def _env_float(name: str, default: float) -> float:
@@ -278,6 +287,16 @@ def _single_script_enabled() -> bool:
     return os.getenv("AS400_SINGLE_SCRIPT", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _read_in_script_enabled() -> bool:
+    """Whether a screen read is one osascript end to end (plan F7).
+
+    Off by default: it takes the screen text out through AppleScript's own
+    clipboard access instead of pbpaste, and text is exactly the thing worth
+    checking against a real terminal before trusting it everywhere.
+    """
+    return os.getenv("AS400_READ_IN_SCRIPT", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _wait_for_settled_enabled() -> bool:
     """Whether paging waits for the screen (plan F4) or sleeps a fixed time."""
     return os.getenv("AS400_WAIT_FOR_SETTLED", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -480,6 +499,42 @@ def build_focus_script(app_name, bundle_id, settle: float) -> str:
     )
 
 
+def build_read_screen_script(
+    app_name, bundle_id, settle: float, select_delay: float, sentinel: str, timeout: float
+) -> str:
+    """The ENTIRE screen read as one osascript, text included (plan F7).
+
+    On the Bay 2 MacBook Air a process costs ~0.52s to start, so polling the
+    clipboard by spawning pbpaste was costing ~0.4s of the 1.09s a read took —
+    more than the copy itself. AppleScript can watch its own clipboard and hand
+    the text back on stdout, so the read becomes one process instead of three.
+
+    The sentinel logic is identical, just moved inside: the clipboard is stamped,
+    the keys are pressed, and the script waits for the stamp to be replaced. If it
+    never is, it returns the sentinel and the caller raises exactly as before.
+    """
+    _applescript_literal(sentinel)
+    ticks = max(1, int(timeout / 0.05))
+    return (
+        f'set the clipboard to "{sentinel}"\n'
+        'tell application "System Events"\n'
+        + _activation_lines(app_name, bundle_id, settle)
+        + '\n  keystroke "a" using command down\n'
+        f"  delay {select_delay}\n"
+        '  keystroke "c" using command down\n'
+        "end tell\n"
+        f'set screenText to "{sentinel}"\n'
+        f"repeat {ticks} times\n"
+        "  try\n"
+        "    set screenText to (the clipboard as text)\n"
+        "  end try\n"
+        f'  if screenText is not "{sentinel}" then exit repeat\n'
+        "  delay 0.05\n"
+        "end repeat\n"
+        "return screenText"
+    )
+
+
 def build_copy_screen_script(
     app_name, bundle_id, settle: float, select_delay: float, copy_delay: float
 ) -> str:
@@ -517,7 +572,7 @@ class MochaDriver:
         bundle_re = r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$"
         self.bundle_id = self.launch_target if re.match(bundle_re, self.launch_target) else None
 
-    def _osascript(self, script: str):
+    def _osascript(self, script: str, capture: bool = False):
         """Run one AppleScript — always with a timeout.
 
         Without it, a hung osascript (Mocha showing a dialog, macOS asking for an
@@ -527,7 +582,14 @@ class MochaDriver:
         """
         timeout = _env_float("AS400_OSASCRIPT_TIMEOUT", OSASCRIPT_TIMEOUT_DEFAULT)
         try:
-            subprocess.run(["osascript", "-e", script], check=True, timeout=timeout)
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                check=True,
+                timeout=timeout,
+                capture_output=capture,
+                text=capture,
+            )
+            return result.stdout if capture else None
         except subprocess.TimeoutExpired as e:
             raise CaptureError(
                 f"AppleScript didn't answer in {timeout:.0f}s. Mocha may be showing a dialog, "
@@ -596,6 +658,27 @@ class MochaDriver:
         """
         clip_timeout = _env_float("AS400_OSASCRIPT_TIMEOUT", OSASCRIPT_TIMEOUT_DEFAULT)
         sentinel = f"__PICKD_NO_COPY__{time.time()}"
+
+        if _read_in_script_enabled():
+            # One process for the whole read: stamp, keys, wait, and the text back
+            # on stdout. On a Mac where a process costs half a second, spawning
+            # pbcopy and pbpaste around the script cost more than the copy did.
+            out = self._osascript(
+                build_read_screen_script(
+                    self.app_name,
+                    self.bundle_id,
+                    _env_float("AS400_FOCUS_SETTLE", FOCUS_SETTLE_DEFAULT),
+                    _env_float("AS400_SELECT_DELAY", SELECT_DELAY_DEFAULT),
+                    sentinel,
+                    _env_float("AS400_CLIP_TIMEOUT", CLIP_TIMEOUT_DEFAULT),
+                ),
+                capture=True,
+            )
+            out = out[:-1] if out.endswith("\n") else out  # osascript adds one
+            if out == sentinel:
+                raise CaptureError(NO_COPY_MESSAGE)
+            return out
+
         subprocess.run(["pbcopy"], input=sentinel, text=True, check=True, timeout=clip_timeout)
 
         settle = _env_float("AS400_FOCUS_SETTLE", FOCUS_SETTLE_DEFAULT)
@@ -635,11 +718,7 @@ class MochaDriver:
             if out != sentinel:
                 return out
             if time.monotonic() >= deadline:
-                raise CaptureError(
-                    "Cmd+A/Cmd+C didn't copy the AS400 screen (the clipboard didn't change). "
-                    "Make sure Mocha stays in front and copies with Cmd+A+Cmd+C; "
-                    "if Mocha copies a different way (Edit menu), let me know which."
-                )
+                raise CaptureError(NO_COPY_MESSAGE)
             if poll:
                 time.sleep(poll)
 

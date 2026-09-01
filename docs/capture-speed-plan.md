@@ -14,17 +14,16 @@ llama (auto_scanner.py). Nada de parser, nada de Supabase, nada de UI.
 
 | | al empezar | meta | dónde estamos |
 |---|---|---|---|
-| una lectura de pantalla | 1,19 s | ≤ 0,5 s | **0,53 s medidos** ✅ |
-| captura manual (la orden ya en pantalla) | 9,1 s | ≤ 4,5 s | **~3,6 s** ✅ |
-| captura del scanner (orden no en pantalla) | 9,1 s | ≤ 4,5 s | ~6,0 s — falta F4 |
+| una lectura de pantalla (esta Mac) | 1,26 s | ≤ 0,5 s | **0,40 s medidos** ✅ |
+| **una captura en Bay 2** | **11,95 s medidos** | ≤ 6 s | **7,41 s medidos** — 1,6× |
+| una lectura en Bay 2 | 2,33 s | — | 1,09 s |
 | órdenes con `total_mismatch` en 3 días | 0 | **0** | por comprobar en Bay 2 |
 | capturas `incomplete` nuevas en 3 días | — | **0** | por comprobar en Bay 2 |
 
-Las dos filas de captura son **cálculos** sobre la lectura medida (0,53 s) y las teclas (0,14 s), no
-mediciones de Bay 2: el log de F0 es el que las confirma o las desmiente.
-
-**El objetivo ya se cumple para el camino que Rafael describió** — mirar la orden en Mocha y
-capturarla desde la UI: de 9,1 s a ~3,6 s, 2,5×. El camino del scanner se queda en 1,5× hasta F4.
+**Las dos filas de Bay 2 son medidas de verdad**, la misma orden (#881332) antes y después. Y
+enseñaron lo que ningún cálculo de aquí podía: en esa MacBook Air **un `osascript` cuesta 0,52 s
+contra 0,14 aquí, 3,7 veces más**. Lo que quita procesos vale ahí casi cuatro veces lo que vale aquí
+— y lo que sustituye una espera por una lectura (F4) sale al revés.
 
 La última fila es la que importa: `total_mismatch` (el Sub-Total del header contra la suma de
 las líneas parseadas, ya implementado en `pipeline.preview_order`) es **el detector de una
@@ -273,15 +272,10 @@ Se enciende a propósito, mirando el log.
 **Y cuesta menos de lo que estimé.** Con la lectura ya en 0,53 s, comprobar que la pantalla está
 quieta (una segunda lectura idéntica) cuesta casi lo mismo que el `sleep(0.8)` que sustituye:
 
-| | scanner | captura manual |
-|---|---|---|
-| con F6 puesta (lectura de 0,40 s) | 5,22 s | 2,98 s |
-| **+ F4 con `AS400_SETTLED_READS=2`** | **4,02 s** | **2,18 s** |
-| + F4 con `AS400_SETTLED_READS=1` | 3,22 s | 1,78 s |
-
-(La tabla mejoró respecto a lo que decía ayer: cuanto más barata es la lectura, más rentable sale
-comprobar que la pantalla está quieta. Con lecturas de 0,53 s F4 valía 0,8 s; con las de 0,40 s vale
-1,2 s en el camino del scanner.)
+**En Bay 2, F4 no sale a cuenta y hay que decirlo.** Con lecturas de 1,09 s, sustituir el
+`sleep(0.8)` por dos lecturas cuesta **más** de lo que ahorra (2,18 s contra 1,89 s por transición).
+Todo lo contrario de lo que calculé sobre esta Mac, donde una lectura es barata. F4 se queda escrita
+y apagada; el cálculo que la justificaba sólo valía para máquinas rápidas.
 
 La diferencia entre 5,2 y 3,6 es exactamente la comprobación de estabilidad, y **bajarla a 1 es
 reabrir el fallo de junio por el otro lado**: una página a medio pintar se acepta, se pulsa ENTER, y
@@ -315,6 +309,28 @@ De paso se fue el `focus()` del principio de cada captura: desde F3 la propia le
 si hace falta, en el mismo script, así que eran dos Apple events preguntando lo mismo.
 
 **Medido:** la lectura pasa de **554 ms a 402 ms**. Captura manual **3,5 s → 3,0 s**.
+
+### F7 — La lectura entera en un solo proceso · **escrita y apagada** (`AS400_READ_IN_SCRIPT=1`)
+**Medido en Bay 2, no aquí.** La primera captura real con F2/F3/F6 puestas dio 7,41 s con lecturas de
+**1,09 s**, y el desglose es demoledor:
+
+| dentro de una lectura en Bay 2 | |
+|---|---|
+| el `osascript` | ~0,67 s |
+| **sondear el portapapeles con `pbpaste`** | **~0,40 s** |
+
+En esa máquina **lanzar un proceso cuesta 0,52 s** (aquí 0,14). Así que sondear el portapapeles
+lanzando `pbpaste` una y otra vez costaba más que la copia. AppleScript puede mirar su propio
+portapapeles y **devolver el texto por stdout**, así que la lectura entera cabe en un proceso:
+estampar el centinela, pulsar las teclas, esperar a que el centinela desaparezca, devolver la
+pantalla.
+
+El centinela sigue siendo el mismo guardia, sólo que dentro: si nadie copió, el script devuelve el
+centinela y el llamador lanza el mismo error de siempre.
+
+**Apagada por defecto** porque saca el texto por una vía nueva. Verificado aquí que las dos
+pantallas reales del repo vuelven **byte a byte idénticas** por `the clipboard as text` y que
+`parse_order` las entiende igual — pero el veredicto es del terminal de verdad.
 
 ### F5 — El ritmo alrededor de la captura (sólo `.env`, sin código)
 - `SCAN_FOUND_DELAY_SEC` 5 → 1. La Mac de Bay 2 está casi siempre libre (Rafael, 1 sep 2026) y el
@@ -368,6 +384,9 @@ crece dentro del bucle antes de acelerarlo; mirado, no crece.
   con «Unknown key: f7» la primera vez que Rafael la probó. Los drivers falsos de los tests
   aceptaban cualquier tecla, así que 383 tests pasaban sobre código imposible. Ahora validan contra
   la misma tabla que usa el driver real.
+- **2 sep 2026** — **Primera medida real en Bay 2**: 11,95 s → 7,41 s en la misma orden. Un
+  `osascript` cuesta ahí 0,52 s (3,7× esta Mac), así que el reparto del tiempo es otro: F4 pasa a ser
+  contraproducente y **quitar procesos** es lo único que queda grande. De ahí F7.
 - **2 sep 2026** — F4 escrita y **apagada**; F5 se queda en dos líneas de `.env` tras medir que la
   caché que proponía ahorraba 0,11 ms.
 - **1 sep 2026** — F2 y F3 escritas: son un solo script, así que se implementan y se despliegan
