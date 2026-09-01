@@ -96,7 +96,7 @@ que ya estaba), y el auto-archive re-archivaba en cada poll hasta 48 MB / 9.210 
 
 ## 5. Las fases, en orden de despliegue
 
-### F0 — Instrumentar (se despliega esto solo; 0 s de ganancia)
+### F0 — Instrumentar (se despliega esto solo; 0 s de ganancia) · **implementada, sin desplegar**
 Sin esto, «el doble» no es verificable, y ese fue literalmente el fallo de §3.1: se cambió el
 paginado sin saber cuánto tarda en refrescar el 5250 real.
 
@@ -108,15 +108,28 @@ paginado sin saber cuánto tarda en refrescar el 5250 real.
 - Se deja un día. **Salida: el número real de la Mac de Bay 2.** Si es Intel, el spawn de
   `osascript` puede costar 300-400 ms y la captura de hoy ser de 15-20 s, no de 9.
 
-### F1 — Timeouts y tunabilidad (0 s de ganancia; es el seguro de todo lo demás)
+Una línea por captura, al terminar, en `logs/app-stdout.log`:
+
+```
+AS400 #881310 captured in 1.76s — 8 reads (0.42s), 3 item pages, 0.47s waiting for refresh, 3 stale reads
+```
+
+Sale también en los dos finales que importan (`stalled`, `hit the page cap`), así que una captura que
+falla dice cuánto esperó antes de rendirse. Y el scanner escribe una línea **por pausa**, no por
+vuelta: `auto-scan: resumed after 340s paused (the operator was on the keyboard)`.
+
+### F1 — Timeouts y tunabilidad (0 s de ganancia; es el seguro de todo lo demás) · **implementada, sin desplegar**
 - **`MochaDriver._osascript` no tiene `timeout`.** Un `osascript` colgado (un diálogo modal, un
   prompt de permisos) bloquea el hilo del scanner **con `capture_lock` tomado**: el scanner se
   queda mudo *y* las capturas manuales cuelgan detrás. `timeout=10` → `CaptureError`.
-- `page_wait`, `poll_interval`, `refresh_timeout` → env vars con los valores de hoy
-  (`AS400_PAGE_WAIT=0.8`, `AS400_POLL_INTERVAL=0.3`, `AS400_REFRESH_TIMEOUT=5.0`) y documentadas
-  en `.env.example`.
-- `type_text` en la ruta de captura: sólo dígitos (hoy un `"` en el número de orden rompe el
-  AppleScript y devuelve un 500 sin explicación).
+- `page_wait`, `poll_interval`, `refresh_timeout` → env vars con **los valores de hoy** como
+  default (`AS400_PAGE_WAIT=0.8`, `AS400_POLL_INTERVAL=0.3`, `AS400_REFRESH_TIMEOUT=5.0`,
+  `AS400_OSASCRIPT_TIMEOUT=10`), documentadas en `.env.example`. Se leen **en cada llamada**, no al
+  importar, así que un `.env` cargado después gana; pasar un número por argumento sigue mandando,
+  que es lo que mantiene los tests independientes del entorno.
+- El número de orden se valida (son dígitos) antes de llegar al terminal, y `type_text` escapa
+  comillas y barras: hasta ahora un `"` rompía el AppleScript y salía como un 500 sin explicación.
+- Las llamadas a `pbcopy`/`pbpaste` también llevan timeout.
 
 ### F1b — Continuar desde la orden que ya está en pantalla (−3,1 s) · **implementada, sin desplegar**
 Reportado por Rafael el 1 sep 2026: *«cuando busco una orden, aunque ya esté en AS400 y el watcher
@@ -287,6 +300,9 @@ segundos**, con casos 0 / 0,5 / 2 / 6 s y uno que no refresca nunca.
 - **1 sep 2026** — Rafael reporta que la captura retrocede a la pantalla de búsqueda aunque la
   orden ya esté delante. Confirmado en `capture_order` y corregido (F1b): la pantalla ya leída se
   reutiliza cuando es el header de esa misma orden. Es −3,1 s de −4,9 s del objetivo total.
+- **1 sep 2026** — F0 y F1 escritas y commiteadas. Ya son cinco fases en el repo y **cero
+  desplegadas**: el orden de despliegue (1: F0+F1 · 2: F1b+F1c+F1d · 3: F2+F3 · 4: F4) importa
+  precisamente porque el número base tiene que salir antes de que F1b lo cambie.
 - **1 sep 2026** — Rafael manda dos órdenes reales completas (881310 y 880996) «para que no tomes
   esa anterior como patrón repetitivo definitivo». Entran como fixtures y de ahí salen F1d, un bug
   del parser (`Ship Via` vacío se tragaba la columna vecina), `R&L` como transportista de camión, y

@@ -260,13 +260,25 @@ def _loop() -> None:
     )
     _interruptible_wait(SCAN_INITIAL_DELAY_SEC)
     driver = None
+    paused_since = None
     while not _stop.is_set():
         # Pause while the operator is actively using the computer, or while a manual
         # capture holds the lock — never fight the human for the keyboard. A manual
         # kick skips the activity gate: the operator asked for this pass explicitly.
         if system_idle_seconds() < IDLE_THRESHOLD_SEC and not _kick.is_set():
+            if paused_since is None:
+                paused_since = time.monotonic()
             _interruptible_wait(IDLE_POLL_SEC)
             continue
+        if paused_since is not None:
+            # Measurement (plan F0): how much of the day the scanner spends yielding
+            # the keyboard is the other half of "why did that order take so long to
+            # show up". One line per pause, not one per poll.
+            log.info(
+                "auto-scan: resumed after %.0fs paused (the operator was on the keyboard)",
+                time.monotonic() - paused_since,
+            )
+            paused_since = None
         if not capture_lock.acquire(blocking=False):
             # Keep a pending kick armed while the manual capture finishes, but
             # poll faster so the kicked pass starts right after it.

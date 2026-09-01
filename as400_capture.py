@@ -28,6 +28,32 @@ AS400_LAUNCH_TARGET = os.getenv("AS400_LAUNCH_TARGET", MOCHA_APP_NAME)
 # Seconds to wait after launching before the emulator is ready to receive keys.
 LAUNCH_WAIT = float(os.getenv("AS400_LAUNCH_WAIT", "5"))
 
+# ── Tunables (plan F1) ───────────────────────────────────────────────────────
+# Every wait the capture makes lives here, and every one is read at CALL time,
+# not at import: a .env loaded later still wins, and the Bay 2 Mac can be retuned
+# with an edit + restart instead of a deploy — which is a trip to Bay 2. The
+# defaults ARE the values that were hardcoded until now, so turning them into
+# knobs changed no behaviour by itself.
+PAGE_WAIT_DEFAULT = 0.8  # after F6, after typing the number, after each ENTER
+POLL_INTERVAL_DEFAULT = 0.3  # between re-reads while the screen hasn't refreshed
+REFRESH_TIMEOUT_DEFAULT = 5.0  # how long to wait for the screen to advance
+# A hung osascript runs on the capture thread WITH capture_lock held, so it
+# freezes the scanner and every manual capture queued behind it.
+OSASCRIPT_TIMEOUT_DEFAULT = 10.0
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float from the environment, falling back loudly on garbage."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("%s=%r is not a number — using %s", name, raw, default)
+        return default
+
+
 # Login macro: replicates "ROMAN + TAB + STOU + ENTER + ENTER + 3 + ENTER" to reach the
 # order-search screen. Each step is (kind, value): kind in {"text", "key", "wait"}.
 # Edit here if the real sequence/timing differs.
@@ -322,7 +348,22 @@ class MochaDriver:
         self.bundle_id = self.launch_target if re.match(bundle_re, self.launch_target) else None
 
     def _osascript(self, script: str):
-        subprocess.run(["osascript", "-e", script], check=True)
+        """Run one AppleScript — always with a timeout.
+
+        Without it, a hung osascript (Mocha showing a dialog, macOS asking for an
+        Automation permission) blocked the capture thread forever while it held
+        capture_lock: the scanner went silent and manual captures hung behind it,
+        with nothing in the log to say why.
+        """
+        timeout = _env_float("AS400_OSASCRIPT_TIMEOUT", OSASCRIPT_TIMEOUT_DEFAULT)
+        try:
+            subprocess.run(["osascript", "-e", script], check=True, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            raise CaptureError(
+                f"AppleScript didn't answer in {timeout:.0f}s. Mocha may be showing a dialog, "
+                "or macOS is asking for an Automation permission — check the screen on the "
+                "Bay 2 Mac."
+            ) from e
 
     def launch(self):
         """Launch (or focus, if already running) the emulator via `open`.
@@ -352,7 +393,10 @@ class MochaDriver:
         time.sleep(0.4)
 
     def type_text(self, text: str):
-        self._osascript(f'tell application "System Events" to keystroke "{text}"')
+        # Escaped for the AppleScript string literal: a quote or a backslash in the
+        # value used to break the script and surface as an unexplained 500.
+        safe = str(text).replace("\\", "\\\\").replace('"', '\\"')
+        self._osascript(f'tell application "System Events" to keystroke "{safe}"')
 
     def key(self, name: str):
         """Press a special key: 'enter', 'tab', 'f5' or 'f6'."""
@@ -370,15 +414,18 @@ class MochaDriver:
         Cmd+A) — we raise instead of looping forever on stale clipboard content.
         """
         self.focus()
+        clip_timeout = _env_float("AS400_OSASCRIPT_TIMEOUT", OSASCRIPT_TIMEOUT_DEFAULT)
         sentinel = f"__PICKD_NO_COPY__{time.time()}"
-        subprocess.run(["pbcopy"], input=sentinel, text=True, check=True)
+        subprocess.run(["pbcopy"], input=sentinel, text=True, check=True, timeout=clip_timeout)
 
         self._osascript('tell application "System Events" to keystroke "a" using command down')
         time.sleep(0.15)
         self._osascript('tell application "System Events" to keystroke "c" using command down')
         time.sleep(0.2)
 
-        out = subprocess.run(["pbpaste"], capture_output=True, text=True, check=True).stdout
+        out = subprocess.run(
+            ["pbpaste"], capture_output=True, text=True, check=True, timeout=clip_timeout
+        ).stdout
         if out == sentinel:
             raise CaptureError(
                 "Cmd+A/Cmd+C didn't copy the AS400 screen (the clipboard didn't change). "
@@ -520,10 +567,10 @@ def bootstrap_session(
 def capture_order(
     order_number: str,
     driver,
-    page_wait: float = 0.8,
+    page_wait=None,
     max_pages: int = 25,
-    poll_interval: float = 0.3,
-    refresh_timeout: float = 5.0,
+    poll_interval=None,
+    refresh_timeout=None,
     reuse_header=None,
 ) -> str:
     """
@@ -533,6 +580,10 @@ def capture_order(
         order_number: the order number to type.
         driver:       object with focus(), type_text(str), key(str), copy_screen()->str.
         page_wait:    seconds to wait for the screen to refresh before copying.
+                      None → AS400_PAGE_WAIT, default 0.8 (same for poll_interval
+                      → AS400_POLL_INTERVAL and refresh_timeout →
+                      AS400_REFRESH_TIMEOUT). Passing a number wins, so tests stay
+                      independent of the environment.
         max_pages:    safety cap on item pages to avoid an infinite loop if the
                       END OF ORDER marker never appears.
 
@@ -544,12 +595,53 @@ def capture_order(
     ENTER, copy_screen() returns the previous page (no END OF ORDER), the loop
     presses ENTER again, and the genuinely-new page is skipped — losing its items.
     """
+    if page_wait is None:
+        page_wait = _env_float("AS400_PAGE_WAIT", PAGE_WAIT_DEFAULT)
+    if poll_interval is None:
+        poll_interval = _env_float("AS400_POLL_INTERVAL", POLL_INTERVAL_DEFAULT)
+    if refresh_timeout is None:
+        refresh_timeout = _env_float("AS400_REFRESH_TIMEOUT", REFRESH_TIMEOUT_DEFAULT)
+
+    # AS400 order numbers are digits. Anything else is a caller mistake, and it used
+    # to reach the terminal as keystrokes inside an AppleScript string.
+    if not str(order_number).strip().isdigit():
+        raise OrderNotFound(f"{order_number!r} isn't an AS400 order number (they are digits).")
+
+    # ── measurement (plan F0) ────────────────────────────────────────────────
+    # Where the time actually goes, per capture, in the log of the machine that
+    # matters. No phase after this one tunes a wait without a number from here.
+    started = time.monotonic()
+    stats = {"reads": 0, "read_s": 0.0, "wait_s": 0.0, "stale": 0}
+
+    def read_screen() -> str:
+        stats["reads"] += 1
+        at = time.monotonic()
+        try:
+            return driver.copy_screen()
+        finally:
+            stats["read_s"] += time.monotonic() - at
+
+    def log_timing(outcome: str, item_pages: int) -> None:
+        total = time.monotonic() - started
+        log.info(
+            "AS400 #%s %s in %.2fs — %d reads (%.2fs), %d item pages, "
+            "%.2fs waiting for refresh, %d stale reads",
+            order_number,
+            outcome,
+            total,
+            stats["reads"],
+            stats["read_s"],
+            item_pages,
+            stats["wait_s"],
+            stats["stale"],
+        )
+
     driver.focus()
 
     # Verify the screen BEFORE driving it: never type an order number into a
     # disconnected or unrecognized view (that's how a dead session silently
     # swallowed keystrokes and still looked "fine").
-    screen = driver.copy_screen()
+    screen = read_screen()
     state = classify_screen(screen)
     if state == STATE_DISCONNECTED:
         raise AS400Disconnected(
@@ -586,7 +678,7 @@ def capture_order(
         # Page 1: customer header. Typing the last digit surfaces it automatically.
         driver.type_text(str(order_number))
         time.sleep(page_wait)
-        header = driver.copy_screen()
+        header = read_screen()
 
     pages = [header]
     log.info("AS400 header captured: %d chars", len(header))
@@ -635,15 +727,18 @@ def capture_order(
 
     for i in range(1, max_pages + 1):
         time.sleep(page_wait)
-        page = driver.copy_screen()
+        page = read_screen()
 
         # Wait for the screen to actually advance before trusting it. If it's still
         # showing the previous page, keep polling instead of paging again.
         waited = 0.0
+        waiting_from = time.monotonic()
         while _norm_screen(page) == prev_norm and waited < refresh_timeout:
+            stats["stale"] += 1
             time.sleep(poll_interval)
             waited += poll_interval
-            page = driver.copy_screen()
+            page = read_screen()
+        stats["wait_s"] += time.monotonic() - waiting_from
 
         # A VOID order can route to the message-detail screen after F5. Recover by
         # pressing F6 (back to order search) and skip — never page-loop on it.
@@ -665,11 +760,13 @@ def capture_order(
         )
         if found:
             log.info("END OF ORDER found on page %d — stopping.", i)
+            log_timing("captured", i)
             return "\n".join(pages + [page])
         if stale:
             # Screen never changed within the timeout: the order likely ended
             # without an END OF ORDER marker (or the session stalled). Stop here
             # rather than paging blindly and risk skipping/duplicating content.
+            log_timing("stalled", i)
             raise CaptureError(
                 f"The AS400 screen didn't advance for order {order_number} "
                 f"(no '{END_OF_ORDER_MARKER}' and no new page appeared). Capture aborted."
@@ -679,6 +776,7 @@ def capture_order(
         prev_norm = _norm_screen(page)
         driver.key("enter")
 
+    log_timing("hit the page cap", max_pages)
     raise CaptureError(
         f"'{END_OF_ORDER_MARKER}' didn't appear after {max_pages} pages for order "
         f"{order_number}. Capture aborted."

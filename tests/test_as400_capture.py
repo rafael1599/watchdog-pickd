@@ -8,6 +8,8 @@ flow and the multi-page accumulation without driving Mocha.
 import pytest
 
 from as400_capture import (
+    OSASCRIPT_TIMEOUT_DEFAULT,
+    PAGE_WAIT_DEFAULT,
     STATE_CUSTOMER_DISPLAY,
     STATE_DISCONNECTED,
     STATE_LOGIN,
@@ -19,7 +21,10 @@ from as400_capture import (
     AS400Disconnected,
     AS400ManualLoginRequired,
     CaptureError,
+    MochaDriver,
+    OrderNotFound,
     OrderVoidSkip,
+    _env_float,
     _has_end_marker,
     _is_invalid_order,
     _is_message_info_screen,
@@ -310,6 +315,52 @@ def test_void_order_already_on_screen_still_skips_before_f5():
     with pytest.raises(OrderVoidSkip):
         capture_order("880138", driver, page_wait=0, reuse_header=True)
     assert "f5" not in driver.keys
+
+
+# ── Tunability and guards (plan F1) ─────────────────────────────────────────
+
+
+def test_env_float_reads_a_value_and_falls_back_on_garbage(monkeypatch):
+    monkeypatch.setenv("AS400_TEST_KNOB", "1.25")
+    assert _env_float("AS400_TEST_KNOB", 9.0) == 1.25
+    monkeypatch.setenv("AS400_TEST_KNOB", "  ")
+    assert _env_float("AS400_TEST_KNOB", 9.0) == 9.0
+    # Garbage must not take the capture down — it warns and uses the default.
+    monkeypatch.setenv("AS400_TEST_KNOB", "muy rapido")
+    assert _env_float("AS400_TEST_KNOB", 9.0) == 9.0
+    monkeypatch.delenv("AS400_TEST_KNOB")
+    assert _env_float("AS400_TEST_KNOB", 9.0) == 9.0
+
+
+def test_the_defaults_are_the_values_that_were_hardcoded():
+    # Turning the waits into knobs must not change behaviour by itself.
+    assert PAGE_WAIT_DEFAULT == 0.8
+    assert OSASCRIPT_TIMEOUT_DEFAULT == 10.0
+
+
+def test_page_wait_comes_from_the_environment_when_not_passed(monkeypatch):
+    monkeypatch.setenv("AS400_PAGE_WAIT", "0")
+    slept = []
+    monkeypatch.setattr("as400_capture.time.sleep", lambda s: slept.append(s))
+    driver = FakeDriver([READY, "ORDER INQUIRY", "item\nEND OF ORDER"])
+    capture_order("880005", driver)  # no page_wait argument
+    assert slept and all(s == 0 for s in slept)
+
+
+def test_a_non_numeric_order_number_never_reaches_the_terminal():
+    driver = FakeDriver([READY])
+    with pytest.raises(OrderNotFound):
+        capture_order('88" or so', driver, page_wait=0)
+    assert driver.keys == []
+    assert driver.typed is None
+
+
+def test_type_text_escapes_a_quote_instead_of_breaking_the_script():
+    driver = MochaDriver()
+    sent = []
+    driver._osascript = lambda script: sent.append(script)
+    driver.type_text('88"13')
+    assert sent == ['tell application "System Events" to keystroke "88\\"13"']
 
 
 class LaggyTerminalDriver:
