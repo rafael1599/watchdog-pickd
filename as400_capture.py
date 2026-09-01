@@ -824,6 +824,9 @@ def capture_order(
     # Where the time actually goes, per capture, in the log of the machine that
     # matters. No phase after this one tunes a wait without a number from here.
     started = time.monotonic()
+    # wait_s is the whole page transition (the pause plus the read that follows),
+    # not just the stall: "3.15s waiting for refresh, 0 stale reads" read as a
+    # contradiction in the first real log line it produced.
     stats = {"reads": 0, "read_s": 0.0, "wait_s": 0.0, "stale": 0}
 
     def read_screen() -> str:
@@ -838,7 +841,7 @@ def capture_order(
         total = time.monotonic() - started
         log.info(
             "AS400 #%s %s in %.2fs — %d reads (%.2fs), %d item pages, "
-            "%.2fs waiting for refresh, %d stale reads",
+            "%.2fs on page transitions, %d stale reads",
             order_number,
             outcome,
             total,
