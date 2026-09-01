@@ -43,6 +43,12 @@ OSASCRIPT_TIMEOUT_DEFAULT = 10.0
 # Inside the screen-read script (plan F2/F3): settle after bringing Mocha up, and
 # the two pauses around Cmd+A / Cmd+C. They used to be Python sleeps between three
 # separate osascript processes; now they run inside the one script.
+# Waiting for the screen instead of for the clock (plan F4). OFF by default: it
+# is the one phase that changes WHEN we trust a screen, and everything ships on
+# main, so it must not ride along on an unrelated update.
+SETTLED_READS_DEFAULT = 2  # identical reads in a row before a new page is trusted
+SETTLE_POLL_DEFAULT = 0.0  # extra pause between those reads; the read IS the interval
+REFRESH_DEADLINE_DEFAULT = 25.0  # wall clock — see the comment in _await_changed_page
 FOCUS_SETTLE_DEFAULT = 0.4
 SELECT_DELAY_DEFAULT = 0.15
 COPY_DELAY_DEFAULT = 0.2
@@ -268,6 +274,11 @@ def _single_script_enabled() -> bool:
     return os.getenv("AS400_SINGLE_SCRIPT", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _wait_for_settled_enabled() -> bool:
+    """Whether paging waits for the screen (plan F4) or sleeps a fixed time."""
+    return os.getenv("AS400_WAIT_FOR_SETTLED", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _reuse_header_default() -> bool:
     """Whether capture_order may continue from an order already on screen.
 
@@ -275,6 +286,44 @@ def _reuse_header_default() -> bool:
     Bay 2 machine can switch it off without a deploy: AS400_REUSE_HEADER=0.
     """
     return os.getenv("AS400_REUSE_HEADER", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _await_changed_page(read_fn, prev_norm, *, settled_reads, poll, deadline, on_stale=None):
+    """Read until the screen is BOTH new and finished painting. Returns (text, ok).
+
+    Two conditions, and both are the same bug seen from opposite sides:
+
+      (a) different from `prev_norm` — the invariant won on 2026-06-05. Acting on a
+          frame we already acted on makes the loop press ENTER twice and skip the
+          genuinely new page, losing its items with no error anywhere.
+      (b) the same text `settled_reads` times in a row — what a fixed sleep never
+          actually promised. `sleep(0.8)` says 800 ms passed, not that the 5250
+          finished painting; accepting a half-drawn page loses the lines that had
+          not arrived yet. Two identical reads say it is done.
+
+    The deadline is WALL CLOCK on purpose. The old loop added up poll intervals
+    while each re-read cost far more than one, so `refresh_timeout=5.0` really
+    tolerated ~25s of a slow AS400 — and it would have silently shrunk to ~10s the
+    moment reads got cheaper. A number that changes meaning when unrelated code
+    gets faster is not a timeout. The default is that same effective ~25s.
+    """
+    started = time.monotonic()
+    page = read_fn()
+    norm = _norm_screen(page)
+    streak = 1
+    while True:
+        if norm != prev_norm and streak >= settled_reads:
+            return page, True
+        if time.monotonic() - started >= deadline:
+            return page, norm != prev_norm
+        if norm == prev_norm and on_stale is not None:
+            on_stale()
+        if poll:
+            time.sleep(poll)
+        page = read_fn()
+        fresh = _norm_screen(page)
+        streak = streak + 1 if fresh == norm else 1
+        norm = fresh
 
 
 def _looks_like_order_screen(text: str) -> bool:
@@ -740,6 +789,10 @@ def capture_order(
         poll_interval = _env_float("AS400_POLL_INTERVAL", POLL_INTERVAL_DEFAULT)
     if refresh_timeout is None:
         refresh_timeout = _env_float("AS400_REFRESH_TIMEOUT", REFRESH_TIMEOUT_DEFAULT)
+    wait_for_settled = _wait_for_settled_enabled()
+    settled_reads = max(1, int(_env_float("AS400_SETTLED_READS", SETTLED_READS_DEFAULT)))
+    settle_poll = _env_float("AS400_SETTLE_POLL", SETTLE_POLL_DEFAULT)
+    refresh_deadline = _env_float("AS400_REFRESH_DEADLINE", REFRESH_DEADLINE_DEFAULT)
 
     # AS400 order numbers are digits. Anything else is a caller mistake, and it used
     # to reach the terminal as keystrokes inside an AppleScript string.
@@ -815,9 +868,23 @@ def capture_order(
         time.sleep(page_wait)
 
         # Page 1: customer header. Typing the last digit surfaces it automatically.
+        search_norm = _norm_screen(screen)
         driver.type_text(str(order_number))
-        time.sleep(page_wait)
-        header = read_screen()
+        if wait_for_settled:
+            # Waiting for the header to REPLACE the search screen, not just for
+            # 800 ms: reading too early here would hand the search screen to the
+            # checks below, which would happily call it an order view and press F5.
+            header, _ = _await_changed_page(
+                read_screen,
+                search_norm,
+                settled_reads=settled_reads,
+                poll=settle_poll,
+                deadline=refresh_deadline,
+                on_stale=lambda: stats.__setitem__("stale", stats["stale"] + 1),
+            )
+        else:
+            time.sleep(page_wait)
+            header = read_screen()
 
     pages = [header]
     log.info("AS400 header captured: %d chars", len(header))
@@ -865,18 +932,28 @@ def capture_order(
     prev_norm = _norm_screen(header)
 
     for i in range(1, max_pages + 1):
-        time.sleep(page_wait)
-        page = read_screen()
-
-        # Wait for the screen to actually advance before trusting it. If it's still
-        # showing the previous page, keep polling instead of paging again.
-        waited = 0.0
         waiting_from = time.monotonic()
-        while _norm_screen(page) == prev_norm and waited < refresh_timeout:
-            stats["stale"] += 1
-            time.sleep(poll_interval)
-            waited += poll_interval
+        if wait_for_settled:
+            page, _ = _await_changed_page(
+                read_screen,
+                prev_norm,
+                settled_reads=settled_reads,
+                poll=settle_poll,
+                deadline=refresh_deadline,
+                on_stale=lambda: stats.__setitem__("stale", stats["stale"] + 1),
+            )
+        else:
+            time.sleep(page_wait)
             page = read_screen()
+
+            # Wait for the screen to actually advance before trusting it. If it's
+            # still showing the previous page, keep polling instead of paging again.
+            waited = 0.0
+            while _norm_screen(page) == prev_norm and waited < refresh_timeout:
+                stats["stale"] += 1
+                time.sleep(poll_interval)
+                waited += poll_interval
+                page = read_screen()
         stats["wait_s"] += time.monotonic() - waiting_from
 
         # A VOID order can route to the message-detail screen after F5. Recover by

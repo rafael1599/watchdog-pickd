@@ -479,6 +479,126 @@ def test_a_read_that_did_not_copy_still_raises(monkeypatch):
         driver.copy_screen()
 
 
+# ── Waiting for the screen instead of for the clock (plan F4) ───────────────
+
+
+class PaintingTerminalDriver:
+    """A 5250 that draws a page in stages.
+
+    After each transition the FIRST read sees a half-drawn page and every read
+    after that sees the finished one — the failure a fixed sleep cannot rule out,
+    because 800 ms is a guess about the host, not an answer from it.
+    """
+
+    def __init__(self, header, item_pages, partials, precheck=READY):
+        self.header = header
+        self.item_pages = list(item_pages)
+        self.partials = dict(partials)
+        self.keys = []
+        self.typed = None
+        self.idx = -1
+        self.pending = []
+        self.current = precheck
+        self.reads = 0
+
+    def focus(self):
+        pass
+
+    def launch(self):
+        pass
+
+    def type_text(self, text):
+        self.typed = text
+        self._goto(self.header)
+
+    def key(self, name):
+        name = name.lower()
+        assert name in KEY_CODES, f"MochaDriver cannot press {name!r} — see KEY_CODES"
+        self.keys.append(name)
+        if name == "f5":
+            self.idx = 0
+            self._goto(self.item_pages[0], self.partials.get(0))
+        elif name == "enter":
+            # The host advances whether or not we managed to read the whole page.
+            # Whatever had not been drawn yet is gone.
+            self.idx += 1
+            if self.idx < len(self.item_pages):
+                self._goto(self.item_pages[self.idx], self.partials.get(self.idx))
+
+    def _goto(self, text, partial=None):
+        self.pending = [partial] if partial else []
+        self.current = text
+
+    def copy_screen(self):
+        self.reads += 1
+        return self.pending.pop(0) if self.pending else self.current
+
+
+# Page 1 arrives in two draws; page 2 completes the order. Reading page 1 while it
+# is still being drawn and pressing ENTER anyway loses ITEM 3 for good — the host
+# advances whether or not we saw the whole page.
+PAGE_1 = "ITEM 1\nITEM 2\nITEM 3"
+PAGE_1_HALF_DRAWN = "ITEM 1\nITEM 2"
+PAGE_2 = "ITEM 4\nEND OF ORDER"
+HEADER_SCREEN = "O R D E R  I N Q U I R Y\nCUSTOMER HEADER"
+
+
+def test_a_half_painted_page_is_not_accepted(monkeypatch):
+    monkeypatch.setenv("AS400_WAIT_FOR_SETTLED", "1")
+    driver = PaintingTerminalDriver(HEADER_SCREEN, [PAGE_1, PAGE_2], {0: PAGE_1_HALF_DRAWN})
+    text = capture_order("880005", driver, page_wait=0)
+
+    for chunk in ("ITEM 1", "ITEM 2", "ITEM 3", "ITEM 4", "END OF ORDER"):
+        assert chunk in text, f"{chunk} missing"
+
+
+def test_one_read_loses_the_line_that_had_not_been_drawn_yet(monkeypatch):
+    # Pins the trade-off instead of leaving it to be found on the floor:
+    # AS400_SETTLED_READS=1 is a whole read faster per page AND it can take a page
+    # mid-draw, exactly like the fixed sleep did on 2026-06-05. Nothing errors —
+    # the order simply arrives short, which is why the Sub-Total guard is the net.
+    monkeypatch.setenv("AS400_WAIT_FOR_SETTLED", "1")
+    monkeypatch.setenv("AS400_SETTLED_READS", "1")
+    driver = PaintingTerminalDriver(HEADER_SCREEN, [PAGE_1, PAGE_2], {0: PAGE_1_HALF_DRAWN})
+    text = capture_order("880005", driver, page_wait=0)
+
+    assert "END OF ORDER" in text  # it "succeeds"
+    assert "ITEM 3" not in text  # and it is short by one line
+
+
+def test_the_header_is_awaited_too_so_the_search_screen_is_never_taken_for_one(monkeypatch):
+    # Reading too early after typing would hand the SEARCH screen to the checks
+    # below, which would call it an order view and press F5 on it.
+    monkeypatch.setenv("AS400_WAIT_FOR_SETTLED", "1")
+    driver = PaintingTerminalDriver(
+        "O R D E R  I N Q U I R Y\nOrder Number: 880005\nBill ACME",
+        ["ITEM 1\nEND OF ORDER"],
+        {},
+    )
+    text = capture_order("880005", driver, page_wait=0)
+    assert "Bill ACME" in text
+    assert driver.keys == ["f6", "f5"]
+
+
+def test_the_deadline_is_wall_clock_not_a_count_of_polls(monkeypatch):
+    # The old loop added up poll intervals while each re-read cost far more than
+    # one, so the timeout meant whatever the read happened to cost that month.
+    monkeypatch.setenv("AS400_WAIT_FOR_SETTLED", "1")
+    monkeypatch.setenv("AS400_REFRESH_DEADLINE", "0")
+    driver = LaggyTerminalDriver(ORDER_HEADER_SCREEN, ["ITEMS", "ITEMS"], lag=100)
+    with pytest.raises(CaptureError):
+        capture_order("880009", driver, page_wait=0, reuse_header=False)
+
+
+def test_lag_is_still_tolerated_without_skipping_a_page(monkeypatch):
+    monkeypatch.setenv("AS400_WAIT_FOR_SETTLED", "1")
+    items1, items2 = "ITEM 1\nITEM 2", "ITEM 3\nEND OF ORDER"
+    driver = LaggyTerminalDriver(ORDER_HEADER_SCREEN, [items1, items2], lag=2)
+    text = capture_order("880009", driver, page_wait=0, reuse_header=False)
+    for chunk in ("ITEM 1", "ITEM 2", "ITEM 3", "END OF ORDER"):
+        assert chunk in text
+
+
 class LaggyTerminalDriver:
     """Models a 5250 terminal: copy_screen() returns the CURRENT page, which only
     changes after F5/ENTER. With lag>0 the screen stays stale for `lag` reads after

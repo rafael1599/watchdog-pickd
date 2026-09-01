@@ -12,13 +12,19 @@ llama (auto_scanner.py). Nada de parser, nada de Supabase, nada de UI.
 
 **Criterio de aceptación**, medido en la MacBook de Bay 2 con el log de la Fase 0:
 
-| | hoy (modelo) | meta |
-|---|---|---|
-| orden de 2 páginas de ítems | ~9,1 s | **≤ 4,5 s** |
-| orden de 4 páginas | ~13,3 s | **≤ 7 s** |
-| una lectura de pantalla | ~1,19 s | ≤ 0,5 s |
-| órdenes con `total_mismatch` en 3 días de observación | 0 | **0** |
-| capturas `incomplete` nuevas en 3 días | — | **0** |
+| | al empezar | meta | dónde estamos |
+|---|---|---|---|
+| una lectura de pantalla | 1,19 s | ≤ 0,5 s | **0,53 s medidos** ✅ |
+| captura manual (la orden ya en pantalla) | 9,1 s | ≤ 4,5 s | **~3,6 s** ✅ |
+| captura del scanner (orden no en pantalla) | 9,1 s | ≤ 4,5 s | ~6,0 s — falta F4 |
+| órdenes con `total_mismatch` en 3 días | 0 | **0** | por comprobar en Bay 2 |
+| capturas `incomplete` nuevas en 3 días | — | **0** | por comprobar en Bay 2 |
+
+Las dos filas de captura son **cálculos** sobre la lectura medida (0,53 s) y las teclas (0,14 s), no
+mediciones de Bay 2: el log de F0 es el que las confirma o las desmiente.
+
+**El objetivo ya se cumple para el camino que Rafael describió** — mirar la orden en Mocha y
+capturarla desde la UI: de 9,1 s a ~3,6 s, 2,5×. El camino del scanner se queda en 1,5× hasta F4.
 
 La última fila es la que importa: `total_mismatch` (el Sub-Total del header contra la suma de
 las líneas parseadas, ya implementado en `pipeline.preview_order`) es **el detector de una
@@ -238,7 +244,7 @@ Riesgo: si Mocha no está al frente y no lo detectamos, Cmd+A/Cmd+C copian **otr
 basura. Tres guardias ya existentes lo atrapan, ninguno se afloja: el centinela del portapapeles,
 `classify_screen` → UNKNOWN, y la validación de la captura (número + ítems + END OF ORDER).
 
-### F4 — Esperar a la pantalla, no al reloj (−3 s; el grueso, y el paso delicado)
+### F4 — Esperar a la pantalla, no al reloj · **escrita y APAGADA** (`AS400_WAIT_FOR_SETTLED=1`)
 Hoy: `sleep(0.8)` y copiar. Nuevo: copiar ya, y repetir hasta que la pantalla **(a) sea distinta
 de la anterior y (b) se lea igual dos veces seguidas**.
 
@@ -260,7 +266,30 @@ atrás. Por eso el deadline pasa a ser **de reloj explícito**, arrancando en 25
 **Prerrequisito:** F1d. Un frame a medio pintar tiene la misma forma que una orden vacía, y esa
 forma hace que el scanner salte el número para siempre.
 
-**Lo que hay que tener antes** no es una captura de una orden multipágina —el paginado ya funciona:
+**Apagada por defecto**, al revés que las demás. Todo vive en `main`, así que un `update.sh`
+cualquiera la traería puesta — y es la única fase que cambia **cuándo nos fiamos de una pantalla**.
+Se enciende a propósito, mirando el log.
+
+**Y cuesta menos de lo que estimé.** Con la lectura ya en 0,53 s, comprobar que la pantalla está
+quieta (una segunda lectura idéntica) cuesta casi lo mismo que el `sleep(0.8)` que sustituye:
+
+| | scanner, orden de 2 páginas |
+|---|---|
+| hoy (F1+F2+F3) | 6,02 s |
+| F4 con `AS400_SETTLED_READS=2` (default) | 5,21 s |
+| F4 con `AS400_SETTLED_READS=1` | 3,62 s |
+
+La diferencia entre 5,2 y 3,6 es exactamente la comprobación de estabilidad, y **bajarla a 1 es
+reabrir el fallo de junio por el otro lado**: una página a medio pintar se acepta, se pulsa ENTER, y
+el host avanza igual — las líneas que faltaban se pierden sin ningún error. Hay dos tests que fijan
+las dos caras (`test_a_half_painted_page_is_not_accepted`,
+`test_one_read_loses_the_line_that_had_not_been_drawn_yet`).
+
+**Cómo se decide entre 2 y 1: con datos, no ahora.** El guardia del Sub-Total detecta justo esa
+pérdida, así que se puede probar `=1` unos días vigilando `total_mismatch`. Si aparece uno solo,
+vuelve a 2 y se queda ahí.
+
+**Lo que no hay que tener antes** es una captura de una orden multipágina —el paginado ya funciona:
 26 de 798 órdenes de los últimos 90 días pasan de una página y todas entraron completas— sino el
 **tiempo real de repintado** entre páginas, que sólo sale del log de F0. Un texto pegado no lleva
 tiempos; el log sí, y ve todas las transiciones de todas las órdenes.
@@ -269,13 +298,15 @@ Verificación: `LaggyTerminalDriver` (tests/test_as400_capture.py) hoy expresa e
 de lecturas**, que ya no significa lo mismo cuando una lectura cuesta 4× menos. Pasa a lag **en
 segundos**, con casos 0 / 0,5 / 2 / 6 s y uno que no refresca nunca.
 
-### F5 — El ritmo alrededor de la captura (sólo `.env` + un memo local)
-- `SCAN_FOUND_DELAY_SEC` 5 → 1. La Mac de Bay 2 está casi siempre libre (confirmado por Rafael,
-  1 sep 2026) y el gate de 60 s de inactividad sigue protegiendo al operador.
-- `scanned_store.load()` parsea el JSON entero (con el `raw_text` de cada orden dentro) en **cada**
-  `get()` y `next_scan_number()`; el bucle de skip puede hacerlo hasta 500 veces por paso y
-  `/api/orders` lo toca cada 8 s. Memo por `mtime`. Es la Regla F: con la captura 2× más rápida el
-  bucle da el doble de vueltas.
+### F5 — El ritmo alrededor de la captura (sólo `.env`, sin código)
+- `SCAN_FOUND_DELAY_SEC` 5 → 1. La Mac de Bay 2 está casi siempre libre (Rafael, 1 sep 2026) y el
+  gate de 60 s de inactividad sigue protegiendo al operador. Cuatro segundos por orden, gratis.
+
+**Y aquí retiro lo que este plan decía.** Proponía cachear `scanned_store.load()`, que parsea el
+JSON entero en cada `get()`. Medido: **0,11 ms** con un store realista (20 órdenes, 61 KB), 1,9 ms
+con 500. Es ruido dentro de una captura de cuatro segundos, y cachear el fichero donde viven las
+órdenes capturadas cambia microsegundos por un riesgo de corrupción. La Regla F pide **mirar** qué
+crece dentro del bucle antes de acelerarlo; mirado, no crece.
 
 ## 6. Lo que NO se hace en esta tanda, y por qué
 
@@ -315,6 +346,12 @@ segundos**, con casos 0 / 0,5 / 2 / 6 s y uno que no refresca nunca.
 - **1 sep 2026** — Rafael reporta que la captura retrocede a la pantalla de búsqueda aunque la
   orden ya esté delante. Confirmado en `capture_order` y corregido (F1b): la pantalla ya leída se
   reutiliza cuando es el header de esa misma orden. Es −3,1 s de −4,9 s del objetivo total.
+- **2 sep 2026** — **F7 no tenía key code**: la recuperación F6·F6·F7 no podía ejecutarse y murió
+  con «Unknown key: f7» la primera vez que Rafael la probó. Los drivers falsos de los tests
+  aceptaban cualquier tecla, así que 383 tests pasaban sobre código imposible. Ahora validan contra
+  la misma tabla que usa el driver real.
+- **2 sep 2026** — F4 escrita y **apagada**; F5 se queda en dos líneas de `.env` tras medir que la
+  caché que proponía ahorraba 0,11 ms.
 - **1 sep 2026** — F2 y F3 escritas: son un solo script, así que se implementan y se despliegan
   juntas. Medida en esta Mac: 1.259 ms → 529 ms por lectura. El test de compilación con `osacompile`
   atrapó que `tell application id` se resuelve al compilar; la activación por bundle id pasó a
