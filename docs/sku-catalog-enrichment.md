@@ -461,3 +461,72 @@ reconocer la pantalla para salir de ella.
   TAB + `X` y la cola lo acepta.
 - **Criterio de aceptación nuevo (14):** con la pantalla de `Cmd10 NOTES` delante, el paso **no
   escribe nada** —aunque el `Stock Number` sea el que pidió— y sale por `Cmd7`.
+
+---
+
+## 16) Decisiones de Rafael (2 sep, noche) — dónde vive cada cosa
+
+Cuatro respuestas, y **una corrección medida que cambia el plan de fases**.
+
+### 16.1 La corrección: F1 son 5 filas, no 10, y el ensanche no le sirve
+
+Bajo la regla «sólo si `model` está NULL» (§6), sobre los 54 sin modelo:
+
+| | |
+|---|---|
+| Sin **ninguna** fuente de nombre | **41** |
+| Con la descripción cortada a 30 | 3 |
+| **Parten hoy → F1** | **5** |
+| No parten (compuestas, sin año, cm) | 5 |
+
+**44 de 54 sólo los puede contestar el AS400.** Y el ensanche de talla `L` **no añade una sola
+fila a F1**: los 25 SKUs con `L14`/`L16` **ya tienen `model`** — son la forma legacy con la talla
+pegada dentro (`CODA S2 L16`, `size` NULL), y tocarlos es ❓Q4, cerrada en «no».
+
+> **F1 deja de ser una fase.** Cinco filas no justifican una acción de mantenimiento con
+> Preview/Apply. Se resuelven en la sesión de patrones (§16.2), a mano o con un script de veinte
+> líneas, y **el esfuerzo se va entero a F3**. Esto reemplaza **F1 en §8** y los conteos de §15.2.
+
+### 16.2 La sesión de patrones: sirve para F3, no para F1
+
+Se ensancha `parseBikeName` **sólo para la talla con prefijo `L`** (`^L?\d{1,2}$`), con sus casos
+en `parseBikeName.test.ts`. No es inventar regla: `renderSize` ya formatea `L16`, así que hoy dos
+funciones del mismo repo se contradicen. **Su beneficiario es F3**, que va a recibir nombres como
+`CODA S2 L16 2026 GLOSS BLACK` del Stock Inquiry y sin esto no los parte.
+
+**Las compuestas NO se parten** (decisión de Rafael): `DIVIDE 13X27` se lee cuadro × rueda mientras
+las 6 filas guardadas hoy son rueda × cuadro (`27.5X19`, `700CX16`) —y `TAXI 10X20` ya está al
+revés—, así que una talla invertida entraría en la llave de agrupación del export. **R1/R3 se
+niegan a partir un nombre con talla compuesta** y lo dejan para la mano. Las 13 de criterio (9
+compuestas + 3 sin año + 1 en cm) se teclean en la misma sesión.
+
+### 16.3 Dónde corre cada cosa
+
+**El backfill vive en pickd, en TypeScript**, donde ya están `parseBikeName` y `renderSize` — un
+hecho, una fuente. No se porta la regla a Python: sería un segundo espejo con su tabla de casos
+duplicada, el problema que `canonical_sku` ya tiene en tres archivos.
+
+**El watchdog se queda con F2, F3 y F4** — lo que de verdad necesita el terminal. Esto reemplaza
+**R1** (que lo ponía en `maintenance.ACTIONS`) y saca F1 del alcance de este PRD.
+
+### 16.4 La pasada nocturna se decide con un número, no ahora
+
+Los **195** SKUs que sólo contesta el AS400 (78 cortados + 117 sin fuente) tardarían semanas a un
+SKU por hueco. La ventana nocturna **no se decide todavía**: primero F3 con la cadencia normal.
+
+> **R11 (nuevo) — F3 mide su propio drenaje.** Una línea de log al día con cuántos SKUs se
+> resolvieron, cuántos huecos hubo y cuántos se perdieron por actividad del operador. Sin ese
+> número la ventana nocturna se decidiría a ojo, que es justo lo que este PRD viene evitando.
+
+❓ **Q11 — ¿ventana nocturna para los 195?** *Default:* se responde cuando F3 lleve una semana y
+R11 haya dado la cifra. Si drena a menos de 20 SKUs/día, se abre la discusión; si no, no hace falta.
+
+### 16.5 Qué queda reemplazado
+
+- **F1 deja de existir como fase** del PRD del watchdog (§16.1); pasa a pickd y a la sesión.
+- **R1** queda anulado aquí y renace en pickd.
+- **R3** y el futuro parser: no parten tallas compuestas (§16.2).
+- **R11 nuevo**: F3 mide su drenaje.
+- Los conteos de **§15.2** quedan reemplazados por los de §16.1.
+- **Criterio de aceptación nuevo (15):** un nombre con talla compuesta (`DIVIDE 13X27`) no se parte
+  nunca automáticamente — ni en el backfill ni en el paso del AS400.
