@@ -157,6 +157,42 @@ CUSTOMER_DISPLAY_SCREEN = """                       C U S T O M E R    D I S P L
  Cmd1    Cmd2  Cmd3        Cmd4     Cmd5     Cmd10  Cmd11  Cmd12    Cmd6   Cmd7
   Product Comp  Closest Dlr POP Info CallBack Top10  Commit PreSeas  Prior  EXIT"""
 
+# STOCK INQUIRY — menu option 02 (Rafael, 2026-09-02), the option that carried
+# "❓ sin explorar" since the screen map was written. Reached with 2 → ENTER →
+# the SKU's digits WITHOUT the dash → TAB → the 2- (or 3-) character colour code
+# → TAB → X. '03-3933BK' is typed '033933' · 'BK' · 'X'. Out with F6·F6·F7.
+#
+# Three things this screen settles, and they are why the fixture exists:
+#   - `Description` is the catalogue name we are missing (docs/sku-catalog-enrichment.md).
+#   - `Weight: 36` is NOT a scale reading: PickD has 33.6 lb weight_verified for
+#     this same bike. Whatever AS400 stores there, it is not the shipping weight.
+#   - There are NO carton dimensions anywhere on it, so the measuring queue is
+#     not something AS400 can answer.
+STOCK_INQUIRY_SCREEN = """                            S T O C K   I N Q U I R Y
+
+  Stock Number: 03 3933 BK      B-Bike/P-Part: B    Model Year: 2025
+  Description:  CODA S2 L16 2026 GLOSS BLACK
+
+     Inventory  NJ       FL       CA                 Price  Quantity
+  On Hand       56        0        0       Each    380.95         49
+  On Order       0        0        0    Level 1    358.95         99
+  Available     56        0        0          2    347.95        199
+  Open PO        0        0        0          3       .00          0
+                                              4       .00          0
+  Next Purchase Order
+  Est Del     Quantity     Vendor No:      0136
+                           Alternate Ven:  03393
+
+  Unit Meas:   EA
+  First Cost                Bin Location:  1        Status Code:
+  Freight                 Stock Location:
+  Duty %                          Weight:    36
+  Broker                  Commission Pct:  3
+  Harbor Fee%                  Cost Code:  1
+  Landed Cost
+                     Cmd10                                          Cmd7
+                      NOTES                                          EXIT"""
+
 
 class FakeDriver:
     """Replays a list of screens and records the keys pressed."""
@@ -1001,6 +1037,33 @@ def test_customer_display_is_classified_and_exited_with_f7():
     driver.copy_screen = lambda: next(screens)
     assert bootstrap_session(driver, launch_wait=0, step_wait=0) == STATE_ORDER_SEARCH
     assert driver.keys[0] == "f7"  # EXIT, per the screen's own legend
+
+
+def test_stock_inquiry_is_not_recognized_yet_and_only_the_generic_unstick_escapes():
+    # Pinned on purpose: today nothing knows this screen, so the operator leaving
+    # the terminal on it reads as `unknown` and the daemon's only move is the
+    # generic F6·F6·F7 — which does get out, per the screen's own legend.
+    # Recognizing it (STATE_STOCK_INQUIRY + a STOCKINQUIRY marker) is F2 of
+    # docs/sku-catalog-enrichment.md; when that lands, this test flips.
+    assert classify_screen(STOCK_INQUIRY_SCREEN) == STATE_UNKNOWN
+
+    screens = iter([STOCK_INQUIRY_SCREEN, MENU_SCREEN, READY])
+    driver = FakeDriver()
+    driver.copy_screen = lambda: next(screens)
+    assert bootstrap_session(driver, launch_wait=0, step_wait=0) == STATE_ORDER_SEARCH
+    assert driver.keys[:3] == ["f6", "f6", "f7"]
+
+
+def test_stock_inquiry_carries_the_fields_the_catalog_backfill_reads():
+    # The fixture is the contract: if a future capture changes these labels, the
+    # parser that reads them has to change with it, and this says so out loud.
+    screen = STOCK_INQUIRY_SCREEN
+    assert "Stock Number: 03 3933 BK" in screen  # verifies we landed on the SKU we asked for
+    assert "Description:  CODA S2 L16 2026 GLOSS BLACK" in screen
+    assert "B-Bike/P-Part: B" in screen
+    assert "Weight:    36" in screen
+    # No carton dimensions on this screen — the tape measure is not replaceable.
+    assert "Length" not in screen and "Height" not in screen
 
 
 def test_full_menu_still_classifies_as_the_menu():

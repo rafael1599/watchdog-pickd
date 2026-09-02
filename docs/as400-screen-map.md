@@ -21,6 +21,8 @@ flowchart TD
   MSG -->|ENTER| MENU[SALESN Options]
   MENU -->|3 + ENTER| SEARCH[Order Inquiry · búsqueda]
   MENU -->|1 + ENTER + cuenta + TAB + 00| CUST[Customer Display · teléfono y email]
+  MENU -->|2 + ENTER + SKU + TAB + color + TAB + X| STOCK[Stock Inquiry · nombre, peso, stock]
+  STOCK -->|F6 · F6 · F7| MENU
   CUST -->|F7 EXIT| MENU
   ANY[cualquier pantalla] -->|F6 · F6 · F7| MENU
   SEARCH -->|teclear número| HEADER[Página 1 · encabezado]
@@ -75,7 +77,7 @@ orden vieja (`test_classify_disconnected_wins_over_stale_order_text`).
 | Opción | Estado |
 |---|---|
 | **01. Customer Inquiry** | **mapeada el 1 sep** — es donde está el teléfono (§2.11) |
-| 02. Stock File Inquiry | ❓ sin explorar — ¿el stock según AS400? |
+| **02. Stock File Inquiry** | **mapeada el 2 sep** — el nombre de catálogo, el peso y el stock del AS400 (§2.12) |
 | **03. Order Inquiry** | la que usamos |
 | 04. Accounts Receivable Inquiry | ❓ sin explorar |
 | 06. Display Print Status | ❓ sin explorar |
@@ -196,6 +198,63 @@ Diez teclas, todas sin explorar salvo EXIT.
 
 **Qué hace el sistema hoy:** nada — pero ya la reconoce. Antes caía en `unknown` y el daemon pedía
 login manual si el operador dejaba el terminal aquí; ahora sale sola con `Cmd7`.
+
+### 2.12 `S T O C K   I N Q U I R Y` → `STATE_STOCK_INQUIRY`
+*Evidencia:* captura de Rafael del **2 sep 2026** sobre `03-3933BK`, pegada del terminal. Opción
+**02** del menú, la que llevaba «❓ sin explorar» desde que existe este mapa.
+
+**Cómo se llega:** desde el menú `2` → ENTER → **parte numérica del SKU sin el guion** → **TAB** →
+**código de color de 2 caracteres** (3 en casos especiales) → **TAB** → `X` → ENTER.
+`03-3933BK` se teclea `033933` · `BK` · `X`, y la pantalla lo repinta como `Stock Number: 03 3933 BK`.
+El mapeo desde la grafía canónica de PickD es mecánico: `canonical_sku` ya produce `DD-NNNN[CCC]`
+con 0–3 letras (`parser.py:31`), que es exactamente lo que piden los dos campos.
+
+```
+  Stock Number: 03 3933 BK      B-Bike/P-Part: B    Model Year: 2025
+  Description:  CODA S2 L16 2026 GLOSS BLACK
+
+     Inventory  NJ       FL       CA                 Price  Quantity
+  On Hand       56        0        0       Each    380.95         49
+  On Order       0        0        0    Level 1    358.95         99
+  Available     56        0        0          2    347.95        199
+  Open PO        0        0        0          3       .00          0
+  ...
+  Unit Meas:   EA
+  First Cost                Bin Location:  1        Status Code:
+  Freight                 Stock Location:
+  Duty %                          Weight:    36
+  Broker                  Commission Pct:  3
+```
+
+| En pantalla | Ejemplo | Qué vale |
+|---|---|---|
+| **`Description`** | `CODA S2 L16 2026 GLOSS BLACK` | el nombre de catálogo → `model`/`size`/`color` |
+| **`Weight`** | `36` | ⚠️ **no es la báscula** — ver abajo |
+| **`B-Bike/P-Part`** | `B` | la clasificación **autoritativa**; PickD la adivina con un trigger por prefijo |
+| `Model Year` | `2025` | el año, que `parseBikeName` descarta a propósito |
+| `On Hand` / `Available` por NJ · FL · CA | `56 / 0 / 0` | **otra fuente de verdad del stock** frente a `inventory` |
+| Precios por nivel + cortes de cantidad | `380.95` @ 49 | nada hoy |
+| `Vendor No` / `Alternate Ven` | `0136` / `03393` | nada hoy |
+| `Bin Location` / `Stock Location` | `1` / vacío | ❓ ¿ubicación del almacén de ellos? |
+| **largo / ancho / alto** | **no está** | **la pantalla no trae medidas** — la cinta métrica no se sustituye |
+| Teclas | `Cmd10 NOTES`, `Cmd7 EXIT` | `Cmd10` sin explorar |
+
+**La calibración, y es la que manda.** Para esa misma bici PickD tiene **33,6 lb con
+`weight_verified = true`** — una lectura de báscula — y el AS400 dice **36**. No son el mismo
+número: el peso del AS400 es neto o nominal, **no el de envío**. Es mejor que el 45 genérico del
+trigger y peor que la báscula, y así hay que tratarlo. En cambio `On Hand NJ 56` cuadra clavado con
+las 56 unidades que PickD tiene en ROW 1.
+
+**El año no coincide ni consigo mismo:** `Description` dice `2026` y `Model Year` dice `2025`. Da
+igual para nosotros —el año se tira al partir el nombre— pero conviene no usar la descripción como
+fuente del año.
+
+**Salida:** `F6 · F6 · F7` → menú, y de ahí `3` vuelve a la búsqueda de orden (Rafael: «como siempre
+para salir F6 F6 F7»).
+
+**Qué hace el sistema hoy:** nada. No hay `STATE_STOCK_INQUIRY` ni marcador `STOCKINQUIRY` en
+`classify_screen`, así que si el operador deja el terminal aquí cae en `unknown`. Lo que se propone
+hacer con ella está en `docs/sku-catalog-enrichment.md`.
 
 ---
 
@@ -337,9 +396,10 @@ por los 628?). Nada de eso entra en el plan de velocidad.
 
 ## 6. Lo que NO está mapeado
 
-- Las opciones **02 / 04 / 06 / 10** del menú SALESN. `02. Stock File Inquiry` podría ser el stock
-  según AS400 — que es *otra fuente de verdad* frente al inventario de PickD.
+- Las opciones **04 / 06 / 10** del menú SALESN.
   (**09 Order Entry y 07 Set Terminal Functions no se exploran**: escriben.)
+- De `02. Stock File Inquiry` (§2.12): si `Description` se corta a 30 caracteres como el de la
+  orden, qué acepta el campo de color cuando el SKU no tiene sufijo, y qué hace `Cmd10 NOTES`.
 - Los **campos Alpha Search / Account Number / Invoice** de la búsqueda: qué aceptan y qué devuelven.
 - Las **diez teclas de CUSTOMER DISPLAY** salvo EXIT (`Closest Dlr`, `CallBack`, `Commit`, `Top10`…).
 - Si la página de ítems tiene **indicador de página**.
@@ -418,3 +478,12 @@ Protocolo de exploración, sacado del incidente del 11 de junio:
 - **1 sep 2026** — Rafael pide el mapa **antes** de seguir desarrollando. Este documento es la
   respuesta; lo verificado sale de los fixtures reales y del código, y los huecos quedan escritos
   como huecos en vez de rellenarse con suposiciones.
+- **2 sep 2026** — Rafael abre **`02. Stock File Inquiry`** y pega la pantalla real de `03-3933BK`.
+  Entra como §2.12 y cierra la opción que llevaba «❓ sin explorar» desde el primer día de este mapa.
+  De ahí: el nombre de catálogo completo, el **peso del AS400** (36 contra los 33,6 de báscula de
+  PickD: no es el peso de envío), la clasificación autoritativa `B-Bike/P-Part`, el stock por
+  almacén NJ/FL/CA — y la confirmación de que **no hay medidas de caja en el AS400**.
+- **2 sep 2026** — Medido contra prod: la descripción de la **página de ítems se corta a 30
+  caracteres** (935 descripciones distintas en 12 meses, largo máximo 30, **319 exactamente en 30**).
+  Un tercio del catálogo llega mutilado a PickD por esa vía (`EXPLORER A2 19 2025 GLOSS BLAC`). ❓
+  Falta saber si el `Description` de §2.12 es más ancho; se resuelve con un Peek sobre `03-4070BK`.
