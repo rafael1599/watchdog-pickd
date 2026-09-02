@@ -428,15 +428,30 @@ Rafael pega, además, un encabezado distinto del mismo Stock Inquiry:
 La descripción va **en la línea del `Stock Number`, sin la etiqueta `Description:`**, y la única
 tecla es `(Cmd7-Exit)` arriba a la derecha en vez de la legenda de dos teclas al pie.
 
-❓ **Q9 — ¿qué pantalla es?** ¿El `Cmd10 NOTES`, una segunda página, o un repintado intermedio?
-*Default:* el marcador `STOCKINQUIRY` clasifica las dos (las dos llevan el título), pero **el
-parser tiene que leer los dos formatos** — con etiqueta y sin ella — y un fixture por forma. Hasta
-saber cuál es, no se pulsa `Cmd10` a propósito.
+~~❓ Q9 — ¿qué pantalla es?~~ **CONTESTADA el 2 sep: es `Cmd10 NOTES`.** Rafael la pulsó y llegó
+ahí. Entra al mapa como §2.12b, y con ella queda mapeada la única tecla que le faltaba a §2.12.
+
+> ⚠️ **Y trae un requisito que no estaba.** Las dos pantallas llevan **el mismo título**, así que
+> un marcador `STOCKINQUIRY` las clasificaría igual — pero §2.12 tiene todos los campos por los que
+> entramos y **NOTES no tiene ninguno**: ni `Weight`, ni `B-Bike/P-Part`, ni `On Hand`. Un paso que
+> aterrice en NOTES creyéndose en el detalle leería `Weight` como *ausente* en vez de como *no estoy
+> donde creo*, y escribiría el peso de una bici desde una pantalla que nunca lo tuvo.
+>
+> **R10 (nuevo) — el discriminador es un campo, no el título.** Antes de leer nada se exige la
+> etiqueta `Description:` en su propia línea **y** `Weight:`. Sin las dos, el paso aborta sin
+> escribir y sale por `Cmd7`. Ya está fijado en `tests/test_as400_capture.py`
+> (`test_the_notes_screen_cannot_be_told_apart_by_the_title`) con las dos capturas reales.
+
+Lo bueno: NOTES repite **la descripción completa**, así que es una segunda lectura del nombre si
+alguna vez hiciera falta confirmarlo. Lo abierto: ❓ **Q10** — qué muestra el cuerpo cuando el SKU
+sí tiene notas. *Default:* no se mira; no se pulsa `Cmd10` en el flujo automático, sólo se sabe
+reconocer la pantalla para salir de ella.
 
 ### 15.4 Qué queda reemplazado
 
 - **R1** gana la regla de los 30 caracteres (§15.1).
 - **R6** ya no excluye a los SKUs sin sufijo de color: **entran**, con TAB en blanco.
+- **R10 nuevo** (§15.3): el discriminador de pantalla es un campo, no el título.
 - Los conteos de **§3.2, §8 (F1/F3) y §13-1** pasan a los de §15.2.
 - El default de **❓Q2** queda anulado; **❓Q1** queda cerrada.
 - **Criterio de aceptación nuevo (12):** el backfill F1 no escribe nada sobre un SKU cuya
@@ -444,3 +459,5 @@ saber cuál es, no se pulsa `Cmd10` a propósito.
   (`VENTURA A2 L48 2026 BLUE VAPOR`) se queda para F2 en vez de entrar con el color a medias.
 - **Criterio de aceptación nuevo (13):** `01-0169`, sin sufijo de color, se teclea `010169` + TAB +
   TAB + `X` y la cola lo acepta.
+- **Criterio de aceptación nuevo (14):** con la pantalla de `Cmd10 NOTES` delante, el paso **no
+  escribe nada** —aunque el `Stock Number` sea el que pidió— y sale por `Cmd7`.

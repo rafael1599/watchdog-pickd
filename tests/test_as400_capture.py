@@ -193,6 +193,13 @@ STOCK_INQUIRY_SCREEN = """                            S T O C K   I N Q U I R Y
                      Cmd10                                          Cmd7
                       NOTES                                          EXIT"""
 
+# Cmd10 NOTES, reached from the screen above (Rafael, 2026-09-02). PARTIAL paste:
+# the header only, because the notes body came back empty. Kept anyway, because
+# the header is the whole problem — see the test below.
+STOCK_NOTES_SCREEN = """                            S T O C K   I N Q U I R Y
+                                                                   (Cmd7-Exit)
+  Stock Number: 03 3933 BK      CODA S2 L16 2026 GLOSS BLACK"""
+
 
 class FakeDriver:
     """Replays a list of screens and records the keys pressed."""
@@ -1064,6 +1071,34 @@ def test_stock_inquiry_carries_the_fields_the_catalog_backfill_reads():
     assert "Weight:    36" in screen
     # No carton dimensions on this screen — the tape measure is not replaceable.
     assert "Length" not in screen and "Height" not in screen
+
+
+def test_the_notes_screen_cannot_be_told_apart_by_the_title():
+    """The trap this fixture exists for.
+
+    Cmd10 NOTES repaints the SAME title as the stock detail, so a marker built
+    on "STOCKINQUIRY" would classify both as the same screen — and one carries
+    every field we go there for while the other carries none. A parser landing
+    on NOTES believing it is on the detail would read `Weight` as absent instead
+    of as "I am not where I think I am", and write a bike's weight from a screen
+    that never had one.
+
+    The discriminator has to be a FIELD, not the title. This test says so in a
+    way that survives whoever writes classify_screen next.
+    """
+    title = "S T O C K   I N Q U I R Y"
+    assert title in STOCK_INQUIRY_SCREEN and title in STOCK_NOTES_SCREEN
+
+    # Both know which SKU they are about; only the detail screen labels the name
+    # and carries the numbers.
+    assert "Stock Number: 03 3933 BK" in STOCK_INQUIRY_SCREEN
+    assert "Stock Number: 03 3933 BK" in STOCK_NOTES_SCREEN
+    for field in ("Description:", "Weight:", "B-Bike/P-Part:", "On Hand"):
+        assert field in STOCK_INQUIRY_SCREEN, field
+        assert field not in STOCK_NOTES_SCREEN, field
+
+    # The full catalogue name is on both, so NOTES is a second place to read it.
+    assert "CODA S2 L16 2026 GLOSS BLACK" in STOCK_NOTES_SCREEN
 
 
 def test_full_menu_still_classifies_as_the_menu():

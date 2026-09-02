@@ -239,7 +239,7 @@ con 0–3 letras (`parser.py:31`), que es exactamente lo que piden los dos campo
 | `Vendor No` / `Alternate Ven` | `0136` / `03393` | nada hoy |
 | `Bin Location` / `Stock Location` | `1` / vacío | ❓ ¿ubicación del almacén de ellos? |
 | **largo / ancho / alto** | **no está** | **la pantalla no trae medidas** — la cinta métrica no se sustituye |
-| Teclas | `Cmd10 NOTES`, `Cmd7 EXIT` | `Cmd10` sin explorar |
+| Teclas | `Cmd10 NOTES`, `Cmd7 EXIT` | **`Cmd10` mapeada el 2 sep → §2.12b** |
 
 **La calibración, y es la que manda.** Para esa misma bici PickD tiene **33,6 lb con
 `weight_verified = true`** — una lectura de báscula — y el AS400 dice **36**. No son el mismo
@@ -251,9 +251,10 @@ las 56 unidades que PickD tiene en ROW 1.
 igual para nosotros —el año se tira al partir el nombre— pero conviene no usar la descripción como
 fuente del año.
 
-**Tiene una segunda forma**, pegada por Rafael el mismo día: mismo título, pero la descripción va
-**en la línea del `Stock Number` y sin la etiqueta `Description:`**, y la legenda es un
-`(Cmd7-Exit)` arriba a la derecha en vez de las dos teclas al pie.
+### 2.12b `Cmd10 NOTES` — la misma cabecera, ninguno de los campos
+
+*Evidencia:* Rafael pulsa `Cmd10` sobre §2.12 el 2 sep 2026 y llega aquí. Captura **parcial** (sólo
+la cabecera; el cuerpo de notas venía vacío o no se pegó).
 
 ```
                             S T O C K   I N Q U I R Y
@@ -261,9 +262,23 @@ fuente del año.
   Stock Number: 03 3933 BK      CODA S2 L16 2026 GLOSS BLACK
 ```
 
-❓ **No sabemos cuál es**: ¿`Cmd10 NOTES`, una segunda página, un repintado intermedio? Las dos
-llevan el título, así que un marcador `STOCKINQUIRY` clasificaría ambas — pero **un parser tendría
-que leer los dos formatos**. Hasta saberlo, no se pulsa `Cmd10` a propósito.
+**Trae:** el mismo `Stock Number` y la misma descripción completa —pero **en la línea del Stock
+Number y sin la etiqueta `Description:`**— y una legenda de una sola tecla, `(Cmd7-Exit)`, arriba a
+la derecha en vez de las dos del pie.
+
+**No trae ninguno de los campos por los que se entra a §2.12**: ni `Weight`, ni `B-Bike/P-Part`, ni
+`On Hand`, ni precios.
+
+> ⚠️ **La trampa, y es la razón de que esto tenga su propia sección.** Las dos pantallas llevan el
+> mismo título, así que **un marcador `STOCKINQUIRY` las clasificaría igual** — y una tiene los
+> datos y la otra no. Un parser que aterrice aquí creyéndose en §2.12 leería `Weight` como ausente
+> en vez de como *no estoy donde creo*. El discriminador tiene que ser un **campo**, no el título:
+> la etiqueta `Description:` en su propia línea, o `Weight:`, existen en §2.12 y no aquí.
+
+**Salida:** `Cmd7` (su propia legenda), o el `F6 · F6 · F7` de siempre.
+
+❓ Qué muestra el cuerpo cuando el SKU **sí** tiene notas — puede ser condición o manejo especial,
+o puede no ser asunto del almacén. No se ha visto ninguno con contenido.
 
 **Salida:** `F6 · F6 · F7` → menú, y de ahí `3` vuelve a la búsqueda de orden (Rafael: «como siempre
 para salir F6 F6 F7»).
@@ -414,8 +429,8 @@ por los 628?). Nada de eso entra en el plan de velocidad.
 
 - Las opciones **04 / 06 / 10** del menú SALESN.
   (**09 Order Entry y 07 Set Terminal Functions no se exploran**: escriben.)
-- De `02. Stock File Inquiry` (§2.12): si `Description` se corta a 30 caracteres como el de la
-  orden, qué acepta el campo de color cuando el SKU no tiene sufijo, y qué hace `Cmd10 NOTES`.
+- De `02. Stock File Inquiry`: qué muestra el cuerpo de `Cmd10 NOTES` (§2.12b) cuando el SKU
+  tiene notas de verdad. Lo demás de esa pantalla quedó cerrado el 2 sep.
 - Los **campos Alpha Search / Account Number / Invoice** de la búsqueda: qué aceptan y qué devuelven.
 - Las **diez teclas de CUSTOMER DISPLAY** salvo EXIT (`Closest Dlr`, `CallBack`, `Commit`, `Top10`…).
 - Si la página de ítems tiene **indicador de página**.
@@ -508,5 +523,9 @@ Protocolo de exploración, sacado del incidente del 11 de junio:
   (`DURANGO A2 / 17 / Grey`, no `THUNDER GRE`), así que el corte **nunca llegó al export de FedEx**.
 - **2 sep 2026** — Rafael: **si el SKU no tiene sufijo de color, se pulsa TAB en blanco**. Los 126
   SKUs de bici sin sufijo entran a la cola de §2.12 en vez de quedar fuera.
-- **2 sep 2026** — Aparece una **segunda forma** de la pantalla §2.12 (descripción sin etiqueta en
-  la línea del Stock Number, legenda `(Cmd7-Exit)`). ❓ Sin identificar; anotada, no explorada.
+- **2 sep 2026** — Rafael pulsa **`Cmd10`** y confirma que la «segunda forma» es la pantalla de
+  **NOTES** (§2.12b): misma cabecera y misma descripción completa, **ningún** campo de datos. De ahí
+  la trampa que queda escrita antes de que exista el código: las dos comparten título, así que
+  `classify_screen` **no puede distinguirlas por el título** — el discriminador tiene que ser un
+  campo (`Description:` etiquetado, o `Weight:`). Con esto, la única tecla que le quedaba a §2.12
+  sin explorar está mapeada.
