@@ -205,6 +205,8 @@ login manual si el operador dejaba el terminal aquí; ahora sale sola con `Cmd7`
 
 **Cómo se llega:** desde el menú `2` → ENTER → **parte numérica del SKU sin el guion** → **TAB** →
 **código de color de 2 caracteres** (3 en casos especiales) → **TAB** → `X` → ENTER.
+**Si el SKU no tiene color** (`01-0169`, y son 126 bicis), se pulsa **TAB directo sin llenarlo**
+(Rafael, 2 sep).
 `03-3933BK` se teclea `033933` · `BK` · `X`, y la pantalla lo repinta como `Stock Number: 03 3933 BK`.
 El mapeo desde la grafía canónica de PickD es mecánico: `canonical_sku` ya produce `DD-NNNN[CCC]`
 con 0–3 letras (`parser.py:31`), que es exactamente lo que piden los dos campos.
@@ -228,7 +230,7 @@ con 0–3 letras (`parser.py:31`), que es exactamente lo que piden los dos campo
 
 | En pantalla | Ejemplo | Qué vale |
 |---|---|---|
-| **`Description`** | `CODA S2 L16 2026 GLOSS BLACK` | el nombre de catálogo → `model`/`size`/`color` |
+| **`Description`** | `CODA S2 L16 2026 GLOSS BLACK` | el nombre de catálogo **completo, sin el corte a 30 de la página de ítems** (Rafael, 2 sep) → `model`/`size`/`color` |
 | **`Weight`** | `36` | ⚠️ **no es la báscula** — ver abajo |
 | **`B-Bike/P-Part`** | `B` | la clasificación **autoritativa**; PickD la adivina con un trigger por prefijo |
 | `Model Year` | `2025` | el año, que `parseBikeName` descarta a propósito |
@@ -248,6 +250,20 @@ las 56 unidades que PickD tiene en ROW 1.
 **El año no coincide ni consigo mismo:** `Description` dice `2026` y `Model Year` dice `2025`. Da
 igual para nosotros —el año se tira al partir el nombre— pero conviene no usar la descripción como
 fuente del año.
+
+**Tiene una segunda forma**, pegada por Rafael el mismo día: mismo título, pero la descripción va
+**en la línea del `Stock Number` y sin la etiqueta `Description:`**, y la legenda es un
+`(Cmd7-Exit)` arriba a la derecha en vez de las dos teclas al pie.
+
+```
+                            S T O C K   I N Q U I R Y
+                                                                   (Cmd7-Exit)
+  Stock Number: 03 3933 BK      CODA S2 L16 2026 GLOSS BLACK
+```
+
+❓ **No sabemos cuál es**: ¿`Cmd10 NOTES`, una segunda página, un repintado intermedio? Las dos
+llevan el título, así que un marcador `STOCKINQUIRY` clasificaría ambas — pero **un parser tendría
+que leer los dos formatos**. Hasta saberlo, no se pulsa `Cmd10` a propósito.
 
 **Salida:** `F6 · F6 · F7` → menú, y de ahí `3` vuelve a la búsqueda de orden (Rafael: «como siempre
 para salir F6 F6 F7»).
@@ -485,5 +501,12 @@ Protocolo de exploración, sacado del incidente del 11 de junio:
   almacén NJ/FL/CA — y la confirmación de que **no hay medidas de caja en el AS400**.
 - **2 sep 2026** — Medido contra prod: la descripción de la **página de ítems se corta a 30
   caracteres** (935 descripciones distintas en 12 meses, largo máximo 30, **319 exactamente en 30**).
-  Un tercio del catálogo llega mutilado a PickD por esa vía (`EXPLORER A2 19 2025 GLOSS BLAC`). ❓
-  Falta saber si el `Description` de §2.12 es más ancho; se resuelve con un Peek sobre `03-4070BK`.
+  Un tercio del catálogo llega mutilado a PickD por esa vía (`EXPLORER A2 19 2025 GLOSS BLAC`).
+  **Rafael confirma el mismo día que el `Description` de §2.12 NO se corta**: esa pantalla es la
+  única fuente del nombre entero. En PickD hay **182 SKUs de bici** cuyo nombre viene de una
+  descripción cortada (103 con stock, 73 ya medidos) — pero los medidos ya están limpios a mano
+  (`DURANGO A2 / 17 / Grey`, no `THUNDER GRE`), así que el corte **nunca llegó al export de FedEx**.
+- **2 sep 2026** — Rafael: **si el SKU no tiene sufijo de color, se pulsa TAB en blanco**. Los 126
+  SKUs de bici sin sufijo entran a la cola de §2.12 en vez de quedar fuera.
+- **2 sep 2026** — Aparece una **segunda forma** de la pantalla §2.12 (descripción sin etiqueta en
+  la línea del Stock Number, legenda `(Cmd7-Exit)`). ❓ Sin identificar; anotada, no explorada.

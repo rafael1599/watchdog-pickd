@@ -315,8 +315,8 @@ el único cambio de esta tanda que toca una ruta ya en producción, y quiere su 
 
 | # | Pregunta | Propuesta por defecto |
 |---|---|---|
-| Q1 | ¿El `Description` de Stock Inquiry se corta a 30 caracteres como el de la orden, o es más ancho? | Se responde en F2 con un Peek sobre `03-4070BK` (la orden dice `EXPLORER A2 19 2025 GLOSS BLAC`). Si es más ancho, F3 crece: pasa de 7 SKUs a re-leer el tercio del catálogo que llegó cortado, y eso será su propio PRD. |
-| Q2 | Los **126 SKUs de bici sin sufijo de color** (`01-0169`): ¿qué acepta el campo de 2 caracteres — vacío, o un código que hay que saber? | Probar vacío en F2 sobre `01-0169`. Si lo rechaza, esos SKUs quedan fuera de la cola y se anotan como tales. |
+| ~~Q1~~ | ~~¿El `Description` de Stock Inquiry se corta a 30 caracteres?~~ | **CONTESTADA el 2 sep — §15.** No se corta: da el nombre completo. |
+| ~~Q2~~ | ~~Los 126 SKUs de bici sin sufijo de color: ¿qué acepta el campo de 2 caracteres?~~ | **CONTESTADA el 2 sep — §15.** Se pulsa TAB directo, sin llenarlo. |
 | Q3 | El `Weight: 36` contra los 33,6 de báscula, ¿es peso **neto** de la bici o **de la caja**? | Se trata como estimación y nunca se marca verificado (R4). Cuando F4 lleve ~20 SKUs que además tengan báscula, la comparación contesta sola si es un sesgo constante. |
 | Q4 | ¿Se arreglan los splits malos ya existentes (`model='CODA S2 L16'`, `size` NULL)? | **No.** Es sobrescribir la llave de agrupación del export sin red. Es un PRD aparte, con Preview/Apply y revisión humana. |
 | Q5 | Un SKU con `model` pero sin `color`, ¿se completa el color solo? | **No** en esta tanda: los tres campos salen de partir un nombre, y escribir uno sin los otros mezcla dos fuentes en una misma fila. Se escribe el trío o nada. |
@@ -364,3 +364,83 @@ el único cambio de esta tanda que toca una ruta ya en producción, y quiere su 
   y es código compartido con la captura de órdenes.
 - **2 sep 2026** — Rafael: **bicis primero hasta vaciar la cola, después los clientes**. La cola de
   bicis es finita; la de clientes son 628 filas que no se acaban.
+
+---
+
+## 15) Respuestas de Rafael (2 sep, tarde) — Q1 y Q2, y lo que mueven
+
+**Q1: `Stock Inquiry` da el nombre completo, sin recortes.** Rafael lo confirma sobre el terminal.
+La pantalla del AS400 **no comparte** el corte a 30 caracteres de la página de ítems (§3.3), así que
+es la única fuente de un nombre entero para todo lo que llegó mutilado.
+
+**Q2: si el SKU no tiene color, se pulsa TAB directo** sin llenar el campo. Los **126 SKUs de bici
+sin sufijo** (`01-0169`) **entran a la cola**; el default que decía «si lo rechaza, quedan fuera»
+queda anulado.
+
+### 15.1 Lo que esto le cuesta a F1, y por qué es una buena noticia
+
+Una descripción de **exactamente 30 caracteres es indistinguible de una completa que mida 30**.
+`EXPLORER A2 19 2025 GLOSS BLAC` parte en `EXPLORER A2` / `19` / **`GLOSS BLAC`** — modelo y talla
+salen bien (el corte es por el final, y la llave del export es `model` + `size`), pero el color
+entra mutilado. **Un color truncado es peor que un color NULL**, así que:
+
+> **R1 se refuerza:** el backfill **no escribe** cuando la descripción de origen mide exactamente
+> 30 caracteres. Ese SKU no se descarta — **pasa a la cola de F2**, que ahora sí tiene con qué
+> contestarlo.
+
+### 15.2 Los números, rehechos
+
+| | antes (2 sep, mañana) | ahora |
+|---|---|---|
+| **F1** — backfill sin AS400 | 12 + 1 | **9 con descripción completa + 1 sólo por `item_name` = 10** |
+| **F2/F3** — el paso de AS400 | 7 | **7 sin fuente + 3 con el nombre cortado = 10** |
+| …de esos, **en el piso** | 2 | **3** |
+
+Y el trabajo que Q1 destapa, que no estaba dimensionado en el cuerpo del PRD:
+
+| | |
+|---|---|
+| SKUs de bici cuyo nombre en PickD viene de una descripción **cortada a 30** | **182** (de 566 con descripción) |
+| …con stock | **103** |
+| …ya medidos, o sea **ya dentro del export de FedEx** | **73** |
+| …de los 182, con `size` en NULL (la forma legacy sin partir) | 78 |
+
+**Y aquí la parte tranquilizadora: esos 73 ya están limpios.** La muestra dice `03-3731GY` →
+`DURANGO A2` / `17` / **`Grey`**, no `THUNDER GRE`; `03-3606BL` → `HUDSON E2 S/T` / `27.5X14` /
+**`DEEP BLUE`**, no `DEEP BLU`. Alguien los arregló a mano o entraron por el alta estructurada.
+**El corte nunca llegó al export**, y la llave `model` + `size` está intacta en las filas que hoy
+viajan a FedEx.
+
+O sea: los 182 **no son un incendio**, son una oportunidad. Re-leerlos por Stock Inquiry es una
+tanda posterior (su propio PRD), no una urgencia — y ya no es «un tercio del catálogo a ciegas»
+sino 182 filas con nombre y apellido, de las que 109 ni siquiera están medidas todavía.
+
+### 15.3 Una segunda forma de la pantalla
+
+Rafael pega, además, un encabezado distinto del mismo Stock Inquiry:
+
+```
+                            S T O C K   I N Q U I R Y
+                                                                   (Cmd7-Exit)
+  Stock Number: 03 3933 BK      CODA S2 L16 2026 GLOSS BLACK
+```
+
+La descripción va **en la línea del `Stock Number`, sin la etiqueta `Description:`**, y la única
+tecla es `(Cmd7-Exit)` arriba a la derecha en vez de la legenda de dos teclas al pie.
+
+❓ **Q9 — ¿qué pantalla es?** ¿El `Cmd10 NOTES`, una segunda página, o un repintado intermedio?
+*Default:* el marcador `STOCKINQUIRY` clasifica las dos (las dos llevan el título), pero **el
+parser tiene que leer los dos formatos** — con etiqueta y sin ella — y un fixture por forma. Hasta
+saber cuál es, no se pulsa `Cmd10` a propósito.
+
+### 15.4 Qué queda reemplazado
+
+- **R1** gana la regla de los 30 caracteres (§15.1).
+- **R6** ya no excluye a los SKUs sin sufijo de color: **entran**, con TAB en blanco.
+- Los conteos de **§3.2, §8 (F1/F3) y §13-1** pasan a los de §15.2.
+- El default de **❓Q2** queda anulado; **❓Q1** queda cerrada.
+- **Criterio de aceptación nuevo (12):** el backfill F1 no escribe nada sobre un SKU cuya
+  descripción de origen mida exactamente 30 caracteres — `03-3803BL`
+  (`VENTURA A2 L48 2026 BLUE VAPOR`) se queda para F2 en vez de entrar con el color a medias.
+- **Criterio de aceptación nuevo (13):** `01-0169`, sin sufijo de color, se teclea `010169` + TAB +
+  TAB + `X` y la cola lo acepta.
