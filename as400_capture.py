@@ -711,6 +711,34 @@ class MochaDriver:
         else:
             subprocess.run(["open", "-a", target], check=True)
 
+    def close_window(self) -> None:
+        """Cmd+W — close the front window.
+
+        Used on the dead-end screen, which is the window in front because we
+        just read it. Like Cmd+N this is an APPLICATION command, so the session
+        that answers no key has no say over it.
+
+        ⚠️ On the LAST window this closes Mocha altogether (Rafael, 2026-09-08:
+        "cuando solo queda una ventana abierta cierra por completo el AS400 y
+        toca recuperarlo abriéndolo de nuevo"). That is why the caller checks
+        `is_running()` afterwards instead of assuming a window is still there.
+        """
+        self.focus()
+        self._osascript('tell application "System Events" to keystroke "w" using command down')
+
+    def is_running(self) -> bool:
+        """Is the emulator still up? Asked of System Events rather than pgrep:
+        a GUI app's process name isn't reliably its application name."""
+        name = self.app_name.replace("\\", "\\\\").replace('"', '\\"')
+        try:
+            out = self._osascript(
+                'tell application "System Events" to return (exists process "%s")' % name,
+                capture=True,
+            )
+            return "true" in (out or "").strip().lower()
+        except Exception:
+            return self._is_running()
+
     def new_window(self) -> None:
         """Cmd+N — a fresh session window (Rafael, 2026-09-08).
 
@@ -1030,13 +1058,18 @@ def hard_restart(driver, idle_fn=None) -> bool:
 
     Two ways out, cheapest first:
 
-      1. **Cmd+N** — a new session window. Rafael, 2026-09-08: "CMD + N nos abre
-         una nueva ventana donde podemos iniciar sesión de nuevo". It works
-         because it is an APPLICATION command rather than a 5250 keystroke: the
-         dead screen has no say over Mocha's own menus. It closes nothing and
-         takes nothing away from the operator.
-      2. **Quit and relaunch** — off by default (`AS400_HARD_RESTART_QUIT`), for
-         the day Cmd+N turns out not to be enough.
+      1. **Cmd+W then Cmd+N** — close the dead window, then open a fresh session
+         (Rafael, 2026-09-08). Both are APPLICATION commands rather than 5250
+         keystrokes, which is exactly why they escape a screen that ignores what
+         the session receives. In that order, and not the other way round: after
+         Cmd+N the NEW window is in front, so a Cmd+W then would close the good
+         one. Closing first also means no dead windows pile up behind the live
+         one.
+      2. **Reopen Mocha** — because Cmd+W on the LAST window closes the
+         application outright ("toca recuperarlo abriéndolo de nuevo"). Not a
+         fallback: a normal branch of the same recovery.
+      3. **Quit and relaunch** — off by default (`AS400_HARD_RESTART_QUIT`), for
+         the day none of the above is enough.
 
     Either way it refuses unless the Mac has been untouched for
     AS400_HARD_RESTART_IDLE_SEC (a new window steals focus, and focus stolen
@@ -1069,13 +1102,37 @@ def hard_restart(driver, idle_fn=None) -> bool:
 
     _last_hard_restart = time.time()
 
-    log.warning("AS400 recovery: dead-end screen — opening a new session window (Cmd+N)")
+    # 1. Close the dead window FIRST. It is the one in front — we just read it —
+    #    and closing it is what keeps dead windows from piling up behind the
+    #    live one. Cmd+N first would put the new window in front and Cmd+W would
+    #    then close the wrong one.
+    log.warning("AS400 recovery: dead-end screen — closing that window (Cmd+W)")
+    closed = True
+    try:
+        driver.close_window()
+        time.sleep(_env_float("AS400_CLOSE_WINDOW_WAIT", 2.0))
+    except Exception as e:
+        closed = False
+        log.info("AS400 recovery: Cmd+W didn't work (%s) — trying a new window anyway", e)
+
+    # 2. On the LAST window, Cmd+W closes Mocha altogether (Rafael, 2026-09-08).
+    #    Then the way back is opening the application, not asking it for another
+    #    window — which is why this asks instead of assuming.
+    try:
+        still_up = driver.is_running()
+    except Exception:
+        still_up = True  # can't tell → treat it as up; Cmd+N on a dead app is a no-op
+    if closed and not still_up:
+        log.warning("AS400 recovery: that was the last window — reopening Mocha")
+        driver.launch()
+        time.sleep(_env_float("AS400_LAUNCH_WAIT", LAUNCH_WAIT))
+        return True
+
+    # 3. Mocha is still up: ask it for a fresh session window.
+    log.warning("AS400 recovery: opening a new session window (Cmd+N)")
     try:
         driver.new_window()
         time.sleep(_env_float("AS400_NEW_WINDOW_WAIT", 3.0))
-        # The old window is still open behind this one. Harmless while the new
-        # one has focus — every read goes to the front — but somebody should
-        # close them now and then.
         return True
     except Exception as e:
         log.warning("AS400 recovery: Cmd+N didn't work (%s)", e)

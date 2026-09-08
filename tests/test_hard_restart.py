@@ -6,9 +6,15 @@ terminal lands there the daemon is finished until a person re-opens the session
 — 36 minutes of a working day on 2026-09-08, and a whole weekend if it lands
 there on a Friday evening.
 
-The way out is **Cmd+N**, and it works for a reason worth keeping in a test: it
-is an APPLICATION command, not a 5250 keystroke. The dead screen has no say over
-what Mocha does with its own menu shortcuts.
+The way out is **Cmd+W then Cmd+N** — close the dead window, open a fresh
+session — and it works for a reason worth keeping in a test: those are
+APPLICATION commands, not 5250 keystrokes. The dead screen has no say over what
+Mocha does with its own menu shortcuts.
+
+In that order, never the other way round: after Cmd+N the NEW window is in
+front, so a Cmd+W then would close the good one. And Cmd+W on the LAST window
+closes Mocha altogether, which is why what follows is reopening the application
+rather than asking a closed one for a window.
 """
 
 import pytest
@@ -27,13 +33,29 @@ class FakeEmulator:
 
     supports_steps = False
 
-    def __init__(self, screens=None, *, cmd_n_works=True, closes=True):
+    def __init__(
+        self, screens=None, *, cmd_n_works=True, cmd_w_works=True, last_window=False, closes=True
+    ):
         self.events = []
         self.cmd_n_works = cmd_n_works
+        self.cmd_w_works = cmd_w_works
+        # Cmd+W on the LAST window closes Mocha altogether (Rafael, 2026-09-08).
+        self.last_window = last_window
+        self._up = True
         self.closes = closes
         self._screens = list(screens or [ADDL_MSG])
         self.keys = []
         self.actions = []
+
+    def close_window(self):
+        self.events.append("cmd+w")
+        if not self.cmd_w_works:
+            raise RuntimeError("System Events refused")
+        if self.last_window:
+            self._up = False
+
+    def is_running(self):
+        return self._up
 
     def new_window(self):
         self.events.append("cmd+n")
@@ -46,6 +68,7 @@ class FakeEmulator:
 
     def launch(self):
         self.events.append("launch")
+        self._up = True
 
     def focus(self):
         pass
@@ -66,6 +89,7 @@ def _fast_and_fresh(monkeypatch):
     # every test after it through the cooldown.
     monkeypatch.setattr(as400_capture, "_last_hard_restart", 0.0)
     monkeypatch.setenv("AS400_NEW_WINDOW_WAIT", "0")
+    monkeypatch.setenv("AS400_CLOSE_WINDOW_WAIT", "0")
     monkeypatch.setenv("AS400_RESTART_PAUSE", "0")
     monkeypatch.setenv("AS400_LAUNCH_WAIT", "0")
 
@@ -86,14 +110,35 @@ def test_it_never_steals_focus_from_somebody_working(monkeypatch):
     assert d.events == []
 
 
-def test_the_way_out_is_a_new_window_not_a_keystroke(monkeypatch):
-    # Cmd+N is handled by Mocha, not by the session, which is exactly why it
-    # escapes a screen that ignores what the session receives. Nothing is
-    # closed and nothing of the operator's is taken away.
+def test_the_way_out_is_the_application_menu_not_a_keystroke(monkeypatch):
+    # Cmd+W and Cmd+N are handled by Mocha, not by the session, which is exactly
+    # why they escape a screen that ignores what the session receives.
+    #
+    # The ORDER is the point: the dead window is the one in front, because we
+    # just read it, so it is closed first. Cmd+N first would put the NEW window
+    # in front and the Cmd+W after it would close the good one.
     monkeypatch.setenv("AS400_HARD_RESTART", "1")
     d = FakeEmulator()
     assert hard_restart(d, idle_fn=lambda: 1e9) is True
-    assert d.events == ["cmd+n"]
+    assert d.events == ["cmd+w", "cmd+n"]
+
+
+def test_closing_the_last_window_closes_mocha_so_it_is_reopened(monkeypatch):
+    # Rafael, 2026-09-08: "cuando solo queda una ventana abierta cierra por
+    # completo el AS400 y toca recuperarlo abriéndolo de nuevo". Asking a dead
+    # application for a new window would do nothing at all.
+    monkeypatch.setenv("AS400_HARD_RESTART", "1")
+    d = FakeEmulator(last_window=True)
+    assert hard_restart(d, idle_fn=lambda: 1e9) is True
+    assert d.events == ["cmd+w", "launch"]  # no pointless Cmd+N at a closed app
+
+
+def test_a_window_that_will_not_close_still_gets_a_new_one(monkeypatch):
+    # Failing to tidy up is not a reason to stay stuck.
+    monkeypatch.setenv("AS400_HARD_RESTART", "1")
+    d = FakeEmulator(cmd_w_works=False)
+    assert hard_restart(d, idle_fn=lambda: 1e9) is True
+    assert d.events == ["cmd+w", "cmd+n"]
 
 
 def test_a_terminal_that_cannot_be_saved_is_not_poked_all_night(monkeypatch):
@@ -101,7 +146,7 @@ def test_a_terminal_that_cannot_be_saved_is_not_poked_all_night(monkeypatch):
     d = FakeEmulator()
     assert hard_restart(d, idle_fn=lambda: 1e9) is True
     assert hard_restart(d, idle_fn=lambda: 1e9) is False  # same episode
-    assert d.events == ["cmd+n"]  # exactly one attempt
+    assert d.events == ["cmd+w", "cmd+n"]  # exactly one attempt
 
 
 def test_closing_the_emulator_stays_off_unless_asked(monkeypatch):
@@ -112,7 +157,7 @@ def test_closing_the_emulator_stays_off_unless_asked(monkeypatch):
     monkeypatch.delenv("AS400_HARD_RESTART_QUIT", raising=False)
     d = FakeEmulator(cmd_n_works=False)
     assert hard_restart(d, idle_fn=lambda: 1e9) is False
-    assert d.events == ["cmd+n"]  # never quit
+    assert d.events == ["cmd+w", "cmd+n"]  # never quit
 
 
 def test_the_deeper_fallback_closes_and_reopens_when_switched_on(monkeypatch):
@@ -120,7 +165,7 @@ def test_the_deeper_fallback_closes_and_reopens_when_switched_on(monkeypatch):
     monkeypatch.setenv("AS400_HARD_RESTART_QUIT", "1")
     d = FakeEmulator(cmd_n_works=False)
     assert hard_restart(d, idle_fn=lambda: 1e9) is True
-    assert d.events == ["cmd+n", "quit", "launch"]
+    assert d.events == ["cmd+w", "cmd+n", "quit", "launch"]
 
 
 def test_an_emulator_that_will_not_close_is_left_to_a_person(monkeypatch):
@@ -129,7 +174,7 @@ def test_an_emulator_that_will_not_close_is_left_to_a_person(monkeypatch):
     monkeypatch.setenv("AS400_HARD_RESTART_QUIT", "1")
     d = FakeEmulator(cmd_n_works=False, closes=False)
     assert hard_restart(d, idle_fn=lambda: 1e9) is False
-    assert d.events == ["cmd+n", "quit"]  # never launched
+    assert d.events == ["cmd+w", "cmd+n", "quit"]  # never launched
 
 
 def test_the_dead_end_still_asks_for_a_human_while_this_is_off(monkeypatch):
@@ -162,4 +207,4 @@ def test_it_gives_up_honestly_if_the_new_window_lands_nowhere(monkeypatch):
     d = FakeEmulator([ADDL_MSG, "Cannot connect to host 47.22.32.213 , port 23"])
     with pytest.raises(as400_capture.AS400Disconnected):
         bootstrap_session(d, launch_wait=0, step_wait=0)
-    assert d.events == ["launch", "cmd+n"]  # tried once, then stopped
+    assert d.events == ["launch", "cmd+w", "cmd+n"]  # tried once, then stopped

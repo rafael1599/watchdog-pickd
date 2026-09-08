@@ -184,11 +184,20 @@ entrar a mano. Ninguna exploración futura debe entrar aquí a propósito.
 15:47 y el escáner estuvo **36 minutos** repitiendo «AS400 not ready» cada cinco, sin capturar nada,
 hasta que Rafael abrió una sesión nueva. Un viernes por la tarde eso es el fin de semana entero.
 
-**La salida, y es de Rafael (8 sep 2026): `Cmd+N`** — *«nos abre una nueva ventana donde podemos
-iniciar sesión de nuevo»*. Funciona por una razón que conviene entender: **es un comando de la
-aplicación, no una tecla del 5250**. La pantalla muerta ignora todo lo que llegue a la *sesión*;
-no manda nada sobre los *menús de Mocha*. No cierra nada y no le quita al operador lo que tenga
-abierto — deja la ventana muerta detrás, que alguien puede cerrar cuando pase.
+**La salida, y es de Rafael (8 sep 2026): `Cmd+W` y luego `Cmd+N`** — cerrar la ventana muerta y
+abrir una de sesión nueva (*«nos abre una nueva ventana donde podemos iniciar sesión de nuevo»*).
+Funcionan por una razón que conviene entender: **son comandos de la aplicación, no teclas del
+5250**. La pantalla muerta ignora todo lo que llegue a la *sesión*; no manda nada sobre los *menús
+de Mocha*.
+
+**El orden importa y no es el intuitivo.** La ventana muerta es la que está delante —acabamos de
+leerla—, así que se cierra primero; si se abriera antes la nueva, el `Cmd+W` cerraría la buena. Y
+cerrar primero es lo que impide que las ventanas muertas se apilen detrás de la viva.
+
+**Si la muerta era la ÚLTIMA, el `Cmd+W` cierra Mocha entero** (Rafael: *«cuando solo queda una
+ventana abierta cierra por completo el AS400 y toca recuperarlo abriéndolo de nuevo»*). Entonces lo
+que toca es **reabrir la aplicación**, no pedirle otra ventana a una que ya no existe — por eso el
+código lo pregunta en vez de suponerlo.
 
 Automatizado y **apagado por defecto** (`AS400_HARD_RESTART`), no porque sea arriesgado sino para
 que la primera vez que dispare haya alguien delante. Se niega si el Mac lleva menos de 5 minutos sin
