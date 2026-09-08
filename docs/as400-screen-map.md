@@ -239,8 +239,15 @@ login manual si el operador dejaba el terminal aquí; ahora sale sola con `Cmd7`
 *Evidencia:* captura de Rafael del **2 sep 2026** sobre `03-3933BK`, pegada del terminal. Opción
 **02** del menú, la que llevaba «❓ sin explorar» desde que existe este mapa.
 
-**Cómo se llega:** desde el menú `2` → ENTER → **parte numérica del SKU sin el guion** → **TAB** →
-**código de color de 2 caracteres** (3 en casos especiales) → **TAB** → `X` → ENTER.
+**Cómo se llega:** desde el menú **`2`** → ENTER → **parte numérica del SKU sin el guion** →
+**TAB** → **código de color de 2 caracteres** (3 en casos especiales) → **TAB** → **`X`**.
+
+**La `X` es la última tecla y no lleva ENTER detrás.** Rafael, 8 sep: *«después de presionar X no se
+debe presionar otra tecla, solo copiar de frente y continuar con el flujo»*. Envía sola. El ENTER
+que el código ponía ahí era una suposición mía, retirada.
+
+**Se entra con `2`, nunca con `3`** — *«el 3 es para órdenes»*. El `3` sólo se teclea en el camino
+de vuelta a la búsqueda de órdenes, que es su función.
 **Si el SKU no tiene color** (`01-0169`, y son 126 bicis), se pulsa **TAB directo sin llenarlo**
 (Rafael, 2 sep).
 `03-3933BK` se teclea `033933` · `BK` · `X`, y la pantalla lo repinta como `Stock Number: 03 3933 BK`.
