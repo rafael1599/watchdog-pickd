@@ -21,6 +21,7 @@ from as400_capture import (
     STATE_MESSAGE,
     STATE_ORDER_INQUIRY,
     STATE_ORDER_SEARCH,
+    STATE_STOCK_INQUIRY,
     STATE_UNKNOWN,
     AS400Disconnected,
     AS400ManualLoginRequired,
@@ -1007,16 +1008,28 @@ def test_every_key_the_flow_presses_has_a_real_key_code():
         MochaDriver(app_name="Mocha TN5250").key("f99")
 
 
-def test_bootstrap_unknown_screen_tries_the_operator_way_out_once():
+def test_bootstrap_unknown_screen_tries_the_operator_way_out_three_times():
     # An unrecognized screen is no longer an immediate give-up: F6·F6·F7 is the
-    # operator's own way back to the SALESN menu from anywhere (Rafael 2026-09-01).
-    # This screen never changes, so after ONE attempt it still asks for a human —
-    # and it must not keep hammering keys at a terminal nobody is watching.
+    # operator's own way back to the SALESN menu from anywhere (Rafael 2026-09-01),
+    # and it gets THREE tries before giving up (Rafael 2026-09-02: "se puede
+    # reintentar hasta 3 veces antes de rendirse en caso de atascamiento").
+    # This screen never changes, so it still ends asking for a human — the point
+    # is that it stops, rather than hammering keys at a terminal nobody watches.
+    driver = StatefulDriver("MAIN MENU\n1. Inventory\n2. Customers")
+    with pytest.raises(AS400ManualLoginRequired):
+        bootstrap_session(driver, launch_wait=0, step_wait=0)
+    assert driver.keys == ["f6", "f6", "f7"] * 3
+    assert driver.typed is None
+
+
+def test_the_retry_count_is_retunable_without_a_deploy(monkeypatch):
+    # Every change to the watchdog costs a trip to Bay 2, so the count is read at
+    # call time: a .env edit and a restart is enough to make it one again.
+    monkeypatch.setenv("AS400_UNSTICK_TRIES", "1")
     driver = StatefulDriver("MAIN MENU\n1. Inventory\n2. Customers")
     with pytest.raises(AS400ManualLoginRequired):
         bootstrap_session(driver, launch_wait=0, step_wait=0)
     assert driver.keys == ["f6", "f6", "f7"]
-    assert driver.typed is None
 
 
 def test_bootstrap_unsticks_an_unknown_screen_back_to_the_order_view():
@@ -1046,19 +1059,19 @@ def test_customer_display_is_classified_and_exited_with_f7():
     assert driver.keys[0] == "f7"  # EXIT, per the screen's own legend
 
 
-def test_stock_inquiry_is_not_recognized_yet_and_only_the_generic_unstick_escapes():
-    # Pinned on purpose: today nothing knows this screen, so the operator leaving
-    # the terminal on it reads as `unknown` and the daemon's only move is the
-    # generic F6·F6·F7 — which does get out, per the screen's own legend.
-    # Recognizing it (STATE_STOCK_INQUIRY + a STOCKINQUIRY marker) is F2 of
-    # docs/sku-catalog-enrichment.md; when that lands, this test flips.
-    assert classify_screen(STOCK_INQUIRY_SCREEN) == STATE_UNKNOWN
+def test_stock_inquiry_is_classified_and_the_daemon_walks_out_of_it():
+    # Both forms of the screen are recognized, so the operator leaving the
+    # terminal parked on either one no longer reads as `unknown`.
+    assert classify_screen(STOCK_INQUIRY_SCREEN) == STATE_STOCK_INQUIRY
+    assert classify_screen(STOCK_NOTES_SCREEN) == STATE_STOCK_INQUIRY
 
     screens = iter([STOCK_INQUIRY_SCREEN, MENU_SCREEN, READY])
     driver = FakeDriver()
     driver.copy_screen = lambda: next(screens)
     assert bootstrap_session(driver, launch_wait=0, step_wait=0) == STATE_ORDER_SEARCH
-    assert driver.keys[:3] == ["f6", "f6", "f7"]
+    # One key, not the F6·F6·F7 sweep: both forms print Cmd7 EXIT in their own
+    # legend, so a recognized screen leaves by the door it advertises.
+    assert driver.keys[0] == "f7"
 
 
 def test_stock_inquiry_carries_the_fields_the_catalog_backfill_reads():
@@ -1118,11 +1131,12 @@ def test_bootstrap_runs_login_then_verifies_order_screen():
 
 
 def test_bootstrap_raises_if_login_does_not_reach_order_screen():
-    # Third screen: after the login macro the view is still unknown, the one
-    # unstick attempt is spent on it, and it stays unknown → a human is needed.
-    screens = iter(["Sign On\nPassword", "MAIN MENU", "MAIN MENU"])
+    # After the login macro the view is still unknown, every unstick attempt is
+    # spent on it, and it stays unknown → a human is needed. The screen no longer
+    # runs out: the retries are what is being tested, not the fixture's length.
+    screens = iter(["Sign On\nPassword"])
     driver = FakeDriver()
-    driver.copy_screen = lambda: next(screens)
+    driver.copy_screen = lambda: next(screens, "MAIN MENU")
     with pytest.raises(AS400ManualLoginRequired):
         bootstrap_session(driver, launch_wait=0, step_wait=0)
 

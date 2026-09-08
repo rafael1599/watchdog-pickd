@@ -102,6 +102,7 @@ STATE_LOGIN = "login"  # AS400 sign-on screen
 STATE_MENU = "menu"  # SALESN options menu (pick 3 = Order Inquiry)
 STATE_MESSAGE = "message"  # transient "Message Display / Press Enter to continue"
 STATE_CUSTOMER_DISPLAY = "customer_display"  # CUSTOMER DISPLAY (menu option 01)
+STATE_STOCK_INQUIRY = "stock_inquiry"  # STOCK INQUIRY (menu option 02) — detail OR its NOTES
 STATE_ORDER_SEARCH = "order_search"  # logged in, ready to type an order number
 STATE_ORDER_INQUIRY = "order_inquiry"  # viewing an order
 STATE_UNKNOWN = "unknown"  # unrecognized → ask the user to log in manually
@@ -153,6 +154,14 @@ MESSAGE_MARKERS = ("PRESSENTERTOCONTINUE",)
 # e-mail), so the daemon can find the terminal parked here. Its own legend says
 # Cmd7 EXIT, which is the way back to the menu.
 CUSTOMER_MARKERS = ("CUSTOMERDISPLAY",)
+# Option 02 of the SALESN menu: the catalogue name, the AS400 weight and its own
+# stock by warehouse (docs/as400-screen-map.md §2.12).
+#
+# ⚠️ This marker matches TWO screens. Cmd10 NOTES (§2.12b) repaints the same title
+# with NONE of the fields — no Description:, no Weight:, no On Hand. Classifying is
+# enough to recognize and leave; it is NOT enough to read from. Anything that reads
+# a field must call `is_stock_detail_screen` first (see it for why).
+STOCK_MARKERS = ("STOCKINQUIRY",)
 
 # States from which a capture can start (logged in, on an order view).
 _READY_STATES = (STATE_ORDER_SEARCH, STATE_ORDER_INQUIRY)
@@ -180,11 +189,49 @@ def classify_screen(text: str) -> str:
         return STATE_MESSAGE
     if any(m in norm for m in CUSTOMER_MARKERS):
         return STATE_CUSTOMER_DISPLAY
+    if any(m in norm for m in STOCK_MARKERS):
+        return STATE_STOCK_INQUIRY
     if "ORDERINQUIRY" in norm:
         return STATE_ORDER_INQUIRY
     if "ORDERNUMBER" in norm:
         return STATE_ORDER_SEARCH
     return STATE_UNKNOWN
+
+
+def is_stock_detail_screen(text: str) -> bool:
+    """True only for the STOCK INQUIRY screen that actually carries the fields.
+
+    R10. The title is NOT a discriminator: Cmd10 NOTES (docs/as400-screen-map.md
+    §2.12b) repaints the same "S T O C K   I N Q U I R Y" heading and the same
+    Stock Number, with none of the data — no labelled Description, no Weight, no
+    On Hand. Something that landed there believing it was on the detail screen
+    would read `Weight` as ABSENT rather than as "I am not where I think I am",
+    and write a bike's weight from a screen that never had one.
+
+    So the test is two fields that exist on the detail and on nothing else. The
+    labelled `Description:` matters specifically: NOTES prints the description
+    too, but bare on the Stock Number line, with no label.
+    """
+    norm = _norm_screen(text)
+    return "DESCRIPTION:" in norm and "WEIGHT:" in norm
+
+
+def sku_screen_fields(sku: str):
+    """Split a canonical SKU into what the two entry fields want.
+
+    `03-3933BK` → ("033933", "BK"). Rafael, 2026-09-02: type the numeric part
+    WITHOUT the dash, TAB, then the 2- (or 3-) character colour code, TAB, X.
+    A SKU with no colour suffix takes a blank TAB — the 126 bikes shaped like
+    `01-0169` are in the queue, not excluded.
+
+    Returns None for anything that isn't an AS400 stock number: the FedEx/USPS
+    tracking numbers and the serials, which AS400 does not know (R6). The SHAPE
+    is the filter, so no list of exceptions can go stale.
+    """
+    m = re.fullmatch(r"(\d{2})-(\d{4})([A-Z]{0,3})", (sku or "").strip().upper())
+    if not m:
+        return None
+    return m.group(1) + m.group(2), m.group(3)
 
 
 def _norm_screen(text: str) -> str:
@@ -374,6 +421,19 @@ class AS400Disconnected(CaptureError):
 
 class AS400ManualLoginRequired(CaptureError):
     """The screen is unrecognized or not logged in — a human must log in first."""
+
+
+class StockSkuNotFound(CaptureError):
+    """AS400 has no stock record for that number — mark it and never ask again (R7)."""
+
+
+class StockScreenMismatch(CaptureError):
+    """We are not on the stock DETAIL screen for the SKU we asked for.
+
+    Either the NOTES screen (same title, no fields — R10), some other view, or
+    the right kind of screen showing somebody else's record. Nothing is read
+    from it and nothing is written.
+    """
 
 
 class OrderVoidSkip(CaptureError):
@@ -800,6 +860,53 @@ def unstick_to_menu(driver, step_wait: float = 0.6) -> None:
         time.sleep(step_wait)
 
 
+def _unstick_tries() -> int:
+    """How many times F6·F6·F7 is worth trying before giving up.
+
+    Rafael, 2026-09-02: "F6 F6 F7 se puede reintentar hasta 3 veces antes de
+    rendirse en caso de atascamiento". Read at call time so Bay 2 can retune it
+    with a .env edit and a restart instead of a deploy.
+    """
+    return max(1, int(_env_float("AS400_UNSTICK_TRIES", 3)))
+
+
+def return_to_order_search(driver, step_wait: float = 0.6, read_fn=None) -> str:
+    """Put the terminal back on the order-search screen, and PROVE it by reading.
+
+    The return trip is part of the step, not a tidy-up: a step that ends anywhere
+    else costs the scanner its next order. Walks back with the operator's own way
+    out (F6·F6·F7 → menu → 3), re-reading between attempts, up to
+    AS400_UNSTICK_TRIES. Raises rather than leaving the terminal parked somewhere
+    the next capture won't recognize.
+
+    Never touches the ADDITIONAL MESSAGE INFORMATION dead end, where no key works.
+    """
+    read = read_fn or driver.copy_screen
+    for _ in range(_unstick_tries()):
+        screen = read()
+        state = classify_screen(screen)
+        if state == STATE_DISCONNECTED:
+            raise AS400Disconnected("The AS400 dropped while returning to the order search.")
+        if state == STATE_ORDER_SEARCH:
+            return screen
+        if _is_message_info_screen(screen):
+            raise AS400ManualLoginRequired(
+                "The AS400 is on the 'ADDITIONAL MESSAGE INFORMATION' screen, where no key "
+                "works. Close the session and log back in."
+            )
+        if state == STATE_MENU:
+            driver.type_text("3")  # 03. Order Inquiry
+            time.sleep(step_wait)
+            driver.key("enter")
+        else:
+            unstick_to_menu(driver, step_wait=step_wait)
+        time.sleep(step_wait)
+
+    raise AS400ManualLoginRequired(
+        f"Couldn't get back to the order search after {_unstick_tries()} tries of F6·F6·F7."
+    )
+
+
 def _advance_toward_order_screen(
     driver, state, login_steps, step_wait, allow_unstick=False
 ) -> bool:
@@ -823,6 +930,10 @@ def _advance_toward_order_screen(
         driver.key("enter")  # "Press Enter to continue"
     elif state == STATE_CUSTOMER_DISPLAY:
         driver.key("f7")  # EXIT, per the screen's own legend → back to the menu
+    elif state == STATE_STOCK_INQUIRY:
+        # Cmd7 EXIT on both forms — the detail screen's footer legend and the
+        # NOTES screen's "(Cmd7-Exit)" corner say the same key.
+        driver.key("f7")
     elif state == STATE_UNKNOWN and allow_unstick:
         unstick_to_menu(driver, step_wait=step_wait)
     else:
@@ -835,7 +946,7 @@ def bootstrap_session(
     launch_wait: float = LAUNCH_WAIT,
     login_steps=DEFAULT_LOGIN_STEPS,
     step_wait: float = 0.6,
-    max_steps: int = 6,
+    max_steps: int = 8,
 ):
     """Open the emulator and ensure we end logged in at the order screen.
 
@@ -854,7 +965,7 @@ def bootstrap_session(
     time.sleep(launch_wait)
     driver.focus()
 
-    unstick_used = False
+    unsticks = 0
     for _ in range(max_steps):
         screen = driver.copy_screen()
         state = classify_screen(screen)
@@ -874,7 +985,7 @@ def bootstrap_session(
                 "key works. Close the session and log back in, then try again."
             )
 
-        allow_unstick = state == STATE_UNKNOWN and not unstick_used
+        allow_unstick = state == STATE_UNKNOWN and unsticks < _unstick_tries()
         if not _advance_toward_order_screen(
             driver, state, login_steps, step_wait, allow_unstick=allow_unstick
         ):
@@ -883,14 +994,104 @@ def bootstrap_session(
                 "to the order-search screen, then try again."
             )
         if allow_unstick:
-            unstick_used = True
-            log.info("AS400 connect: unknown screen — tried F6·F6·F7 back to the menu")
+            unsticks += 1
+            log.info(
+                "AS400 connect: unknown screen — tried F6·F6·F7 back to the menu (%d/%d)",
+                unsticks,
+                _unstick_tries(),
+            )
         time.sleep(step_wait)
 
     raise AS400ManualLoginRequired(
         "Couldn't reach the order-search screen after several steps. "
         "Log in manually, then try again."
     )
+
+
+def capture_stock_inquiry(
+    sku: str,
+    driver,
+    page_wait=None,
+    step_wait: float = 0.6,
+    read_fn=None,
+) -> str:
+    """Drive the terminal to STOCK INQUIRY for `sku` and return the screen text.
+
+    READ ONLY. It types the SKU into a lookup and copies what comes back; it
+    never presses a key that writes. It does NOT bring the terminal home either
+    — the caller owns that (`return_to_order_search`), because the return trip
+    has to run whether this succeeded or raised.
+
+    The route (docs/as400-screen-map.md §2.12, Rafael 2026-09-02):
+
+        order search ──F7──▶ menu ──2 + ENTER──▶ Stock Inquiry
+            ──digits, TAB, colour, TAB, X, ENTER──▶ the detail screen
+
+    Raises StockSkuNotFound when the SKU has a shape AS400 cannot look up (R6)
+    or the lookup does not land on a stock screen, and StockScreenMismatch when
+    it lands on one that is either the NOTES form (R10) or somebody else's
+    record.
+    """
+    if page_wait is None:
+        page_wait = _env_float("AS400_PAGE_WAIT", PAGE_WAIT_DEFAULT)
+    read = read_fn or driver.copy_screen
+
+    fields = sku_screen_fields(sku)
+    if fields is None:
+        # The FedEx/USPS tracking numbers and the serials. The SHAPE is the
+        # filter, so no hand-kept list of exceptions can go stale.
+        raise StockSkuNotFound(f"{sku!r} isn't an AS400 stock number — nothing to look up.")
+    digits, colour = fields
+
+    # Verify before driving, exactly like a capture: never type into a dead or
+    # unrecognized screen.
+    screen = read()
+    state = classify_screen(screen)
+    if state == STATE_DISCONNECTED:
+        raise AS400Disconnected("The AS400 isn't connected — not looking up a SKU.")
+    if state not in _READY_STATES and state != STATE_MENU:
+        raise AS400ManualLoginRequired(
+            "The AS400 isn't on the order search or the menu, so a SKU lookup would be "
+            "typing into an unknown screen."
+        )
+
+    if state != STATE_MENU:
+        driver.key("f7")  # EXIT → SALESN menu
+        time.sleep(step_wait)
+        if classify_screen(read()) != STATE_MENU:
+            raise StockScreenMismatch("F7 didn't land on the SALESN menu — not typing further.")
+
+    driver.type_text("2")  # 02. Stock File Inquiry
+    time.sleep(step_wait)
+    driver.key("enter")
+    time.sleep(page_wait)
+
+    # The lookup itself. A SKU with no colour suffix takes a blank TAB — that is
+    # the 126 bikes shaped like `01-0169`, and they are in the queue, not out.
+    driver.type_text(digits)
+    driver.key("tab")
+    if colour:
+        driver.type_text(colour)
+    driver.key("tab")
+    driver.type_text("X")
+    # ❓ Rafael's walkthrough ends at the X. ENTER is the 5250 default for
+    # submitting a field, and if the X already submitted it this lands on the
+    # result screen, where ENTER only redraws (§2.9) — harmless either way.
+    driver.key("enter")
+    time.sleep(page_wait)
+
+    screen = read()
+    if classify_screen(screen) != STATE_STOCK_INQUIRY:
+        # Includes whatever AS400 shows for a stock number it doesn't have. We
+        # have never seen that screen; phase F2 logs it so it can be mapped.
+        raise StockSkuNotFound(f"The lookup for {sku} didn't land on a stock screen.")
+    if not is_stock_detail_screen(screen):
+        # R10: same title, no fields. Reading here would report `Weight` as
+        # absent instead of as "I am not where I think I am".
+        raise StockScreenMismatch(
+            f"Landed on the STOCK INQUIRY NOTES form for {sku} — no fields to read."
+        )
+    return screen
 
 
 def capture_order(

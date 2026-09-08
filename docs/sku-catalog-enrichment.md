@@ -609,3 +609,63 @@ el archivo de FedEx en vez de fusionarse por `model` + `size`.
 demasiado valiosas para adivinarlas. La forma es una acción con Preview/Apply que proponga el split,
 **simule el export (R12)** y muestre qué se fusiona y qué se caería, para aprobarla en bloque. Es su
 propio PRD, en pickd, y no bloquea nada de F2/F3.
+
+---
+
+## 18) F2 construido (8 sep 2026) — lee, no escribe
+
+Lo que hay en el repo, sin desplegar todavía.
+
+| | |
+|---|---|
+| `as400_capture.py` | `STATE_STOCK_INQUIRY`, `is_stock_detail_screen` (**R10**), `sku_screen_fields`, `capture_stock_inquiry`, `return_to_order_search` (**R3**), y los 3 intentos de `F6·F6·F7` |
+| `parser.py` | `parse_stock_number`, `parse_stock_inquiry` |
+| `sku_enrichment.py` (nuevo) | la cola (**R5/R6**), `plan_write` (**§6/R4**), `run_sku_step`, la lista de no-conocidos (**R7**) |
+| `auto_scanner.py` | `_run_sku_gap()` dentro de la rama `not_found` |
+| `tests/test_sku_enrichment.py` | 31 tests; la suite entera queda en **443** |
+
+**Nace apagado.** `SKU_ENRICH=0`. Es una desviación deliberada de la tabla de §10, que lo daba en
+`1`: el mismo deploy lleva el cambio de `unstick_to_menu` de **un** intento a **tres**, y lo primero
+que hace un deploy no debe ser ponerse a manejar el terminal solo. Se enciende editando `.env` y
+reiniciando el LaunchAgent — que es exactamente la propiedad que §10 buscaba.
+
+**Lo que el paso hace hoy:** navega, lee, parsea, **comprueba que el `Stock Number` en pantalla es
+el que pidió**, calcula el plan de escritura con `plan_write` y lo **loguea**. Cero escrituras.
+Vuelve a la búsqueda de órdenes en un `finally`, así que la vuelta ocurre tanto si el lookup salió
+bien como si reventó, y si no llega la cola se pausa sola.
+
+### 18.1 Lo que los tests fijan antes de que pueda hacer daño
+
+`plan_write` es la función a la que F3 le va a dar una conexión `service_role` sin RLS debajo, así
+que sus reglas están pinchadas ahora: el hueco del peso es `weight_verified = false` y no un NULL;
+una lectura de báscula **nunca** se toca; el plan **jamás** pone `weight_verified` en true; el
+nombre sólo se planea si `model` está vacío. Y aparte: una guía de FedEx no gasta ni una tecla
+(**R6** por forma), la pantalla de NOTES se **rechaza** en vez de leerse (**R10**), un `Stock
+Number` que no es el nuestro corta el paso, `F6·F6·F7` se rinde a los 3, y una excepción del paso
+de SKU **nunca** se lleva por delante a las órdenes.
+
+### 18.2 La contradicción que F2 destapa, y que F3 no puede esquivar
+
+> ❓ **Q14 — ¿dónde parte F3 el nombre?** `plan_write` sabe planear el **peso** —ese no necesita
+> partir nada— pero para `model`/`size`/`color` hace falta la regla de `parseBikeName`, que vive en
+> **TypeScript** y que el 2 sep se decidió **no portar a Python** (§16.3, «sería un segundo espejo»).
+> F3 escribe desde el watchdog, en Python. Las dos decisiones no caben juntas.
+>
+> Hoy `plan_write` devuelve la descripción cruda bajo la llave `_description` y F2 la loguea, que es
+> honesto para una fase que no escribe. *Default propuesto:* el watchdog escribe la descripción
+> cruda del AS400 en una columna nueva (`sku_metadata.as400_description`) y **pickd la parte**, donde
+> la regla ya vive — no es una tabla intermedia de aprobación, es poner cada mitad donde su regla
+> está. **Esto se decide antes de F3, no durante.**
+
+### 18.3 Lo que hay que ver en Bay 2 antes de encender F3
+
+Con `SKU_ENRICH=1` y un día de log, F2 contesta lo que sólo el terminal sabe:
+
+1. **¿Hace falta el ENTER final?** El recorrido de Rafael acaba en la `X`. El código pulsa ENTER
+   después; si la `X` ya disparaba, ese ENTER cae sobre la pantalla de resultado, donde sólo
+   redibuja (§2.9). Inofensivo en los dos casos, pero conviene saberlo.
+2. **¿Qué pantalla sale cuando el SKU no existe?** Nadie la ha visto. F2 la trata como
+   `StockSkuNotFound` y la loguea; con el texto delante entra al mapa.
+3. **¿Cuánto cuesta un paso?** La línea de log lleva los segundos. Es el número que decide si «un
+   SKU por hueco» se queda o si `SKU_ENRICH_MAX_PER_GAP` sube.
+4. **¿`B-Bike/P-Part` discrepa con `is_bike`?** Se loguea cada desacuerdo y no se cambia nada (Q6).

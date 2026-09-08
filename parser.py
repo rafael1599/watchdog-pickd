@@ -58,6 +58,74 @@ def canonical_sku(raw_sku: str) -> str:
     return v
 
 
+# ── STOCK INQUIRY (menu option 02) ───────────────────────────────────────────
+# docs/as400-screen-map.md §2.12. Reached with 2 → the SKU digits without the
+# dash → TAB → the colour code → TAB → X.
+
+# `Stock Number: 03 3933 BK` — three fields on the screen, and the colour is
+# optional (126 bikes have no suffix). The trailing lookahead is what keeps a
+# suffix-less SKU from swallowing the `B` of the `B-Bike/P-Part:` label that
+# sits in the same row: a real field ends at the column gap or the line.
+_STOCK_NUMBER_RE = re.compile(
+    r"Stock\s*Number:\s*(\d{2})\s+(\d{1,4})(?:\s+([A-Z]{1,3}))?(?=\s{2,}|\s*$)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def parse_stock_number(text: str) -> Optional[str]:
+    """The SKU the STOCK INQUIRY screen is showing, in canonical spelling.
+
+    `Stock Number: 03 3933 BK` → `03-3933BK`. This is the guard that makes a
+    write safe: if it isn't the SKU we asked for, we are on somebody else's
+    record and nothing may be written — the same rule as the account check on
+    CUSTOMER DISPLAY.
+    """
+    m = _STOCK_NUMBER_RE.search(text or "")
+    if not m:
+        return None
+    return f"{m.group(1)}-{m.group(2).zfill(4)}{(m.group(3) or '').upper()}"
+
+
+def parse_stock_inquiry(text: str) -> Dict:
+    """Everything the STOCK INQUIRY detail screen carries that we care about.
+
+    Returns `{sku, description, kind, model_year, weight_lbs, on_hand}` with
+    None for anything absent. Callers must check `sku` against the one they
+    asked for before using the rest.
+
+    ⚠️ `weight_lbs` is NOT a scale reading. For `03-3933BK` the screen says 36
+    while Pickd holds 33.6 measured on a scale, so whatever AS400 stores there
+    is net or nominal. It is better than the trigger's generic 45 and worse than
+    a real weighing, and the caller treats it that way: it never sets
+    `weight_verified` (docs/sku-catalog-enrichment.md R4).
+    """
+    t = text or ""
+
+    def one(pattern, group=1, flags=re.IGNORECASE):
+        m = re.search(pattern, t, flags)
+        return m.group(group).strip() if m else None
+
+    weight = one(r"Weight:\s*([\d.]+)")
+    year = one(r"Model\s*Year:\s*(\d{4})")
+
+    on_hand = None
+    heads = re.search(r"Inventory\s+([A-Z]{2})\s+([A-Z]{2})\s+([A-Z]{2})", t, re.IGNORECASE)
+    counts = re.search(r"On\s*Hand\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)", t, re.IGNORECASE)
+    if heads and counts:
+        on_hand = {heads.group(i).upper(): int(counts.group(i)) for i in (1, 2, 3)}
+
+    return {
+        "sku": parse_stock_number(t),
+        # Rafael, 2026-09-02: this one is NOT truncated at 30 like the item page.
+        "description": one(r"^\s*Description:\s*(.+?)\s*$", flags=re.IGNORECASE | re.MULTILINE),
+        # 'B' or 'P' — AS400's own answer to what Pickd guesses with a prefix trigger.
+        "kind": one(r"B-Bike/P-Part:\s*([BP])\b"),
+        "model_year": year,
+        "weight_lbs": float(weight) if weight else None,
+        "on_hand": on_hand,
+    }
+
+
 def parse_order_number(text: str) -> Optional[str]:
     """
     Extract order number from text. Position-independent regex.

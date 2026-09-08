@@ -252,6 +252,48 @@ def _interruptible_wait(seconds: float) -> None:
         _kick.wait(min(0.5, remaining))
 
 
+def _run_sku_gap() -> None:
+    """Spend one gap on the AS400 catalogue, if that is switched on.
+
+    Held to ONE SKU (docs/sku-catalog-enrichment.md §9) and wrapped whole: this
+    is a side errand, so nothing it can do may take the scanner down with it.
+    We are already inside `capture_lock` and past the operator-idle gate, so it
+    inherits both — it never fights the human for the keyboard.
+    """
+    try:
+        import sku_enrichment
+
+        if not sku_enrichment.enabled():
+            return
+        for _ in range(sku_enrichment.max_per_gap()):
+            row = sku_enrichment.next_sku()
+            if not row:
+                log.info("auto-scan: the SKU queue is empty — nothing to look up")
+                return
+            res = sku_enrichment.run_sku_step(_driver_for_sku_step(), row)
+            if not res.get("returned", True):
+                # The terminal isn't back on the order search. Stop touching it;
+                # the next cycle's bootstrap is what recovers.
+                log.warning("auto-scan: SKU step didn't get home — pausing the SKU queue")
+                return
+            if res["action"] in ("unavailable", "error"):
+                return
+    except Exception:
+        log.exception("auto-scan: SKU step crashed — the orders keep going")
+
+
+_sku_driver = None
+
+
+def _driver_for_sku_step():
+    """The same kind of driver the captures use. Kept module-level so the step
+    doesn't pay for a new one every gap."""
+    global _sku_driver
+    if _sku_driver is None:
+        _sku_driver = MochaDriver()
+    return _sku_driver
+
+
 def _loop() -> None:
     log.info(
         "auto-scanner started (from #%s) — first capture in %.0fs",
@@ -304,6 +346,14 @@ def _loop() -> None:
                     note_as400(True)
                 except Exception as e:
                     log.info("auto-scan: AS400 not ready (%s)", e)
+            elif action == "not_found":
+                # The gap. Orders and SKUs interleave (Rafael, 2026-09-02): the
+                # SKU step runs INSIDE this wait, it never replaces the search
+                # for the next order — that already ran, and it is what the
+                # scanner exists for. ONE SKU, then back to sleeping the rest of
+                # the not-found wait, same cadence as the orders themselves.
+                _run_sku_gap()
+                log.info("auto-scan: %s on #%s (waiting %.0fs)", action, res["number"], wait)
             elif action == "captured":
                 log.info("auto-scan: cached order #%s", res["number"])
             else:
