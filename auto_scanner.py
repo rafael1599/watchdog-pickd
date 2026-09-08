@@ -64,6 +64,10 @@ IDLE_POLL_SEC = float(os.getenv("SCAN_IDLE_POLL_SEC", "15"))
 # AS400) before capturing anyway — guards a pathologically large run of cached
 # orders from spinning one step forever.
 MAX_SKIP_CACHED_PER_STEP = int(os.getenv("SCAN_MAX_SKIP_CACHED", "500"))
+# How long the AS400 may be unreachable before the log stops being polite about
+# it. Ten minutes is longer than any normal hiccup and far shorter than the 36
+# that went unnoticed on 2026-09-08.
+UNAVAILABLE_LOUD_SEC = float(os.getenv("SCAN_UNAVAILABLE_LOUD_SEC", "600"))
 
 # Serializes all AS400/Mocha access between the auto-scanner and manual captures.
 capture_lock = threading.Lock()
@@ -330,6 +334,9 @@ def _loop() -> None:
     _interruptible_wait(SCAN_INITIAL_DELAY_SEC)
     driver = None
     paused_since = None
+    # How long the AS400 has been unreachable, and whether we've said so loudly.
+    _unavailable_since = None
+    _unavailable_shouted = False
     while not _stop.is_set():
         # Pause while the operator is actively using the computer, or while a manual
         # capture holds the lock — never fight the human for the keyboard. A manual
@@ -365,14 +372,39 @@ def _loop() -> None:
             # Health beacon: every non-unavailable step means AS400 answered
             # (a not_found is still a response — "invalid order number").
             note_as400(action != "unavailable")
+            if action != "unavailable":
+                _unavailable_since = None
+                _unavailable_shouted = False
             if action == "unavailable":
                 # Try to (re)connect; if it works, retry promptly next iteration.
                 try:
                     bootstrap_session(driver)
                     wait = FOUND_NEXT_DELAY_SEC
                     note_as400(True)
+                    _unavailable_since = None
                 except Exception as e:
-                    log.info("auto-scan: AS400 not ready (%s)", e)
+                    # A stuck terminal used to log at INFO — the same level as
+                    # "that order doesn't exist yet" — every five minutes, for
+                    # as long as it took somebody to notice. On 2026-09-08 that
+                    # was 36 minutes of a working day, and on a Friday evening
+                    # it would have been the weekend. After UNAVAILABLE_LOUD_SEC
+                    # it says so at ERROR, once, naming what a person has to do.
+                    if _unavailable_since is None:
+                        _unavailable_since = time.monotonic()
+                        log.info("auto-scan: AS400 not ready (%s)", e)
+                    else:
+                        stuck = time.monotonic() - _unavailable_since
+                        if stuck >= UNAVAILABLE_LOUD_SEC and not _unavailable_shouted:
+                            _unavailable_shouted = True
+                            log.error(
+                                "auto-scan: the AS400 has been unreachable for %.0f min and "
+                                "nothing has been captured in that time. A person has to open "
+                                "the session in Mocha. (%s)",
+                                stuck / 60,
+                                e,
+                            )
+                        else:
+                            log.info("auto-scan: AS400 not ready for %.0f min (%s)", stuck / 60, e)
             elif action == "not_found":
                 # The gap. Orders and SKUs interleave (Rafael, 2026-09-02): the
                 # SKU step runs INSIDE this wait, it never replaces the search

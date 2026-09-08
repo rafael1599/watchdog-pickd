@@ -180,6 +180,20 @@ podría saber cuántas páginas faltan en vez de descubrirlo pulsando.
 **⚠️ Lo que de verdad hay que saber:** aquí **ninguna tecla funciona** y sólo se sale volviendo a
 entrar a mano. Ninguna exploración futura debe entrar aquí a propósito.
 
+**Lo que cuesta, medido el 8 sep 2026:** la orden 881390 era VOID, el terminal acabó aquí a las
+15:47 y el escáner estuvo **36 minutos** repitiendo «AS400 not ready» cada cinco, sin capturar nada,
+hasta que Rafael abrió una sesión nueva. Un viernes por la tarde eso es el fin de semana entero.
+
+**Salida automática, apagada por defecto (`AS400_HARD_RESTART`).** Rafael, 8 sep: *«se puede cerrar
+por completo y abrirlo de nuevo por lo menos una vez, en última instancia»*. Cerrar el emulador **no
+es una tecla**, así que es lo único que puede sacar de aquí sin una persona — y por eso mismo lleva
+todos los frenos: sólo con el Mac **sin tocar 5 minutos** (cerrar Mocha bajo las manos de alguien le
+tira su orden de la pantalla), **una vez por episodio** con media hora de enfriamiento, y si el
+emulador no cierra, se deja para una persona en vez de abrir una segunda ventana.
+❓ Falta confirmar en Bay 2 **si Mocha reconecta solo al abrirse** y **si cerrarlo saca un diálogo**
+— un diálogo bloquea todos los Apple events, y cambiaría un terminal atascado por uno que nadie
+puede manejar.
+
 ### 2.11 `C U S T O M E R   D I S P L A Y` → `STATE_CUSTOMER_DISPLAY`
 *Evidencia:* `tests/test_as400_capture.py` (`CUSTOMER_DISPLAY_SCREEN`, capturada por Rafael el 1 sep
 2026). Opción **01** del menú. **Aquí está el teléfono** (§5b).

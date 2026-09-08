@@ -711,6 +711,44 @@ class MochaDriver:
         else:
             subprocess.run(["open", "-a", target], check=True)
 
+    def quit(self) -> bool:
+        """Ask the emulator to quit. Returns True once it is really gone.
+
+        The polite `quit` first, because a session Mocha closes itself is a
+        session the host sees closed. If it is still up after the grace period
+        we escalate to a TERM signal: the whole reason we are here is a screen
+        that answers nothing, and a Mocha showing a modal would ignore the
+        Apple event exactly the same way.
+
+        Never called on its own — see `hard_restart`, which owns the guards.
+        """
+        target = (
+            f'application id "{self.bundle_id}"'
+            if self.bundle_id
+            else f'application "{self.app_name}"'
+        )
+        try:
+            self._osascript(f"tell {target} to quit")
+        except Exception as e:  # a dialog, a hung app: fall through to the signal
+            log.info("AS400 restart: the polite quit didn't take (%s)", e)
+
+        deadline = time.time() + _env_float("AS400_QUIT_GRACE", 8.0)
+        while time.time() < deadline:
+            if not self._is_running():
+                return True
+            time.sleep(0.5)
+
+        log.info("AS400 restart: still running after the grace period — sending TERM")
+        subprocess.run(["pkill", "-x", self.app_name], check=False)
+        time.sleep(1.5)
+        return not self._is_running()
+
+    def _is_running(self) -> bool:
+        out = subprocess.run(
+            ["pgrep", "-x", self.app_name], capture_output=True, text=True, check=False
+        )
+        return bool(out.stdout.strip())
+
     def focus(self):
         # Activate by bundle id when available (reliable for sandboxed apps);
         # otherwise bring the running process to the front by name. Only when it
@@ -941,6 +979,90 @@ def _advance_toward_order_screen(
     return True
 
 
+# The last hard restart, so a stuck terminal can't turn into a relaunch loop.
+_last_hard_restart = 0.0
+
+
+def hard_restart_enabled() -> bool:
+    """Off until Bay 2 confirms what Mocha does when it opens (see the docs).
+
+    Two unknowns this cannot assume: whether Mocha reconnects to the host on
+    its own, and whether quitting it raises a confirmation dialog — a dialog
+    blocks every Apple event afterwards, which would trade a stuck terminal for
+    a stuck one nobody can drive at all.
+    """
+    return os.getenv("AS400_HARD_RESTART", "0") in ("1", "true", "True", "yes")
+
+
+def hard_restart(driver, idle_fn=None) -> bool:
+    """Close the emulator and open it again. The last resort, and only that.
+
+    The ADDITIONAL MESSAGE INFORMATION screen answers NO key (§2.10), so once
+    the terminal lands there the daemon is finished until a person re-opens the
+    session. On 2026-09-08 that cost 36 minutes of a working day and, on a
+    Friday evening, would cost the weekend. Rafael: "se puede cerrar por
+    completo y abrirlo de nuevo por lo menos una vez, en última instancia".
+
+    "Última instancia" is the whole design. This is the only thing in the system
+    that closes an application a PERSON is sharing, so it refuses unless:
+
+      - it is switched on at all (default off);
+      - the Mac has been untouched for AS400_HARD_RESTART_IDLE_SEC — five
+        minutes by default, five times the scanner's normal gate, because
+        quitting Mocha under somebody's hands would throw away the order they
+        were reading;
+      - the last attempt was more than AS400_HARD_RESTART_COOLDOWN_SEC ago, so
+        a terminal that cannot be saved is not relaunched every five minutes
+        all night.
+
+    Returns True only when the emulator really went away and came back. It does
+    NOT log in — the caller's bootstrap does that, and it verifies every screen
+    on the way, so a relaunch that lands somewhere unexpected still ends as an
+    honest "a human is needed".
+    """
+    global _last_hard_restart
+
+    if not hard_restart_enabled():
+        return False
+
+    idle = (idle_fn or _system_idle_seconds)()
+    needed = _env_float("AS400_HARD_RESTART_IDLE_SEC", 300.0)
+    if idle < needed:
+        log.info(
+            "AS400 restart: not while somebody is using the Mac (idle %.0fs < %.0fs)", idle, needed
+        )
+        return False
+
+    since = time.time() - _last_hard_restart
+    cooldown = _env_float("AS400_HARD_RESTART_COOLDOWN_SEC", 1800.0)
+    if since < cooldown:
+        log.info("AS400 restart: already tried %.0fs ago — leaving it for a person", since)
+        return False
+
+    _last_hard_restart = time.time()
+    log.warning("AS400 restart: the terminal is on the dead-end screen — closing the emulator")
+    if not driver.quit():
+        log.error("AS400 restart: the emulator would not close. A person has to do it.")
+        return False
+
+    time.sleep(_env_float("AS400_RESTART_PAUSE", 3.0))
+    driver.launch()
+    time.sleep(_env_float("AS400_LAUNCH_WAIT", LAUNCH_WAIT))
+    log.warning("AS400 restart: emulator reopened — the session still has to log itself back in")
+    return True
+
+
+def _system_idle_seconds() -> float:
+    """Seconds since the last input. Mirrors auto_scanner's reader; imported
+    lazily so this module keeps having no local dependencies."""
+    try:
+        from auto_scanner import system_idle_seconds
+
+        return system_idle_seconds()
+    except Exception:
+        return 0.0  # can't tell → assume somebody is there, and don't restart
+
+
 def bootstrap_session(
     driver,
     launch_wait: float = LAUNCH_WAIT,
@@ -979,7 +1101,12 @@ def bootstrap_session(
         if state in _READY_STATES:
             return state
         if _is_message_info_screen(screen):
-            # The one screen no key escapes (operator, 2026-06-11). Don't hammer it.
+            # The one screen no key escapes (operator, 2026-06-11). Don't hammer
+            # it — but closing the emulator outright is not a keystroke, and it
+            # is the only thing that has ever recovered this without a person
+            # (Rafael, 2026-09-08). Guarded to the teeth; see hard_restart.
+            if hard_restart(driver):
+                continue
             raise AS400ManualLoginRequired(
                 "The AS400 is on the 'ADDITIONAL MESSAGE INFORMATION' screen, where no "
                 "key works. Close the session and log back in, then try again."
