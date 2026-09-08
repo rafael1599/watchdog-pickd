@@ -530,3 +530,82 @@ R11 haya dado la cifra. Si drena a menos de 20 SKUs/día, se abre la discusión;
 - Los conteos de **§15.2** quedan reemplazados por los de §16.1.
 - **Criterio de aceptación nuevo (15):** un nombre con talla compuesta (`DIVIDE 13X27`) no se parte
   nunca automáticamente — ni en el backfill ni en el paso del AS400.
+
+---
+
+## 17) La sesión de patrones, hecha (8 sep 2026)
+
+### 17.1 El ensanche
+
+`parseBikeName` acepta la talla con prefijo `L` (`/^L?\d{1,2}$/i`, pickd `5da5b0d`). Sobre prod
+mueve **8 nombres** de «no parte» a «parte». Quedan como *fallback* deliberado, cada uno con su
+test: la compuesta `13X27`, la letra suelta (`KROMO S`), los centímetros (`54CM`) y la bici **sin
+talla de cuadro** (`TAXI TRIKE`) — esta última no es un fallo, es la respuesta correcta.
+
+### 17.2 Las 16 filas a mano, y las 2 que no se tocaron
+
+Escritas en prod el 8 sep: 14 cambiaron, 2 ya estaban bien. Tres eran huecos (`model` NULL) y once
+eran Q4 — `model` sucio con el año y el color dentro de la llave de agrupación.
+
+**Rafael, 8 sep: las tallas compuestas se guardan en el orden del AS400 (cuadro × rueda,
+`19X29`).** Consecuencia cosmética: `renderSize` pone la marca de pulgadas en el número del cuadro
+(`19''X29`). FedEx usa esa cadena como descripción y no la interpreta, pero el catálogo queda con
+**dos convenciones conviviendo** (`HUDSON E2 S/T` sigue en `27.5X14`, rueda primero). ❓ **Q12** —
+normalizarlas es una tanda aparte.
+
+**Efecto medido en el export, simulado antes de escribir y verificado después:**
+
+| | antes | después |
+|---|---|---|
+| Registros | 201 | **199** |
+| Excepciones | 17 | **16** |
+
+Once registros basura (`DIVIDE 19X29 2025 OXBLOOD`, `TAXI 16 BAMBOO BEACH TEAL '`, `JUV MISS DAISY
+HOT P`) se volvieron nueve limpios, con **tres fusiones reales** — `DIVIDE 19''X29-21''X29`,
+`JUV CAPRI 2.4`, `KROMO L/S` — que es exactamente para lo que existe el export. `01-0529` entró al
+archivo. **Ningún SKU salió.**
+
+> **Y esto es lo que hay que quedarse de la sesión:** la primera propuesta **sí** expulsaba dos
+> filas sanas. Dar a `01-0539` el `RENEGADE A1 LTD` talla `54` que ya tenía `03-4270BK`, y a
+> `07-3606GP` el `JUV MISS DAISY` de `07-3664PK`, metía cada par en un mismo bucket con cajas que
+> difieren 2″ y 19″ → `dimension_conflict` echa del archivo a **los dos** miembros del bucket, no
+> sólo al nuevo. Se detectó **simulando `buildFedexDimensions` sobre las 276 filas medidas antes de
+> escribir nada**. Sin esa simulación, dos filas con stock habrían dejado de cotizar en silencio.
+>
+> **R12 (nuevo) — toda escritura sobre `model` o `size` se simula contra el export antes de
+> aplicarse**, y no se aplica si algún SKU pasa a excepción. Vale para F3 y para cualquier tanda
+> futura de limpieza.
+
+### 17.3 Dos medidas sospechosas, para la cinta métrica
+
+Las dos filas que se dejaron sin `model` a propósito (ambas con stock 0) no son un problema de
+nombres sino de **medición**, y alguien debería verlas en el piso:
+
+| Nombre | Dos SKUs, dos cajas |
+|---|---|
+| `JUV MISS DAISY` 2025 | `07-3606GP` **56 × 9.75 × 37.5** vs `07-3664PK` **37 × 8 × 18** |
+| `RENEGADE A1 LTD` talla 54 | `01-0539` **54 × 8 × 30** vs `03-4270BK` **55.75 × 8 × 30.4** |
+
+El primero son 19 pulgadas de diferencia entre dos bicis del mismo nombre y año: una de las dos
+medidas está mal. Mientras no se aclare, ponerles el mismo `model` es lo que las echaba del archivo.
+
+### 17.4 Lo que queda de la misma forma: 47 filas, 1.884 unidades
+
+La limpieza tocó las 16 que salían de la cola de nombres sin partir. Pero el mismo defecto vive en
+**47 filas medidas más**, con **1.884 unidades** detrás — `model` de cuatro palabras o más con la
+talla y el color dentro:
+
+```
+CITIZEN 2 17 MONTEREY      250 u      EXPLORER A2 17 GLOSS BLACK   166 u
+CITIZEN 2 21 STORM         227 u      Divide 13 x 27.5 Smokey Green 77 u
+CITIZEN 2 21 MONTEREY      209 u      HUDSON 19 GLOSS BLACK         45 u
+CITIZEN 2 17 STORM         182 u      CODA S2 L18 VANILLA           40 u
+```
+
+Sólo la familia CITIZEN son nueve SKUs y más de 1.100 unidades, cada color como registro propio en
+el archivo de FedEx en vez de fusionarse por `model` + `size`.
+
+❓ **Q13 — ¿se limpian las 47?** *Default:* sí, pero **no a mano**: son demasiadas para teclearlas y
+demasiado valiosas para adivinarlas. La forma es una acción con Preview/Apply que proponga el split,
+**simule el export (R12)** y muestre qué se fusiona y qué se caería, para aprobarla en bloque. Es su
+propio PRD, en pickd, y no bloquea nada de F2/F3.
