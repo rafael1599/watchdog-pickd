@@ -712,46 +712,41 @@ class MochaDriver:
             subprocess.run(["open", "-a", target], check=True)
 
     def close_window(self) -> None:
-        """Cmd+W — close the front window.
+        """Cmd+W, then ENTER. Both, always, in ONE script.
 
-        Used on the dead-end screen, which is the window in front because we
-        just read it. Like Cmd+N this is an APPLICATION command, so the session
-        that answers no key has no say over it.
+        Rafael, 2026-09-08: "el command w solo cierra con el enter después" —
+        Cmd+W raises a confirmation and the Enter is what answers it. That makes
+        this the one place in the driver that deliberately opens a dialog, and a
+        dialog blocks EVERY Apple event after it: leaving one up would trade a
+        stuck terminal for an emulator nobody can drive at all.
 
-        ⚠️ On the LAST window this closes Mocha altogether (Rafael, 2026-09-08:
-        "cuando solo queda una ventana abierta cierra por completo el AS400 y
-        toca recuperarlo abriéndolo de nuevo"). That is why the caller checks
-        `is_running()` afterwards instead of assuming a window is still there.
+        So the two keys travel inside a single osascript with the delay between
+        them. Nothing of ours can run in between, and there is no path through
+        this method that sends the Cmd+W without the Enter.
         """
+        confirm = _env_float("AS400_CLOSE_CONFIRM_DELAY", 0.15)
         self.focus()
-        self._osascript('tell application "System Events" to keystroke "w" using command down')
+        self._osascript(
+            'tell application "System Events"\n'
+            '  keystroke "w" using command down\n'
+            f"  delay {confirm}\n"
+            "  keystroke return\n"
+            "end tell"
+        )
 
-    def is_running(self) -> bool:
-        """Is the emulator still up? Asked of System Events rather than pgrep:
-        a GUI app's process name isn't reliably its application name."""
-        name = self.app_name.replace("\\", "\\\\").replace('"', '\\"')
-        try:
-            out = self._osascript(
-                'tell application "System Events" to return (exists process "%s")' % name,
-                capture=True,
-            )
-            return "true" in (out or "").strip().lower()
-        except Exception:
-            return self._is_running()
-
-    def new_window(self) -> None:
-        """Cmd+N — a fresh session window (Rafael, 2026-09-08).
-
-        This is the recovery that matters, and it works for a reason worth
-        stating: Cmd+N is an APPLICATION command, not a 5250 keystroke. The
-        dead-end screen ignores every key the session would receive; it has no
-        say over what Mocha itself does with a menu shortcut.
-
-        It is also gentle — it opens a window, it closes nothing, and whatever
-        the operator had stays where it was.
-        """
+    def previous_window(self) -> None:
+        """Ctrl+Shift+Tab — back one window (Rafael's own way to reach the dead
+        one after opening a fresh session)."""
         self.focus()
-        self._osascript('tell application "System Events" to keystroke "n" using command down')
+        self._osascript(
+            'tell application "System Events" to keystroke tab using {control down, shift down}'
+        )
+
+    def next_window(self) -> None:
+        """Ctrl+Tab — forward one window. The way back when the window we landed
+        on turns out not to be the one we meant to close."""
+        self.focus()
+        self._osascript('tell application "System Events" to keystroke tab using {control down}')
 
     def quit(self) -> bool:
         """Ask the emulator to quit. Returns True once it is really gone.
@@ -1058,18 +1053,20 @@ def hard_restart(driver, idle_fn=None) -> bool:
 
     Two ways out, cheapest first:
 
-      1. **Cmd+W then Cmd+N** — close the dead window, then open a fresh session
-         (Rafael, 2026-09-08). Both are APPLICATION commands rather than 5250
-         keystrokes, which is exactly why they escape a screen that ignores what
-         the session receives. In that order, and not the other way round: after
-         Cmd+N the NEW window is in front, so a Cmd+W then would close the good
-         one. Closing first also means no dead windows pile up behind the live
-         one.
-      2. **Reopen Mocha** — because Cmd+W on the LAST window closes the
-         application outright ("toca recuperarlo abriéndolo de nuevo"). Not a
-         fallback: a normal branch of the same recovery.
+      1. **Cmd+N** — a fresh session window. Rafael, 2026-09-08. It is an
+         APPLICATION command rather than a 5250 keystroke, which is exactly why
+         it escapes a screen that ignores what the session receives.
+      2. **Ctrl+Shift+Tab, then Cmd+W + ENTER** — step back to the dead window
+         and close it, so corpses don't pile up behind the live session. Cmd+W
+         only ASKS; the Enter answers ("el command w solo cierra con el enter
+         después"). Tidy-up, not recovery: it is best effort and verifies the
+         window before closing anything.
       3. **Quit and relaunch** — off by default (`AS400_HARD_RESTART_QUIT`), for
-         the day none of the above is enough.
+         a Cmd+N that doesn't work at all.
+
+    Opening before closing is what makes this safe: there are always at least
+    two windows when the Cmd+W lands, so it can never be the one that closes
+    Mocha altogether — the case that would need the application reopened.
 
     Either way it refuses unless the Mac has been untouched for
     AS400_HARD_RESTART_IDLE_SEC (a new window steals focus, and focus stolen
@@ -1102,45 +1099,69 @@ def hard_restart(driver, idle_fn=None) -> bool:
 
     _last_hard_restart = time.time()
 
-    # 1. Close the dead window FIRST. It is the one in front — we just read it —
-    #    and closing it is what keeps dead windows from piling up behind the
-    #    live one. Cmd+N first would put the new window in front and Cmd+W would
-    #    then close the wrong one.
-    log.warning("AS400 recovery: dead-end screen — closing that window (Cmd+W)")
-    closed = True
-    try:
-        driver.close_window()
-        time.sleep(_env_float("AS400_CLOSE_WINDOW_WAIT", 2.0))
-    except Exception as e:
-        closed = False
-        log.info("AS400 recovery: Cmd+W didn't work (%s) — trying a new window anyway", e)
-
-    # 2. On the LAST window, Cmd+W closes Mocha altogether (Rafael, 2026-09-08).
-    #    Then the way back is opening the application, not asking it for another
-    #    window — which is why this asks instead of assuming.
-    try:
-        still_up = driver.is_running()
-    except Exception:
-        still_up = True  # can't tell → treat it as up; Cmd+N on a dead app is a no-op
-    if closed and not still_up:
-        log.warning("AS400 recovery: that was the last window — reopening Mocha")
-        driver.launch()
-        time.sleep(_env_float("AS400_LAUNCH_WAIT", LAUNCH_WAIT))
-        return True
-
-    # 3. Mocha is still up: ask it for a fresh session window.
-    log.warning("AS400 recovery: opening a new session window (Cmd+N)")
+    # 1. A fresh session window FIRST. This is the recovery; everything after
+    #    it is tidying up. Opening first also means there are always at least
+    #    two windows, so the Cmd+W below can never be the one that closes Mocha
+    #    altogether — the case Rafael warned about stops existing.
+    log.warning("AS400 recovery: dead-end screen — opening a new session window (Cmd+N)")
     try:
         driver.new_window()
         time.sleep(_env_float("AS400_NEW_WINDOW_WAIT", 3.0))
-        return True
     except Exception as e:
         log.warning("AS400 recovery: Cmd+N didn't work (%s)", e)
+        if not quit_and_relaunch_enabled():
+            log.error("AS400 recovery: and quitting is off. A person has to step in.")
+            return False
+        return _quit_and_relaunch(driver)
 
-    if not quit_and_relaunch_enabled():
-        log.error("AS400 recovery: Cmd+N failed and quitting is off. A person has to step in.")
-        return False
+    # 2. Tidy up: step back to the dead window and close it, so the corpses
+    #    don't pile up behind the live session. Best effort — the recovery has
+    #    already happened, and none of this may put it at risk.
+    _close_the_dead_window(driver)
+    return True
 
+
+def _close_the_dead_window(driver) -> None:
+    """Ctrl+Shift+Tab back to the dead window and close it. Best effort.
+
+    VERIFIES before closing, like everything else that drives this terminal. If
+    the window we land on is not the dead end — the operator had others open,
+    the shortcut behaved differently — nothing is closed and we step forward
+    again. Closing somebody's window to tidy up would be a far worse bug than
+    leaving a dead one behind.
+    """
+    try:
+        driver.previous_window()
+        time.sleep(_env_float("AS400_WINDOW_SWITCH_WAIT", 1.0))
+        screen = driver.copy_screen()
+    except Exception as e:
+        log.info("AS400 recovery: couldn't reach the old window to close it (%s)", e)
+        return
+
+    if not _is_message_info_screen(screen):
+        log.info(
+            "AS400 recovery: the window behind isn't the dead one — leaving it alone (state=%s)",
+            classify_screen(screen),
+        )
+        try:
+            driver.next_window()
+            time.sleep(_env_float("AS400_WINDOW_SWITCH_WAIT", 1.0))
+        except Exception as e:
+            log.warning("AS400 recovery: couldn't step back to the new window (%s)", e)
+        return
+
+    try:
+        # Cmd+W asks; the Enter answers. Both live inside one script — see
+        # close_window — so a confirmation dialog can never be left standing.
+        driver.close_window()
+        time.sleep(_env_float("AS400_CLOSE_WINDOW_WAIT", 1.5))
+        log.info("AS400 recovery: the dead window is closed")
+    except Exception as e:
+        log.warning("AS400 recovery: couldn't close the dead window (%s) — it stays behind", e)
+
+
+def _quit_and_relaunch(driver) -> bool:
+    """The deepest fallback, behind its own switch. See quit_and_relaunch_enabled."""
     log.warning("AS400 recovery: closing the emulator")
     if not driver.quit():
         log.error("AS400 recovery: the emulator would not close. A person has to do it.")
