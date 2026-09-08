@@ -184,15 +184,23 @@ entrar a mano. Ninguna exploración futura debe entrar aquí a propósito.
 15:47 y el escáner estuvo **36 minutos** repitiendo «AS400 not ready» cada cinco, sin capturar nada,
 hasta que Rafael abrió una sesión nueva. Un viernes por la tarde eso es el fin de semana entero.
 
-**Salida automática, apagada por defecto (`AS400_HARD_RESTART`).** Rafael, 8 sep: *«se puede cerrar
-por completo y abrirlo de nuevo por lo menos una vez, en última instancia»*. Cerrar el emulador **no
-es una tecla**, así que es lo único que puede sacar de aquí sin una persona — y por eso mismo lleva
-todos los frenos: sólo con el Mac **sin tocar 5 minutos** (cerrar Mocha bajo las manos de alguien le
-tira su orden de la pantalla), **una vez por episodio** con media hora de enfriamiento, y si el
-emulador no cierra, se deja para una persona en vez de abrir una segunda ventana.
-❓ Falta confirmar en Bay 2 **si Mocha reconecta solo al abrirse** y **si cerrarlo saca un diálogo**
-— un diálogo bloquea todos los Apple events, y cambiaría un terminal atascado por uno que nadie
-puede manejar.
+**La salida, y es de Rafael (8 sep 2026): `Cmd+N`** — *«nos abre una nueva ventana donde podemos
+iniciar sesión de nuevo»*. Funciona por una razón que conviene entender: **es un comando de la
+aplicación, no una tecla del 5250**. La pantalla muerta ignora todo lo que llegue a la *sesión*;
+no manda nada sobre los *menús de Mocha*. No cierra nada y no le quita al operador lo que tenga
+abierto — deja la ventana muerta detrás, que alguien puede cerrar cuando pase.
+
+Automatizado y **apagado por defecto** (`AS400_HARD_RESTART`), no porque sea arriesgado sino para
+que la primera vez que dispare haya alguien delante. Se niega si el Mac lleva menos de 5 minutos sin
+tocarse (la ventana nueva roba el foco, y el foco robado a media orden interrumpe a una persona) y
+más de una vez por episodio. **No inicia sesión**: de eso se encarga `bootstrap_session`, que
+verifica cada pantalla, así que una recuperación que aterrice donde no debe acaba en un honesto
+«hace falta una persona» y no en un bucle.
+
+Como último recurso de verdad queda **cerrar Mocha y reabrirlo** (`AS400_HARD_RESTART_QUIT`, también
+apagado), sólo si `Cmd+N` falla: cerrar puede sacar un diálogo —y un diálogo bloquea todos los Apple
+events posteriores, que cambiaría un terminal atascado por uno que nadie puede manejar— y supone que
+Mocha reconecta solo al abrirse, que nadie ha comprobado.
 
 ### 2.11 `C U S T O M E R   D I S P L A Y` → `STATE_CUSTOMER_DISPLAY`
 *Evidencia:* `tests/test_as400_capture.py` (`CUSTOMER_DISPLAY_SCREEN`, capturada por Rafael el 1 sep

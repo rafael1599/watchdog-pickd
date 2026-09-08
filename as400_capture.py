@@ -711,6 +711,20 @@ class MochaDriver:
         else:
             subprocess.run(["open", "-a", target], check=True)
 
+    def new_window(self) -> None:
+        """Cmd+N — a fresh session window (Rafael, 2026-09-08).
+
+        This is the recovery that matters, and it works for a reason worth
+        stating: Cmd+N is an APPLICATION command, not a 5250 keystroke. The
+        dead-end screen ignores every key the session would receive; it has no
+        say over what Mocha itself does with a menu shortcut.
+
+        It is also gentle — it opens a window, it closes nothing, and whatever
+        the operator had stays where it was.
+        """
+        self.focus()
+        self._osascript('tell application "System Events" to keystroke "n" using command down')
+
     def quit(self) -> bool:
         """Ask the emulator to quit. Returns True once it is really gone.
 
@@ -984,41 +998,55 @@ _last_hard_restart = 0.0
 
 
 def hard_restart_enabled() -> bool:
-    """Off until Bay 2 confirms what Mocha does when it opens (see the docs).
+    """Whether the daemon may try to rescue itself from the dead-end screen.
 
-    Two unknowns this cannot assume: whether Mocha reconnects to the host on
-    its own, and whether quitting it raises a confirmation dialog — a dialog
-    blocks every Apple event afterwards, which would trade a stuck terminal for
-    a stuck one nobody can drive at all.
+    Off until somebody has watched it do it once. The mechanism is Cmd+N, which
+    Rafael uses by hand and which takes nothing away from anyone, so this is
+    expected to go on — the switch exists so that the first time it fires,
+    somebody is standing there.
     """
     return os.getenv("AS400_HARD_RESTART", "0") in ("1", "true", "True", "yes")
 
 
+def quit_and_relaunch_enabled() -> bool:
+    """The deeper fallback: closing the emulator outright. Stays off unless asked.
+
+    Cmd+N (below) should be enough and costs nothing. This one closes an
+    application a person shares, can raise a confirmation dialog — and a dialog
+    blocks every Apple event after it, trading a stuck terminal for one nobody
+    can drive at all — and depends on Mocha reconnecting to the host by itself,
+    which nobody has verified.
+    """
+    return os.getenv("AS400_HARD_RESTART_QUIT", "0") in ("1", "true", "True", "yes")
+
+
 def hard_restart(driver, idle_fn=None) -> bool:
-    """Close the emulator and open it again. The last resort, and only that.
+    """Get out of the screen no key escapes. The last resort, and only that.
 
     The ADDITIONAL MESSAGE INFORMATION screen answers NO key (§2.10), so once
     the terminal lands there the daemon is finished until a person re-opens the
     session. On 2026-09-08 that cost 36 minutes of a working day and, on a
-    Friday evening, would cost the weekend. Rafael: "se puede cerrar por
-    completo y abrirlo de nuevo por lo menos una vez, en última instancia".
+    Friday evening, would have cost the weekend.
 
-    "Última instancia" is the whole design. This is the only thing in the system
-    that closes an application a PERSON is sharing, so it refuses unless:
+    Two ways out, cheapest first:
 
-      - it is switched on at all (default off);
-      - the Mac has been untouched for AS400_HARD_RESTART_IDLE_SEC — five
-        minutes by default, five times the scanner's normal gate, because
-        quitting Mocha under somebody's hands would throw away the order they
-        were reading;
-      - the last attempt was more than AS400_HARD_RESTART_COOLDOWN_SEC ago, so
-        a terminal that cannot be saved is not relaunched every five minutes
-        all night.
+      1. **Cmd+N** — a new session window. Rafael, 2026-09-08: "CMD + N nos abre
+         una nueva ventana donde podemos iniciar sesión de nuevo". It works
+         because it is an APPLICATION command rather than a 5250 keystroke: the
+         dead screen has no say over Mocha's own menus. It closes nothing and
+         takes nothing away from the operator.
+      2. **Quit and relaunch** — off by default (`AS400_HARD_RESTART_QUIT`), for
+         the day Cmd+N turns out not to be enough.
 
-    Returns True only when the emulator really went away and came back. It does
-    NOT log in — the caller's bootstrap does that, and it verifies every screen
-    on the way, so a relaunch that lands somewhere unexpected still ends as an
-    honest "a human is needed".
+    Either way it refuses unless the Mac has been untouched for
+    AS400_HARD_RESTART_IDLE_SEC (a new window steals focus, and focus stolen
+    mid-order is somebody's work interrupted) and unless the last attempt was
+    longer ago than the cooldown, so a terminal that cannot be saved is not
+    poked every five minutes all night.
+
+    It does NOT log in — the caller's bootstrap does, verifying every screen, so
+    a recovery that lands somewhere unexpected still ends as an honest "a human
+    is needed" rather than a loop.
     """
     global _last_hard_restart
 
@@ -1029,26 +1057,41 @@ def hard_restart(driver, idle_fn=None) -> bool:
     needed = _env_float("AS400_HARD_RESTART_IDLE_SEC", 300.0)
     if idle < needed:
         log.info(
-            "AS400 restart: not while somebody is using the Mac (idle %.0fs < %.0fs)", idle, needed
+            "AS400 recovery: not while somebody is using the Mac (idle %.0fs < %.0fs)", idle, needed
         )
         return False
 
     since = time.time() - _last_hard_restart
     cooldown = _env_float("AS400_HARD_RESTART_COOLDOWN_SEC", 1800.0)
     if since < cooldown:
-        log.info("AS400 restart: already tried %.0fs ago — leaving it for a person", since)
+        log.info("AS400 recovery: already tried %.0fs ago — leaving it for a person", since)
         return False
 
     _last_hard_restart = time.time()
-    log.warning("AS400 restart: the terminal is on the dead-end screen — closing the emulator")
-    if not driver.quit():
-        log.error("AS400 restart: the emulator would not close. A person has to do it.")
+
+    log.warning("AS400 recovery: dead-end screen — opening a new session window (Cmd+N)")
+    try:
+        driver.new_window()
+        time.sleep(_env_float("AS400_NEW_WINDOW_WAIT", 3.0))
+        # The old window is still open behind this one. Harmless while the new
+        # one has focus — every read goes to the front — but somebody should
+        # close them now and then.
+        return True
+    except Exception as e:
+        log.warning("AS400 recovery: Cmd+N didn't work (%s)", e)
+
+    if not quit_and_relaunch_enabled():
+        log.error("AS400 recovery: Cmd+N failed and quitting is off. A person has to step in.")
         return False
 
+    log.warning("AS400 recovery: closing the emulator")
+    if not driver.quit():
+        log.error("AS400 recovery: the emulator would not close. A person has to do it.")
+        return False
     time.sleep(_env_float("AS400_RESTART_PAUSE", 3.0))
     driver.launch()
     time.sleep(_env_float("AS400_LAUNCH_WAIT", LAUNCH_WAIT))
-    log.warning("AS400 restart: emulator reopened — the session still has to log itself back in")
+    log.warning("AS400 recovery: emulator reopened — it still has to log itself back in")
     return True
 
 
