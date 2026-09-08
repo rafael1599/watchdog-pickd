@@ -888,7 +888,7 @@ justamente lo que falta.
 - **La simulación es la puerta:** sin correr `buildFedexDimensions` sobre el resultado **combinado**
   de los dos carriles, no hay botón de aplicar (**R12**, §20.3).
 
-### 22.2 ❓Q17 — «también la estación» choca con dónde vive la pantalla
+### 22.2 ~~❓Q17~~ — **CONTESTADA el 8 sep: admin, como sus hermanas**
 
 Rafael quiere que **la estación también la trabaje**, no sólo admin. Pero `/export` y
 `/export/measure` son **admin-only** en `App.tsx` (hoy: 6 admins, 2 staff). Colgar de ahí una
@@ -899,6 +899,32 @@ pantalla que staff debe usar no funciona, y hay dos salidas y ninguna es gratis:
 2. **Ruta propia fuera de `/export`** (p. ej. `/catalog/names`) con su propia entrada en el menú, y
    el botón-fila de `/export` como atajo para admin. Más código, permisos exactos.
 
-*Default propuesto:* la **2**. La llave de agrupación del export merece una puerta propia, y abrir
-`/export` entero para llegar a una pantalla es abrir de más. **Se decide con la data, junto con el
-resto.**
+**Rafael, 8 sep: «cambiemos a admin para no complicarnos».** Queda `/export/names`, admin-only,
+hermana exacta de `/export/measure`, entrando por el mismo botón-fila de `FedexDimensionsExportCard`.
+Ninguna de las dos salidas de arriba hace falta: cero permisos nuevos, cero ruta nueva, cero menú.
+
+Lo que se pierde y conviene saberlo: la estación no verá **por qué** una caja no cotiza bien. Si eso
+molesta en el piso, la salida barata es una vista de sólo lectura, no abrir la escritura.
+
+---
+
+## 23) El fallo mudo que el despliegue podía traer (8 sep 2026)
+
+`scripts/update.sh` paso 3 corre `migrations.py`, que ya lleva `as400_description` y
+`as400_read_at` como `ADD COLUMN IF NOT EXISTS`: **el despliegue se aplica la columna solo**. Pero
+sólo si `SUPABASE_DB_URL` está puesta en esa máquina — y si no lo está, `migrations.py` **se salta
+el paso limpiamente**, que es justo como llega este fallo sin que nadie se entere:
+
+1. La columna no existe.
+2. PostgREST **descarta** una columna desconocida sin dar error, y devuelve la fila igual.
+3. `apply_write` veía una fila y reportaba éxito.
+4. El SKU vuelve a la cola en el hueco siguiente. Para siempre, en silencio, 745 veces.
+
+Es el mismo mecanismo que ya está documentado en el `CLAUDE.md` del watchdog («PostgREST descarta
+silenciosamente columnas inexistentes en los inserts, así que la columna debe existir o el dato se
+pierde sin error»), sólo que aquí además **se disfraza de progreso**.
+
+**El freno:** la representación que devuelve el `update` es la prueba. Una columna que existe vuelve
+en la fila; una que no, no. Si falta alguna de las que escribimos, `apply_write` lanza
+`MissingColumn`, el paso lo trata como `unavailable` —no es problema de ese SKU y un reintento no lo
+arregla— y la cola **para en el primero** en vez de repetir el error 745 veces.

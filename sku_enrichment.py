@@ -45,6 +45,10 @@ from parser import parse_stock_inquiry
 log = logging.getLogger("pickd-sku-enrichment")
 
 
+class MissingColumn(RuntimeError):
+    """The catalogue column this phase writes doesn't exist on this database."""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -273,11 +277,28 @@ def apply_write(sku: str, plan: dict, client=None) -> dict:
 
         client = get_client()
     res = client.table("sku_metadata").update(plan).eq("sku", sku).execute()
-    n = len(res.data or [])
+    rows = res.data or []
+    n = len(rows)
     if n != 1:
         # Zero means the row moved or the SKU is spelled differently; more than
         # one should be impossible (`sku` is the key). Either way, say so.
         log.warning("SKU %s: update touched %d rows, expected 1", sku, n)
+        return {"written": n}
+
+    # Did the write actually LAND? PostgREST silently DROPS a column that does
+    # not exist — no error, and the row still comes back — so a watcher deployed
+    # onto a database without `as400_description` would log a happy success,
+    # write nothing, and hand the same SKU back to the queue every gap for ever.
+    # The returned representation is the proof: a column that exists comes back.
+    # `migrations.py` creates it during update.sh, but only when SUPABASE_DB_URL
+    # is set on that machine, and it skips cleanly when it isn't — which is
+    # exactly how this failure arrives without anybody noticing.
+    missing = [k for k in plan if k not in rows[0]]
+    if missing:
+        raise MissingColumn(
+            f"sku_metadata has no column(s) {missing} — the write was dropped in silence. "
+            "Run migrations.py (or check SUPABASE_DB_URL) on this machine."
+        )
     return {"written": n}
 
 
@@ -377,6 +398,11 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn) -> dict:
         return {"action": "mismatch", "sku": sku}
     except (AS400Disconnected, AS400ManualLoginRequired) as e:
         log.info("SKU %s: AS400 not available (%s)", sku, e)
+        return {"action": "unavailable", "sku": sku}
+    except MissingColumn as e:
+        # Not this SKU's problem and not something a retry fixes: every write
+        # would vanish the same way. Stop the queue, loudly.
+        log.error("SKU %s: %s", sku, e)
         return {"action": "unavailable", "sku": sku}
     except CaptureError as e:
         log.warning("SKU %s: lookup failed (%s)", sku, e)

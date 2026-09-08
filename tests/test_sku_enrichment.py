@@ -524,7 +524,9 @@ def test_the_write_is_an_update_by_sku_never_an_upsert():
     # migration cleaning up.
     from sku_enrichment import apply_write
 
-    client = FakeTable([{"sku": "03-3933BK"}])
+    # The returned row carries the column, which is how we know the write landed
+    # rather than being dropped by PostgREST.
+    client = FakeTable([{"sku": "03-3933BK", "as400_description": "CODA S2"}])
     assert apply_write("03-3933BK", {"as400_description": "CODA S2"}, client) == {"written": 1}
     assert client.calls == [
         ("table", "sku_metadata"),
@@ -573,3 +575,22 @@ def test_the_step_writes_only_once_f3_is_switched_on(monkeypatch):
     )
     assert written[1][1]["weight_lbs"] == 36.0
     assert "weight_verified" not in written[1][1]
+
+
+def test_a_write_that_vanished_into_a_missing_column_is_not_a_success():
+    # PostgREST DROPS an unknown column without erroring and still returns the
+    # row, so a watcher deployed onto a database that never got the migration
+    # would log success, write nothing, and hand the same SKU back every gap for
+    # ever. The returned representation is the proof the column exists.
+    from sku_enrichment import MissingColumn, apply_write
+
+    client = FakeTable([{"sku": "03-3933BK"}])  # no as400_description in the row
+    with pytest.raises(MissingColumn):
+        apply_write("03-3933BK", {"as400_description": "CODA S2"}, client)
+
+
+def test_a_write_that_landed_is_a_success():
+    from sku_enrichment import apply_write
+
+    client = FakeTable([{"sku": "03-3933BK", "as400_description": "CODA S2"}])
+    assert apply_write("03-3933BK", {"as400_description": "CODA S2"}, client) == {"written": 1}
