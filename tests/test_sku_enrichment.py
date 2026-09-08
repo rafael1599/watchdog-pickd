@@ -661,3 +661,35 @@ def test_the_batch_stops_when_the_terminal_does_not_come_home(monkeypatch):
     out = sku_enrichment.run_catalog_batch(object(), count=20)
     assert out["read"] == 1  # one attempt, then it stops touching the terminal
     assert "order search" in out["stopped"]
+
+
+# ── never lazy: the work replaces the sleep ──────────────────────────────────
+
+
+def test_the_gap_reports_how_long_it_actually_worked(monkeypatch):
+    # The loop needs the number to decide whether the wait already happened.
+    import auto_scanner
+
+    monkeypatch.setenv("SKU_ENRICH_MAX_PER_GAP", "2")
+    _gap_harness(monkeypatch)
+    assert auto_scanner._run_sku_gap() >= 0.0
+
+
+def test_nothing_to_work_on_reports_no_time_spent(monkeypatch):
+    # An empty queue must NOT look like "the wait already happened", or the
+    # scanner would ask AS400 for the same missing order every few seconds.
+    import auto_scanner
+    import sku_enrichment
+
+    monkeypatch.setenv("SKU_ENRICH", "1")
+    monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 1e9)
+    monkeypatch.setattr(auto_scanner, "_driver_for_sku_step", lambda: object())
+    monkeypatch.setattr(sku_enrichment, "next_sku", lambda *a, **k: None)
+    assert auto_scanner._run_sku_gap() < auto_scanner.MIN_WORK_TO_SKIP_WAIT_SEC
+
+
+def test_the_switch_being_off_reports_no_time_spent(monkeypatch):
+    import auto_scanner
+
+    monkeypatch.delenv("SKU_ENRICH", raising=False)
+    assert auto_scanner._run_sku_gap() == 0.0

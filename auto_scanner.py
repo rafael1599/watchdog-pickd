@@ -7,7 +7,13 @@ Design (confirmed with the operator, 2026-06-10):
     is stored immediately so it shows in the UI right away.
   - Pace per step result:
       * captured      → wait FOUND_NEXT_DELAY_SEC (5s), then try the next number.
-      * not_found     → the number isn't an order yet → wait NOT_FOUND_WAIT_SEC (20m).
+      * not_found     → the number isn't an order yet. Instead of sleeping twenty
+                        minutes, spend that time on the AS400 catalogue and ask
+                        again (Rafael, 2026-09-08: "en ningún momento quiero al
+                        watchdog lazy"). Only when there is nothing to work on —
+                        empty queue, feature off — does it fall back to
+                        NOT_FOUND_WAIT_SEC, because otherwise it would ask the
+                        AS400 for the same missing order every few seconds.
       * incomplete    → capture stalled (no END OF ORDER, e.g. the operator grabbed
                         the keyboard) → wait INCOMPLETE_RETRY_SEC (5m) and retry the
                         SAME number (the cursor only advances on success).
@@ -68,6 +74,11 @@ MAX_SKIP_CACHED_PER_STEP = int(os.getenv("SCAN_MAX_SKIP_CACHED", "500"))
 # it. Ten minutes is longer than any normal hiccup and far shorter than the 36
 # that went unnoticed on 2026-09-08.
 UNAVAILABLE_LOUD_SEC = float(os.getenv("SCAN_UNAVAILABLE_LOUD_SEC", "600"))
+# Catalogue work long enough to count as "the wait already happened". Below this
+# there was nothing to do — an empty queue, the feature off, the operator on the
+# keyboard — and asking the AS400 for the same missing order every few seconds
+# would be worse than sleeping.
+MIN_WORK_TO_SKIP_WAIT_SEC = float(os.getenv("SCAN_MIN_WORK_TO_SKIP_WAIT_SEC", "20"))
 
 # Serializes all AS400/Mocha access between the auto-scanner and manual captures.
 capture_lock = threading.Lock()
@@ -256,7 +267,7 @@ def _interruptible_wait(seconds: float) -> None:
         _kick.wait(min(0.5, remaining))
 
 
-def _run_sku_gap() -> None:
+def _run_sku_gap() -> float:
     """Spend the gap on the AS400 catalogue, if that is switched on.
 
     The gap is TWENTY MINUTES long and one lookup uses seconds of it. With a
@@ -277,40 +288,42 @@ def _run_sku_gap() -> None:
 
     Wrapped whole: a side errand may not take the scanner down with it.
     """
+    started = time.monotonic()
     try:
         import sku_enrichment
 
         if not sku_enrichment.enabled():
-            return
+            return 0.0
 
-        deadline = time.monotonic() + sku_enrichment.gap_budget_sec()
+        deadline = started + sku_enrichment.gap_budget_sec()
         done = 0
         for _ in range(sku_enrichment.max_per_gap()):
             if time.monotonic() >= deadline:
                 log.info("auto-scan: SKU budget spent after %d lookup(s)", done)
-                return
+                return time.monotonic() - started
             # The operator's keyboard wins, always — checked before every single
             # lookup, not once per gap. A manual "get orders now" wins too: they
             # asked for orders, not for catalogue work.
             if system_idle_seconds() < IDLE_THRESHOLD_SEC or _kick.is_set():
                 log.info("auto-scan: the operator is back — SKU queue yields after %d", done)
-                return
+                return time.monotonic() - started
             row = sku_enrichment.next_sku()
             if not row:
                 log.info("auto-scan: the SKU queue is empty — nothing to look up")
-                return
+                return time.monotonic() - started
             res = sku_enrichment.run_sku_step(_driver_for_sku_step(), row)
             done += 1
             if not res.get("returned", True):
                 # The terminal isn't back on the order search. Stop touching it;
                 # the next cycle's bootstrap is what recovers.
                 log.warning("auto-scan: SKU step didn't get home — pausing the SKU queue")
-                return
+                return time.monotonic() - started
             if res["action"] in ("unavailable", "error"):
-                return
+                return time.monotonic() - started
         log.info("auto-scan: SKU count cap reached after %d lookup(s)", done)
     except Exception:
         log.exception("auto-scan: SKU step crashed — the orders keep going")
+    return time.monotonic() - started
 
 
 _sku_driver = None
@@ -406,13 +419,34 @@ def _loop() -> None:
                         else:
                             log.info("auto-scan: AS400 not ready for %.0f min (%s)", stuck / 60, e)
             elif action == "not_found":
-                # The gap. Orders and SKUs interleave (Rafael, 2026-09-02): the
-                # SKU step runs INSIDE this wait, it never replaces the search
-                # for the next order — that already ran, and it is what the
-                # scanner exists for. ONE SKU, then back to sleeping the rest of
-                # the not-found wait, same cadence as the orders themselves.
-                _run_sku_gap()
-                log.info("auto-scan: %s on #%s (waiting %.0fs)", action, res["number"], wait)
+                # No order yet. Instead of sleeping twenty minutes, spend that
+                # time on the catalogue and then ASK AGAIN (Rafael, 2026-09-08:
+                # "en ningún momento quiero al watchdog lazy, aprovechemos el
+                # acceso al AS400").
+                #
+                # The work REPLACES the wait rather than fitting inside it: the
+                # scanner used to work five minutes and then sleep fifteen more
+                # for nothing. Now the loop is work → check for orders → if none,
+                # work again; and when an order does turn up it captures orders
+                # at the usual pace until they run out, then comes back here.
+                #
+                # A side effect worth having: orders are found four times sooner,
+                # because the terminal is asked every budget instead of every
+                # twenty minutes.
+                spent = _run_sku_gap()
+                if spent >= MIN_WORK_TO_SKIP_WAIT_SEC:
+                    wait = FOUND_NEXT_DELAY_SEC  # the waiting already happened, usefully
+                    log.info(
+                        "auto-scan: not_found on #%s — spent %.0fs on the catalogue, "
+                        "asking again now",
+                        res["number"],
+                        spent,
+                    )
+                else:
+                    # Nothing to work on (queue empty, or the feature is off):
+                    # the old pacing is still the right one, or we would ask the
+                    # AS400 for the same missing order every few seconds.
+                    log.info("auto-scan: %s on #%s (waiting %.0fs)", action, res["number"], wait)
             elif action == "captured":
                 log.info("auto-scan: cached order #%s", res["number"])
             else:

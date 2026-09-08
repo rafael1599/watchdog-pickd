@@ -928,3 +928,46 @@ pierde sin error»), sólo que aquí además **se disfraza de progreso**.
 en la fila; una que no, no. Si falta alguna de las que escribimos, `apply_write` lanza
 `MissingColumn`, el paso lo trata como `unavailable` —no es problema de ese SKU y un reintento no lo
 arregla— y la cola **para en el primero** en vez de repetir el error 745 veces.
+
+---
+
+## 24) Nada de escáner perezoso (8 sep 2026)
+
+Rafael, viendo la ráfaga funcionar: *«en ningún momento quiero al watchdog lazy, aprovechemos el
+acceso al AS400»*. Tenía razón y el fallo era mío: tras la ráfaga de 5 minutos, el escáner **seguía
+durmiendo los 20 enteros**. Trabajaba cinco y dormía quince para nada.
+
+### 24.1 El trabajo sustituye al sueño, no cabe dentro de él
+
+```
+not_found ──▶ catálogo por X ──▶ ¿hay órdenes ya?
+                                    ├─ no  ──▶ catálogo por X otra vez
+                                    └─ sí  ──▶ capturar órdenes al ritmo normal
+                                                hasta que se acaben ──▶ volver arriba
+```
+
+**Y un efecto secundario que vale la pena:** las órdenes se descubren **cuatro veces antes**, porque
+al terminal se le pregunta cada presupuesto (5 min) en vez de cada veinte.
+
+**El sueño largo sigue existiendo para cuando NO hay nada que hacer** — cola vacía, la función
+apagada, el operador en el teclado. Sin eso, el escáner le preguntaría al AS400 por la misma orden
+que falta cada pocos segundos, que es peor que dormir. El umbral es
+`SCAN_MIN_WORK_TO_SKIP_WAIT_SEC` (20 s de trabajo real).
+
+### 24.2 Los dos gates, que no son el mismo
+
+Esto es lo único que discutí de la petición, y va escrito porque volverá a surgir:
+
+| | qué es | qué pasa con él |
+|---|---|---|
+| **Gate de pacing** — dormir 20 min tras un `not_found` | pereza | **retirado** (§24.1) |
+| **Gate de teclado** — pausar cuando el operador usa la Mac | cortesía | **se queda** |
+
+El segundo no es pereza: es no pelearle el teclado a una persona, la restricción dura del pedido
+original (*«nunca pelear el teclado con el operador; eso no se negocia»*). Y el log del 8 sep dice
+que **no es teórica**: `resumed after 61s paused` aparece continuamente y hay órdenes que tardaron
+**dos horas** en capturarse por contención.
+
+**Consecuencia honesta:** «nunca perezoso» tiene un techo, y no lo pone el diseño sino cuánto está
+esa Mac ocupada. El escáner ya no dormirá por su cuenta, pero seguirá cediendo — y ese techo es
+justo lo que ❓Q11 (la ventana nocturna) existe para saltarse: de noche no hay a quién ceder.
