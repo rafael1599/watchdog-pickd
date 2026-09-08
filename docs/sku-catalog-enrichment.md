@@ -646,7 +646,7 @@ de SKU **nunca** se lleva por delante a las órdenes.
 
 ### 18.2 La contradicción que F2 destapa, y que F3 no puede esquivar
 
-> ❓ **Q14 — ¿dónde parte F3 el nombre?** `plan_write` sabe planear el **peso** —ese no necesita
+> ~~❓ Q14 — ¿dónde parte F3 el nombre?~~ **CONTESTADA el 8 sep — §19.** `plan_write` sabe planear el **peso** —ese no necesita
 > partir nada— pero para `model`/`size`/`color` hace falta la regla de `parseBikeName`, que vive en
 > **TypeScript** y que el 2 sep se decidió **no portar a Python** (§16.3, «sería un segundo espejo»).
 > F3 escribe desde el watchdog, en Python. Las dos decisiones no caben juntas.
@@ -669,3 +669,54 @@ Con `SKU_ENRICH=1` y un día de log, F2 contesta lo que sólo el terminal sabe:
 3. **¿Cuánto cuesta un paso?** La línea de log lleva los segundos. Es el número que decide si «un
    SKU por hueco» se queda o si `SKU_ENRICH_MAX_PER_GAP` sube.
 4. **¿`B-Bike/P-Part` discrepa con `is_bike`?** Se loguea cada desacuerdo y no se cambia nada (Q6).
+
+---
+
+## 19) Q14 contestada: **pickd la parte** (8 sep 2026)
+
+Rafael, 8 sep: *«pickd la parte»*. Las dos mitades se cortan por la misma línea que la regla — el
+watchdog escribe **lo que leyó**, y pickd lo parte donde `parseBikeName` ya vive. `parseBikeName` no
+se porta a Python; §16.3 se mantiene entero.
+
+### 19.1 La columna
+
+`sku_metadata.as400_description` (texto crudo, sin partir, **sin el corte a 30** de la página de
+ítems) y `sku_metadata.as400_read_at`. Migración `20260908120000_as400_description.sql` en pickd,
+que es la fuente de verdad; `migrations.py` del watchdog repite los `ADD COLUMN IF NOT EXISTS` por
+si el watcher se actualiza antes — **PostgREST descarta en silencio una columna que no existe**, y
+aquí eso no sería sólo perder el dato: el SKU volvería a la cola en cada hueco, para siempre.
+
+**Esto no es una tabla intermedia de aprobación** — Rafael cerró eso el 2 sep. Es que
+`as400_description` **es un hueco vacío** y `model` no lo es: `model` es la llave de agrupación del
+export. Y encaja con **R12**: una descripción cruda no necesita simulación del export, `model` sí —
+y la simulación vive del lado que tiene `buildFedexDimensions` para correrla.
+
+### 19.2 `as400_read_at` cierra el bucle de la cola
+
+Lo destapó un test. Como `model` **sigue vacío** hasta que pickd parta, una cola que filtre sólo por
+«sin modelo» pediría el mismo SKU en cada hueco eternamente. Ahora una fila ya leída **sale entera**
+de la cola —también de la rama del peso, porque el peso vino en la misma pantalla— que es el ❓Q7 de
+siempre («una vez leído, no se vuelve») convertido en código.
+
+### 19.3 Lo que queda construido
+
+| Mitad | Dónde | Estado |
+|---|---|---|
+| Leer AS400 y escribir `as400_description` + `weight_lbs` | watchdog, `sku_enrichment.apply_write` | **hecho**, tras `SKU_ENRICH_WRITE=1` |
+| Partir en `model`/`size`/`color` | **pickd**, con `parseBikeName` | **falta** — ❓Q15 |
+
+`apply_write` es un `update` por SKU, **nunca un upsert**: un upsert sobre un SKU que no estuviera
+en el catálogo crearía una fila de metadata sin inventario detrás, que es la forma huérfana que
+pickd limpió con una migración entera.
+
+### 19.4 ❓Q15 — ¿dónde vive el partidor en pickd?
+
+*Default propuesto:* **la misma acción Preview/Apply que pide ❓Q13** para las 47 filas sucias. Son
+el mismo trabajo — proponer un split, **simular el export (R12)**, enseñar qué se fusiona y qué se
+caería, aplicar en bloque — sobre dos orígenes: la descripción que trajo el AS400 y el `model` sucio
+que ya estaba. Dos superficies para una misma decisión serían dos sitios donde equivocarse con la
+llave del export.
+
+**No automático, y esa es la razón:** R12 nació porque una propuesta mía echaba dos filas sanas del
+archivo de FedEx sin avisar. Un partidor que escriba `model` solo, de noche, no puede enseñar eso a
+nadie.

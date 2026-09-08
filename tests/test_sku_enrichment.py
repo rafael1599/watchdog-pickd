@@ -140,8 +140,44 @@ def test_the_name_is_only_planned_when_the_model_is_empty():
     parsed = {"description": "CODA S2 L16 2026 GLOSS BLACK", "weight_lbs": None}
     gap = {"sku": "03-3933BK", "model": None, "weight_verified": True}
     taken = {"sku": "03-3933BK", "model": "CODA S2", "weight_verified": True}
-    assert plan_write(gap, parsed)["_description"] == "CODA S2 L16 2026 GLOSS BLACK"
+    assert plan_write(gap, parsed)["as400_description"] == "CODA S2 L16 2026 GLOSS BLACK"
     assert plan_write(taken, parsed) == {}
+
+
+def test_the_watchdog_writes_the_name_raw_and_never_splits_it():
+    # Rafael, 2026-09-08: "pickd la parte". parseBikeName lives in Pickd's
+    # TypeScript and is not mirrored here, so this side writes what it READ.
+    # It also keeps the watchdog clear of R12: a raw name is not the FedEx
+    # grouping key, so it owes no export simulation — `model` does, which is
+    # exactly why `model` is not written from here.
+    plan = plan_write(
+        {"sku": "03-3933BK", "model": None, "weight_verified": True},
+        {"description": "CODA S2 L16 2026 GLOSS BLACK", "weight_lbs": None},
+    )
+    assert plan["as400_description"] == "CODA S2 L16 2026 GLOSS BLACK"
+    assert plan["as400_read_at"]
+    for never in ("model", "size", "color"):
+        assert never not in plan
+
+
+def test_a_sku_already_read_is_not_planned_again():
+    # Q7. The model stays empty until Pickd splits the description, so without
+    # this the same SKU would come back every gap for ever.
+    row = {
+        "sku": "03-3933BK",
+        "model": None,
+        "weight_verified": True,
+        "as400_description": "CODA S2 L16 2026 GLOSS BLACK",
+    }
+    assert plan_write(row, {"description": "CODA S2 L16 2026 GLOSS BLACK"}) == {}
+
+
+def test_a_sku_already_read_is_not_queued_again():
+    rows = [
+        {"sku": "03-3492BL", "model": None, "qty": 1, "as400_description": "TRAIL X A1 13"},
+        {"sku": "03-4473BK", "model": None, "qty": 1},
+    ]
+    assert [r["sku"] for r in select_sku_queue(rows)] == ["03-4473BK"]
 
 
 # ── the route ────────────────────────────────────────────────────────────────
@@ -363,3 +399,80 @@ def test_a_crash_in_the_sku_step_never_stops_the_orders(monkeypatch):
 
     monkeypatch.setattr(sku_enrichment, "next_sku", boom)
     auto_scanner._run_sku_gap()  # must not raise
+
+
+# ── F3: the write itself ─────────────────────────────────────────────────────
+
+
+class FakeTable:
+    """The two calls apply_write makes, and nothing else."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    def table(self, name):
+        self.calls.append(("table", name))
+        return self
+
+    def update(self, values):
+        self.calls.append(("update", values))
+        return self
+
+    def eq(self, col, val):
+        self.calls.append(("eq", col, val))
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": self.rows})()
+
+
+def test_the_write_is_an_update_by_sku_never_an_upsert():
+    # An upsert on a SKU that somehow isn't in the catalogue would CREATE a
+    # metadata row with no inventory behind it — the orphan shape Pickd spent a
+    # migration cleaning up.
+    from sku_enrichment import apply_write
+
+    client = FakeTable([{"sku": "03-3933BK"}])
+    assert apply_write("03-3933BK", {"as400_description": "CODA S2"}, client) == {"written": 1}
+    assert client.calls == [
+        ("table", "sku_metadata"),
+        ("update", {"as400_description": "CODA S2"}),
+        ("eq", "sku", "03-3933BK"),
+    ]
+
+
+def test_an_empty_plan_never_reaches_the_database():
+    from sku_enrichment import apply_write
+
+    client = FakeTable([])
+    assert apply_write("03-3933BK", {}, client) == {"written": 0}
+    assert client.calls == []
+
+
+def test_the_step_writes_only_once_f3_is_switched_on(monkeypatch):
+    import sku_enrichment
+
+    row = {"sku": "03-3933BK", "model": None, "weight_lbs": 45, "weight_verified": False}
+    written = []
+    monkeypatch.setattr(
+        sku_enrichment,
+        "apply_write",
+        lambda sku, plan, client=None: (written.append((sku, plan)), {"written": 1})[1],
+    )
+
+    monkeypatch.delenv("SKU_ENRICH_WRITE", raising=False)
+    res = run_sku_step(
+        object(), dict(row), capture_fn=lambda s, d: STOCK_DETAIL, return_fn=lambda d: None
+    )
+    assert res["action"] == "read" and written == []  # F2: the plan is logged, not applied
+
+    monkeypatch.setenv("SKU_ENRICH_WRITE", "1")
+    res = run_sku_step(
+        object(), dict(row), capture_fn=lambda s, d: STOCK_DETAIL, return_fn=lambda d: None
+    )
+    assert res["action"] == "written"
+    assert written[0][0] == "03-3933BK"
+    assert written[0][1]["as400_description"] == "CODA S2 L16 2026 GLOSS BLACK"
+    assert written[0][1]["weight_lbs"] == 36.0
+    assert "weight_verified" not in written[0][1]

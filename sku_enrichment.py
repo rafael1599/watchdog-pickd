@@ -45,6 +45,10 @@ from parser import parse_stock_inquiry
 log = logging.getLogger("pickd-sku-enrichment")
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 # Off by default. The Bay 2 deploy that carries this also carries the change from
 # one F6·F6·F7 to three, and the first thing a deploy does should not be to start
 # driving the terminal on its own. Flip it in .env and restart — no deploy.
@@ -129,14 +133,22 @@ def select_sku_queue(rows, unknown=None) -> list:
        (that ordering is the caller's — `get_bike_demand_ranking` already sorts
        by demand, and re-sorting here would be a second answer to one question).
 
-    Rows AS400 has already refused (`unknown`) and rows whose SKU is not a stock
-    number (R6) never enter.
+    Rows AS400 has already refused (`unknown`), rows whose SKU is not a stock
+    number (R6), and rows ALREADY READ never enter. That last one is not an
+    optimisation: `model` stays empty until Pickd splits the description, so
+    without it the same SKU would come back every gap for ever (Q7).
     """
     unknown = unknown or {}
     floor, rest, weights = [], [], []
     for r in rows:
         sku = (r.get("sku") or "").strip().upper()
         if not sku or sku in unknown or not is_lookupable(sku):
+            continue
+        if (r.get("as400_description") or "").strip():
+            # Already read. AS400 has nothing left to tell us about this SKU —
+            # including its weight, which came back on the same screen — and the
+            # model stays empty until Pickd splits the description, so anything
+            # short of skipping the whole row loops for ever (Q7).
             continue
         has_model = bool((r.get("model") or "").strip())
         in_stock = (r.get("qty") or 0) > 0
@@ -158,9 +170,19 @@ def plan_write(row: dict, parsed: dict) -> dict:
     — the same pact as `customers.phone` and the sealing of `as400_account`.
     Filling a hole is safe; overwriting what a person typed is not.
 
-      model/size/color   only when `model` is empty, and all three together or
-                         none (Q5: mixing two sources inside one row is how a
-                         half-parsed name gets into the FedEx grouping key).
+      as400_description  the catalogue name, RAW and unsplit, and only when
+                         `model` is empty. The watchdog does not split it:
+                         `parseBikeName` lives in Pickd's TypeScript and is not
+                         mirrored here (Rafael, 2026-09-02 and 2026-09-08 —
+                         "pickd la parte"). It writes what it read; Pickd parses
+                         it where the parser is. That also keeps this side clear
+                         of R12: a raw name is not the FedEx grouping key, so it
+                         owes no export simulation. `model` and `size` do, and
+                         that is exactly why they are not written from here.
+      as400_read_at      when it was read. Its presence is what stops the queue
+                         asking again (Q7) — the model stays empty until Pickd
+                         splits, so without this the same SKU would come back
+                         every gap, forever.
       weight_lbs         only when `weight_verified` is false. The gap for the
                          weight is NOT a NULL: the trigger writes 45 into every
                          bike, so that 45 is a placeholder, not anybody's data.
@@ -178,18 +200,35 @@ def plan_write(row: dict, parsed: dict) -> dict:
         if weight > 0 and weight != row.get("weight_lbs"):
             plan["weight_lbs"] = weight
 
-    if not (row.get("model") or "").strip():
+    if not (row.get("model") or "").strip() and not (row.get("as400_description") or "").strip():
         description = (parsed.get("description") or "").strip()
         if description:
-            # ❓ Q14 — the name still has to be split into model / size / colour,
-            # and that rule lives in TypeScript (`parseBikeName`, pickd). Rafael
-            # ruled on 2026-09-02 that it is NOT ported to Python as a second
-            # mirror, which leaves this phase with the raw name and no home for
-            # the split. F2 does not need the answer: it logs the description and
-            # writes nothing. F3 does, and the PRD asks the question.
-            plan["_description"] = description
+            plan["as400_description"] = description
+            plan["as400_read_at"] = _now()
 
     return plan
+
+
+def apply_write(sku: str, plan: dict, client=None) -> dict:
+    """Write the plan. Only reached when SKU_ENRICH_WRITE is on (F3).
+
+    An `update` by primary key, never an upsert: an upsert on a SKU that somehow
+    isn't in the catalogue would CREATE a metadata row with no inventory behind
+    it, which is the orphan shape Pickd spent a migration cleaning up.
+    """
+    if not plan:
+        return {"written": 0}
+    if client is None:
+        from supabase_client import get_client
+
+        client = get_client()
+    res = client.table("sku_metadata").update(plan).eq("sku", sku).execute()
+    n = len(res.data or [])
+    if n != 1:
+        # Zero means the row moved or the SKU is spelled differently; more than
+        # one should be impossible (`sku` is the key). Either way, say so.
+        log.warning("SKU %s: update touched %d rows, expected 1", sku, n)
+    return {"written": n}
 
 
 # ── the step ─────────────────────────────────────────────────────────────────
@@ -268,9 +307,11 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn) -> dict:
             log.warning(
                 "SKU %s: AS400 says %s, Pickd has is_bike=%s", sku, kind, row.get("is_bike")
             )
-        if writes_enabled():
-            log.error("SKU %s: SKU_ENRICH_WRITE is on but F3 isn't built — not writing", sku)
-        elif plan:
+        if plan and writes_enabled():
+            written = apply_write(sku, plan)
+            log.info("SKU %s wrote %s (%d row)", sku, plan, written["written"])
+            return {"action": "written", "sku": sku, "parsed": parsed, "plan": plan}
+        if plan:
             log.info("SKU %s WOULD write: %s", sku, plan)
         else:
             log.info("SKU %s: nothing to fill — every gap is already taken", sku)
@@ -299,7 +340,7 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn) -> dict:
 # would be a lot of rows to decide one lookup.
 QUEUE_FETCH_LIMIT = int(os.getenv("SKU_ENRICH_FETCH_LIMIT", "200"))
 
-_META_COLS = "sku, model, size, color, weight_lbs, weight_verified, is_bike"
+_META_COLS = "sku, model, size, color, weight_lbs, weight_verified, is_bike, as400_description"
 
 
 def fetch_candidates(client=None) -> list:
@@ -319,6 +360,7 @@ def fetch_candidates(client=None) -> list:
         .select(_META_COLS)
         .eq("is_bike", True)
         .or_("model.is.null,model.eq.")
+        .is_("as400_description", "null")  # already read → never again (Q7)
         .limit(QUEUE_FETCH_LIMIT)
         .execute()
     ).data or []

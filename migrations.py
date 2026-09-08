@@ -76,6 +76,19 @@ MIGRATIONS: list[tuple[str, str]] = [
         "picking_lists.ship_to_address_id",
         "ALTER TABLE picking_lists ADD COLUMN IF NOT EXISTS ship_to_address_id uuid;",
     ),
+    # The AS400 catalogue name the enrichment step brings back, raw and unsplit
+    # (docs/sku-catalog-enrichment.md). Pickd's 20260908120000_as400_description.sql
+    # is the source of truth, comments included; these are column-only so a watcher
+    # updated ahead of it never writes into a missing column — which PostgREST
+    # would swallow in silence, losing the read and re-reading the SKU forever.
+    (
+        "sku_metadata.as400_description",
+        "ALTER TABLE sku_metadata ADD COLUMN IF NOT EXISTS as400_description text;",
+    ),
+    (
+        "sku_metadata.as400_read_at",
+        "ALTER TABLE sku_metadata ADD COLUMN IF NOT EXISTS as400_read_at timestamptz;",
+    ),
 ]
 
 
