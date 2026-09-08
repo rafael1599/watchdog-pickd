@@ -379,44 +379,102 @@ def test_the_gap_does_nothing_while_the_switch_is_off(monkeypatch):
     assert called == []
 
 
-def test_the_gap_spends_exactly_one_sku(monkeypatch):
-    # ONE per gap, never a burst — the decision of 2026-06-10, unchanged.
+def _gap_harness(monkeypatch, *, idle=1e9, results=None):
+    """Wire _run_sku_gap up to fakes and return the list of SKUs it looked up.
+
+    `system_idle_seconds` is always faked: the real one shells out to ioreg and
+    would make these tests depend on whether somebody is touching this Mac.
+    """
     import auto_scanner
     import sku_enrichment
 
     monkeypatch.setenv("SKU_ENRICH", "1")
     monkeypatch.setattr(auto_scanner, "_driver_for_sku_step", lambda: object())
+    idles = iter(idle) if isinstance(idle, list) else None
+    monkeypatch.setattr(
+        auto_scanner, "system_idle_seconds", (lambda: next(idles)) if idles else (lambda: idle)
+    )
     monkeypatch.setattr(sku_enrichment, "next_sku", lambda *a, **k: {"sku": "03-3492BL"})
-    steps = []
+    seen = []
+    outcomes = iter(results or [])
 
-    def one_step(driver, row, **kw):
-        steps.append(row["sku"])
-        return {"action": "read", "sku": row["sku"], "returned": True}
+    def step(driver, row, **kw):
+        seen.append(row["sku"])
+        return next(outcomes, {"action": "read", "sku": row["sku"], "returned": True})
 
-    monkeypatch.setattr(sku_enrichment, "run_sku_step", one_step)
+    monkeypatch.setattr(sku_enrichment, "run_sku_step", step)
+    return seen
+
+
+def test_the_gap_fills_itself_instead_of_sleeping_through(monkeypatch):
+    # The gap is twenty minutes and one lookup costs seconds. With 745 bikes to
+    # read, one per gap is 28 business days — this is Rafael's original "unos 5
+    # minutos" (2026-09-02), which the queue's size earned back.
+    monkeypatch.setenv("SKU_ENRICH_MAX_PER_GAP", "6")
+    seen = _gap_harness(monkeypatch)
+    import auto_scanner
+
     auto_scanner._run_sku_gap()
-    assert steps == ["03-3492BL"]
+    assert len(seen) == 6
+
+
+def test_one_per_gap_comes_back_with_a_single_env_line(monkeypatch):
+    # The old cadence is a .env edit away, not a deploy.
+    monkeypatch.setenv("SKU_ENRICH_MAX_PER_GAP", "1")
+    seen = _gap_harness(monkeypatch)
+    import auto_scanner
+
+    auto_scanner._run_sku_gap()
+    assert len(seen) == 1
+
+
+def test_the_burst_stops_the_moment_the_operator_touches_the_keyboard(monkeypatch):
+    # THE point of this change. The idle gate used to be checked once, before
+    # the gap, so a burst could have run straight through somebody sitting down.
+    # Now it is re-checked before every single lookup: idle, idle, then busy.
+    monkeypatch.setenv("SKU_ENRICH_MAX_PER_GAP", "10")
+    seen = _gap_harness(monkeypatch, idle=[1e9, 1e9, 3.0])
+    import auto_scanner
+
+    auto_scanner._run_sku_gap()
+    assert len(seen) == 2  # the third never started
+
+
+def test_a_manual_get_orders_now_wins_over_catalogue_work(monkeypatch):
+    # They asked for orders, not for catalogue work.
+    import auto_scanner
+
+    monkeypatch.setenv("SKU_ENRICH_MAX_PER_GAP", "10")
+    seen = _gap_harness(monkeypatch)
+    auto_scanner._kick.set()
+    try:
+        auto_scanner._run_sku_gap()
+    finally:
+        auto_scanner._kick.clear()
+    assert seen == []
+
+
+def test_the_budget_ends_the_burst_even_with_the_count_left(monkeypatch):
+    monkeypatch.setenv("SKU_ENRICH_MAX_PER_GAP", "100")
+    monkeypatch.setenv("SKU_ENRICH_GAP_BUDGET_SEC", "0")
+    seen = _gap_harness(monkeypatch)
+    import auto_scanner
+
+    auto_scanner._run_sku_gap()
+    assert seen == []
 
 
 def test_the_queue_pauses_when_the_terminal_did_not_come_home(monkeypatch):
     # A step that left the terminal on a stock screen must not be followed by
     # another one: the next cycle's bootstrap is what recovers it.
-    import auto_scanner
-    import sku_enrichment
-
-    monkeypatch.setenv("SKU_ENRICH", "1")
     monkeypatch.setenv("SKU_ENRICH_MAX_PER_GAP", "5")
-    monkeypatch.setattr(auto_scanner, "_driver_for_sku_step", lambda: object())
-    monkeypatch.setattr(sku_enrichment, "next_sku", lambda *a, **k: {"sku": "03-3492BL"})
-    steps = []
+    seen = _gap_harness(
+        monkeypatch, results=[{"action": "read", "sku": "03-3492BL", "returned": False}]
+    )
+    import auto_scanner
 
-    def lost(driver, row, **kw):
-        steps.append(row["sku"])
-        return {"action": "read", "sku": row["sku"], "returned": False}
-
-    monkeypatch.setattr(sku_enrichment, "run_sku_step", lost)
     auto_scanner._run_sku_gap()
-    assert len(steps) == 1
+    assert len(seen) == 1
 
 
 def test_a_crash_in_the_sku_step_never_stops_the_orders(monkeypatch):

@@ -72,11 +72,29 @@ def writes_enabled() -> bool:
     return os.getenv("SKU_ENRICH_WRITE", "0") in ("1", "true", "True", "yes")
 
 
+def gap_budget_sec() -> float:
+    """How long one gap may spend on catalogue lookups.
+
+    Rafael asked for "unos 5 minutos" on 2026-09-02 and I talked him into one SKU
+    per gap, because the queue was seven. It is 745 now (§20.2), and at one per
+    gap that is 28 business days of a terminal that sits idle twenty minutes at a
+    time. This is his original number, earned back by the queue's size.
+
+    A WALL-CLOCK budget rather than a count, because what matters is how long the
+    keyboard is held: a slow lookup should end the burst earlier, not later.
+    """
+    return max(0.0, float(os.getenv("SKU_ENRICH_GAP_BUDGET_SEC", "300")))
+
+
 def max_per_gap() -> int:
-    """SKUs per gap. The decision is one; the lever exists in case the gap turns
-    out cheaper than measured, and it is read at call time so Bay 2 can turn it
-    without a deploy."""
-    return max(1, int(os.getenv("SKU_ENRICH_MAX_PER_GAP", "1")))
+    """Hard cap on lookups per gap; the budget and this one both apply, whichever
+    is reached first.
+
+    Belt to the budget's braces: if a lookup ever returned instantly — a screen
+    that needs no driving, a bug — the clock alone would spin. Set it to 1 to get
+    the old one-per-gap cadence back with a .env edit instead of a deploy.
+    """
+    return max(1, int(os.getenv("SKU_ENRICH_MAX_PER_GAP", "40")))
 
 
 # Only an AS400 stock number can be looked up: two digits, four digits, and 0-3

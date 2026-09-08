@@ -253,24 +253,50 @@ def _interruptible_wait(seconds: float) -> None:
 
 
 def _run_sku_gap() -> None:
-    """Spend one gap on the AS400 catalogue, if that is switched on.
+    """Spend the gap on the AS400 catalogue, if that is switched on.
 
-    Held to ONE SKU (docs/sku-catalog-enrichment.md §9) and wrapped whole: this
-    is a side errand, so nothing it can do may take the scanner down with it.
-    We are already inside `capture_lock` and past the operator-idle gate, so it
-    inherits both — it never fights the human for the keyboard.
+    The gap is TWENTY MINUTES long and one lookup uses seconds of it. With a
+    queue of 745 bikes, one per gap is 28 business days — which is why Rafael's
+    original ask (2026-09-02: "que dedique unos 5 minutos") is back, and why the
+    one-per-gap rule of 2026-06-10 does not carry over here unchanged.
+
+    What that rule was actually protecting is the operator's keyboard, and this
+    protects it BETTER than one-per-gap did: the idle gate used to be checked
+    once, before the gap, so a burst could have run straight through the moment
+    somebody sat down. Now it is re-checked before EVERY lookup, and the step
+    that is already running always returns the terminal to the order search
+    before we stop. Two limits, whichever comes first: a wall-clock budget and a
+    count, both read from .env at call time.
+
+    The orders are untouched by any of this — the search for the next order has
+    already run, and this only fills the sleep that followed it.
+
+    Wrapped whole: a side errand may not take the scanner down with it.
     """
     try:
         import sku_enrichment
 
         if not sku_enrichment.enabled():
             return
+
+        deadline = time.monotonic() + sku_enrichment.gap_budget_sec()
+        done = 0
         for _ in range(sku_enrichment.max_per_gap()):
+            if time.monotonic() >= deadline:
+                log.info("auto-scan: SKU budget spent after %d lookup(s)", done)
+                return
+            # The operator's keyboard wins, always — checked before every single
+            # lookup, not once per gap. A manual "get orders now" wins too: they
+            # asked for orders, not for catalogue work.
+            if system_idle_seconds() < IDLE_THRESHOLD_SEC or _kick.is_set():
+                log.info("auto-scan: the operator is back — SKU queue yields after %d", done)
+                return
             row = sku_enrichment.next_sku()
             if not row:
                 log.info("auto-scan: the SKU queue is empty — nothing to look up")
                 return
             res = sku_enrichment.run_sku_step(_driver_for_sku_step(), row)
+            done += 1
             if not res.get("returned", True):
                 # The terminal isn't back on the order search. Stop touching it;
                 # the next cycle's bootstrap is what recovers.
@@ -278,6 +304,7 @@ def _run_sku_gap() -> None:
                 return
             if res["action"] in ("unavailable", "error"):
                 return
+        log.info("auto-scan: SKU count cap reached after %d lookup(s)", done)
     except Exception:
         log.exception("auto-scan: SKU step crashed — the orders keep going")
 

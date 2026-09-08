@@ -805,3 +805,53 @@ debe rechazar el color dentro del modelo (52 filas) o eso es demasiado frágil p
 1. **Ensanchar la cola** — hecho aquí. El watchdog lee las 745 hacia `as400_description`.
 2. **La pantalla de pickd**, dos carriles y una simulación (❓Q15 contestada).
 3. **El CHECK**, cuando 1 y 2 hayan dejado el catálogo limpio.
+
+---
+
+## 21) La ráfaga en el hueco (8 sep 2026) — el «5 minutos» del pedido original, de vuelta
+
+Rafael: *«tenemos mucho tiempo durante el día cuando no hay órdenes, ¿hay posibilidad de aprovechar
+un poco más el tiempo de día?»*
+
+Sí, y el número es vergonzoso: **el hueco dura 20 minutos y usábamos ~6 segundos de él.** Con 745
+bicis en cola, un SKU por hueco son **28 días hábiles**.
+
+**Esto revierte una decisión mía, no una suya.** El 2 sep Rafael pidió «que dedique unos 5 minutos»
+y yo lo llevé a un SKU por hueco (§9) — con razón entonces: la cola eran **7 SKUs** y un
+presupuesto por minutos sólo habría añadido estado que persistir. La cola creció **cien veces**
+(§20.2), y con ella el argumento se dio la vuelta. Su número original era el correcto.
+
+### 21.1 Por qué subir el tope, tal cual estaba, era inseguro
+
+La regla del 10 jun protege **el teclado del operador**, y el código sólo la cumplía por accidente:
+**el gate de inactividad se comprobaba una vez, antes del hueco**. Diez consultas seguidas son ~60 s
+agarrando el teclado, y una ráfaga podía haber pasado por encima de alguien sentándose.
+
+Así que la ráfaga entra **con el gate movido a donde debía estar**:
+
+- Se comprueba `system_idle_seconds()` **antes de cada consulta**, no una vez por hueco.
+- Un *«get orders now»* manual (`_kick`) también corta: pidieron órdenes, no catálogo.
+- La consulta que ya está corriendo **siempre devuelve el terminal a la búsqueda de órdenes** antes
+  de parar — el `finally` de §18 no cambia.
+- Dos límites, manda el primero: **presupuesto de reloj** (`SKU_ENRICH_GAP_BUDGET_SEC`, 300 s) y
+  **tope de cuenta** (`SKU_ENRICH_MAX_PER_GAP`, 40). El reloj es lo que importa —una consulta lenta
+  acorta la ráfaga, no la alarga— y la cuenta es el cinturón por si alguna volviera instantánea.
+
+**El resultado neto es que el operador está mejor protegido que antes**, no peor: antes una ráfaga
+de una consulta no podía interrumpirse; ahora una de cuarenta sí.
+
+**Y las órdenes no pierden nada:** la búsqueda de la orden siguiente ya corrió; esto sólo llena el
+sueño que venía después.
+
+### 21.2 Lo que hace con los 28 días
+
+Con 27 huecos al día y 300 s de presupuesto, la cola de 745 se vacía en **días, no en un mes** —
+cuánto exactamente depende de lo que cueste una consulta, que es el número que F2 va a medir en Bay
+2 y que nadie tiene todavía.
+
+**Esto reordena ❓Q11 (la ventana nocturna).** Con el día bien aprovechado puede que sobre; se
+decide con la cifra de F2, no antes. `SKU_ENRICH_MAX_PER_GAP=1` devuelve la cadencia vieja con una
+línea de `.env`, sin deploy, si algo en el piso no cuadra.
+
+**§9 queda reemplazado por esta sección** en lo que toca a la cadencia. Lo que NO cambia, y no se
+negocia: el `capture_lock`, el gate de inactividad, y que la orden siempre va primero.
