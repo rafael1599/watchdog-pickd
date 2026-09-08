@@ -31,7 +31,25 @@ python3 watcher.py
 
 El watcher se instala automaticamente como LaunchAgent en macOS (`com.antigravity.watchdog-pickd`).
 
-## Actualizar (un solo comando)
+## Actualizar: un push es el deploy (8 sep 2026)
+
+`auto_update.py` mira `origin` cada 5 minutos desde Bay 2 y, cuando es seguro, corre el
+mismo `scripts/update.sh` que el botón ⟳. **Pregunta esta máquina; GitHub no llama** — un
+webhook exigiría que un Mac detrás del NAT del almacén fuera alcanzable desde internet
+para ahorrarse un `git fetch`.
+
+Se niega a actualizar **durante una captura** (`update.sh` reinicia los LaunchAgents y
+dejaría a Mocha en una pantalla desconocida, perdiendo la orden), **mientras alguien usa
+el Mac** (un reinicio le quita la UI de delante) y **con cambios sin commitear** (el pull
+es `--ff-only` y fallaría igual; lo dice una vez, no cada cinco minutos). Si lanza una
+actualización y `HEAD` no se mueve, no lo repite: algo va mal y repetirlo sólo enterraría
+el motivo.
+
+La decisión vive en `why_not_now()`, que es pura y está testeada — un argumento de
+seguridad que sólo existiera dentro de un hilo en una Mac del almacén no lo podría
+revisar nadie. Se apaga con `AUTO_UPDATE=0`.
+
+## Actualizar a mano (un solo comando)
 
 ```bash
 ./scripts/update.sh        # rama actual: git pull + deps + reinicia LaunchAgents

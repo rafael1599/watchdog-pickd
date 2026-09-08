@@ -35,6 +35,7 @@ load_dotenv()  # must run before importing modules that read env at import time
 from flask import Flask, abort, jsonify, render_template_string, request  # noqa: E402
 
 import auto_scanner  # noqa: E402
+import auto_update  # noqa: E402
 import maintenance  # noqa: E402
 import scanned_store  # noqa: E402
 import sku_enrichment  # noqa: E402
@@ -1877,6 +1878,10 @@ setInterval(() => { if (!uiBusy()) load(); }, 8000);
 if __name__ == "__main__":
     _load_archive()
     start_auto_scanner()
+    # A push is the deploy: this watches origin and runs the same update.sh the
+    # ⟳ button runs, but only when no capture is running and nobody is using the
+    # Mac. See auto_update.py — the safety argument lives there.
+    auto_update.start_auto_update()
     # threaded=True so UI requests are served promptly even while the auto-scanner's
     # background thread is busy driving Mocha (otherwise the page hangs blank until
     # the scan cycle finishes).
