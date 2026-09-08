@@ -4,9 +4,17 @@ auto_update.py — Bay 2 pulls its own updates, so a push is the deploy.
 Rafael, 2026-09-08: "hay manera de hacer que en cada push se actualice solo el
 watchdog?". There is, and for a Mac in a warehouse the shape is the same one the
 rest of this system already has: **Bay 2 asks**, GitHub is never asked to call.
-A webhook would need that machine reachable from the internet — a tunnel, an
-open port, a public URL for a laptop behind the warehouse NAT — to save a poll
-that costs one `git fetch` every few minutes.
+Rafael would have preferred GitHub to push, and it is the better shape in the
+abstract. It is the worse one HERE, and measurably: every way of being told
+needs Bay 2 either reachable from the internet or holding a permanent outbound
+connection — a `cloudflared` daemon, or a GitHub Actions self-hosted runner,
+which is itself a long-poll wearing a service. Each of those is MORE running on
+the machine he is worried about slowing down, not less.
+
+What this costs instead, measured on Bay 2's own repo: **0.25 s per poll**, of
+which nearly all is network wait rather than CPU, 288 times a day — under a
+tenth of a percent of the machine, and less than two AS400 captures. The thread
+sleeps the rest of the time.
 
 So: a thread checks whether `origin/<branch>` moved and, when it is SAFE, runs
 exactly the same `scripts/update.sh` the ⟳ button runs. Nothing new happens on
@@ -72,18 +80,28 @@ def branch() -> str:
     return os.getenv("AUTO_UPDATE_BRANCH") or _git("rev-parse", "--abbrev-ref", "HEAD")
 
 
-def check_remote(fetch=True) -> dict:
+def check_remote() -> dict:
     """What git says: are we behind, and is the tree clean enough to move?
 
-    Returns {"branch", "local", "remote", "behind", "dirty"}. Raises whatever
-    git raises — the caller decides how loud that should be.
+    Uses `ls-remote`, not `fetch`, and the reason is not speed — both are about
+    a quarter of a second, nearly all of it network. `ls-remote` asks for one ref
+    and **writes nothing**: no objects downloaded, no FETCH_HEAD, no refs
+    touched. A poller that runs 288 times a day on a machine somebody else is
+    working on should leave no trace on disk at all.
+
+    Fetching here was also redundant: `update.sh` does its own `git pull`, so all
+    this needs to know is whether the remote SHA differs from ours.
+
+    Returns {"branch", "local", "remote", "behind", "dirty"}. Raises whatever git
+    raises — the caller decides how loud that should be.
     """
     b = branch()
-    if fetch:
-        _git("fetch", "--quiet", "origin", b)
+    line = _git("ls-remote", "origin", f"refs/heads/{b}")
+    remote = line.split()[0] if line else ""
     local = _git("rev-parse", "HEAD")
-    remote = _git("rev-parse", f"origin/{b}")
     dirty = bool(_git("status", "--porcelain"))
+    if not remote:
+        raise RuntimeError(f"origin has no branch {b}")
     return {
         "branch": b,
         "local": local,

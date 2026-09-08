@@ -34,9 +34,20 @@ El watcher se instala automaticamente como LaunchAgent en macOS (`com.antigravit
 ## Actualizar: un push es el deploy (8 sep 2026)
 
 `auto_update.py` mira `origin` cada 5 minutos desde Bay 2 y, cuando es seguro, corre el
-mismo `scripts/update.sh` que el botón ⟳. **Pregunta esta máquina; GitHub no llama** — un
-webhook exigiría que un Mac detrás del NAT del almacén fuera alcanzable desde internet
-para ahorrarse un `git fetch`.
+mismo `scripts/update.sh` que el botón ⟳. **Pregunta esta máquina; GitHub no llama.**
+
+**Lo que cuesta, medido en el repo real:** `git ls-remote` = **0,26 s por sondeo**, casi
+todo espera de red y no CPU, 288 veces al día — menos de una décima de porcentaje de la
+máquina y menos que dos capturas del AS400. `ls-remote` en vez de `fetch` **no escribe
+nada** en el repo (ni objetos, ni `FETCH_HEAD`, ni refs), que es lo que corresponde a un
+proceso que corre en una Mac donde alguien está trabajando. El `fetch` además sobraba:
+`update.sh` hace su propio `git pull`.
+
+**Que avisara GitHub sería mejor forma en abstracto y peor aquí**, y se mide igual: toda
+vía de "que avise" exige o exponer esta Mac a internet o mantener un demonio con conexión
+permanente (`cloudflared`, o un runner self-hosted de Actions, que es un long-poll
+disfrazado de servicio). Cualquiera de los dos es **más** corriendo en la máquina, no
+menos.
 
 Se niega a actualizar **durante una captura** (`update.sh` reinicia los LaunchAgents y
 dejaría a Mocha en una pantalla desconocida, perdiendo la orden), **mientras alguien usa
