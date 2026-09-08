@@ -259,6 +259,20 @@ def plan_write(row: dict, parsed: dict, with_weight: bool = True) -> dict:
         if description:
             plan["as400_description"] = description
             plan["as400_read_at"] = _now()
+            # The WHOLE screen, not just the name. Four of the five fields we
+            # parse were being thrown away — AS400's own on-hand per warehouse,
+            # its weight, its B/P classification, the model year — and those are
+            # exactly what answers "where do Pickd and AS400 disagree" (Rafael,
+            # 2026-09-08). A jsonb blob because which field matters is the
+            # question, not the answer; the one that earns a column gets it
+            # later, with the evidence already collected.
+            plan["as400_snapshot"] = {
+                "description": description,
+                "kind": parsed.get("kind"),
+                "model_year": parsed.get("model_year"),
+                "weight_lbs": parsed.get("weight_lbs"),
+                "on_hand": parsed.get("on_hand"),
+            }
 
     return plan
 
@@ -464,3 +478,57 @@ def next_sku(client=None) -> dict | None:
     """The one SKU this gap should look up, or None when the queue is empty."""
     queue = select_sku_queue(fetch_candidates(client), load_unknown())
     return queue[0] if queue else None
+
+
+def run_catalog_batch(driver, count: int = 10, budget_sec: float = 180.0) -> dict:
+    """Read `count` SKUs off AS400 right now. The operator's "compare" button.
+
+    The gap loop fills the catalogue at its own pace; this is for when somebody
+    wants the data TODAY in order to decide what to work on. It deliberately
+    does NOT check the idle gate: the person asking just clicked a button, so
+    waiting for the Mac to go quiet would mean waiting for them to walk away.
+
+    The caller owns `capture_lock` — driving Mocha from two places at once is
+    the one thing that has always been forbidden here.
+
+    Returns what it read, so the panel can show it without another round trip.
+    """
+    deadline = time.monotonic() + max(1.0, budget_sec)
+    out = {"read": 0, "unknown": 0, "failed": 0, "rows": [], "stopped": None}
+
+    for _ in range(max(1, count)):
+        if time.monotonic() >= deadline:
+            out["stopped"] = "budget"
+            break
+        row = next_sku()
+        if not row:
+            out["stopped"] = "queue empty"
+            break
+        res = run_sku_step(driver, row)
+        action = res.get("action")
+        if action in ("read", "written"):
+            out["read"] += 1
+            parsed = res.get("parsed") or {}
+            out["rows"].append(
+                {
+                    "sku": row.get("sku"),
+                    "as400": parsed.get("description"),
+                    "pickd": row.get("model"),
+                    "on_hand": parsed.get("on_hand"),
+                    "weight": parsed.get("weight_lbs"),
+                    "kind": parsed.get("kind"),
+                }
+            )
+        elif action == "unknown":
+            out["unknown"] += 1
+        else:
+            out["failed"] += 1
+
+        if not res.get("returned", True):
+            out["stopped"] = "the terminal didn't get back to the order search"
+            break
+        if action in ("unavailable", "error"):
+            out["stopped"] = f"AS400 {action}"
+            break
+
+    return out

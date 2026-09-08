@@ -594,3 +594,70 @@ def test_a_write_that_landed_is_a_success():
 
     client = FakeTable([{"sku": "03-3933BK", "as400_description": "CODA S2"}])
     assert apply_write("03-3933BK", {"as400_description": "CODA S2"}, client) == {"written": 1}
+
+
+# ── the compare button ───────────────────────────────────────────────────────
+
+
+def test_the_whole_screen_is_kept_not_just_the_name():
+    # Four of the five fields were being parsed and thrown away — AS400's own
+    # on-hand, its weight, its B/P classification, the model year — and those
+    # are what answer "where do Pickd and AS400 disagree".
+    plan = plan_write(
+        {"sku": "03-3933BK", "model": None, "weight_verified": True},
+        {
+            "description": "CODA S2 L16 2026 GLOSS BLACK",
+            "kind": "B",
+            "model_year": "2025",
+            "weight_lbs": 36.0,
+            "on_hand": {"NJ": 56, "FL": 0, "CA": 0},
+        },
+    )
+    snap = plan["as400_snapshot"]
+    assert snap["on_hand"] == {"NJ": 56, "FL": 0, "CA": 0}
+    assert snap["weight_lbs"] == 36.0
+    assert snap["kind"] == "B"
+    assert snap["model_year"] == "2025"
+
+
+def test_the_batch_reports_both_sides_so_the_comparison_has_something_to_read(monkeypatch):
+    import sku_enrichment
+
+    queue = iter(
+        [
+            {"sku": "03-3933BK", "model": "CODA S2 L16", "weight_verified": True},
+            {"sku": "03-3492BL", "model": None, "weight_verified": True},
+        ]
+    )
+    monkeypatch.setattr(sku_enrichment, "next_sku", lambda *a, **k: next(queue, None))
+    monkeypatch.setattr(
+        sku_enrichment,
+        "run_sku_step",
+        lambda d, row, **k: {
+            "action": "read",
+            "sku": row["sku"],
+            "returned": True,
+            "parsed": {"description": "CODA S2 L16 2026 GLOSS BLACK", "on_hand": {"NJ": 56}},
+        },
+    )
+    out = sku_enrichment.run_catalog_batch(object(), count=5)
+    assert out["read"] == 2
+    assert out["stopped"] == "queue empty"
+    # Both sides on every row: that IS the comparison.
+    assert out["rows"][0]["as400"] == "CODA S2 L16 2026 GLOSS BLACK"
+    assert out["rows"][0]["pickd"] == "CODA S2 L16"
+    assert out["rows"][0]["on_hand"] == {"NJ": 56}
+
+
+def test_the_batch_stops_when_the_terminal_does_not_come_home(monkeypatch):
+    import sku_enrichment
+
+    monkeypatch.setattr(sku_enrichment, "next_sku", lambda *a, **k: {"sku": "03-3492BL"})
+    monkeypatch.setattr(
+        sku_enrichment,
+        "run_sku_step",
+        lambda d, row, **k: {"action": "read", "sku": row["sku"], "returned": False},
+    )
+    out = sku_enrichment.run_catalog_batch(object(), count=20)
+    assert out["read"] == 1  # one attempt, then it stops touching the terminal
+    assert "order search" in out["stopped"]

@@ -89,6 +89,10 @@ MIGRATIONS: list[tuple[str, str]] = [
         "sku_metadata.as400_read_at",
         "ALTER TABLE sku_metadata ADD COLUMN IF NOT EXISTS as400_read_at timestamptz;",
     ),
+    (
+        "sku_metadata.as400_snapshot",
+        "ALTER TABLE sku_metadata ADD COLUMN IF NOT EXISTS as400_snapshot jsonb;",
+    ),
 ]
 
 

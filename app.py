@@ -37,6 +37,7 @@ from flask import Flask, abort, jsonify, render_template_string, request  # noqa
 import auto_scanner  # noqa: E402
 import maintenance  # noqa: E402
 import scanned_store  # noqa: E402
+import sku_enrichment  # noqa: E402
 from as400_capture import (  # noqa: E402
     AS400Disconnected,
     AS400ManualLoginRequired,
@@ -827,6 +828,38 @@ def scan_now():
     return jsonify({"error": "Auto-scanner is not running (AUTO_SCAN is off)."}), 409
 
 
+@app.post("/api/catalog-scan")
+def catalog_scan():
+    """Read a batch of SKUs off AS400 now, so the comparison has data today.
+
+    The gap loop fills the catalogue at its own pace — 745 bikes take days. This
+    is the operator saying "I need to decide what to work on this afternoon".
+
+    Synchronous, like the maintenance panel: a batch of ten is about a minute,
+    and the button stays disabled while it runs. It takes `capture_lock` without
+    blocking, so it can never fight a capture that is already under way.
+    """
+    body = request.get_json(silent=True) or {}
+    count = max(1, min(int(body.get("count") or 10), 50))
+
+    if not capture_lock.acquire(blocking=False):
+        return jsonify({"error": "A capture is running right now — try again in a moment."}), 409
+    try:
+        driver = MochaDriver()
+        try:
+            bootstrap_session(driver)
+        except Exception as e:  # noqa: BLE001 — the operator needs the reason, not a trace
+            return jsonify({"error": f"AS400 isn't ready: {e}"}), 409
+        result = sku_enrichment.run_catalog_batch(driver, count=count)
+        auto_scanner.note_as400(True)
+        return jsonify(result)
+    except Exception as e:  # noqa: BLE001
+        logging.exception("catalog scan failed")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        capture_lock.release()
+
+
 @app.get("/api/maintenance")
 def maintenance_actions():
     """The actions the Maintenance panel offers (see maintenance.ACTIONS)."""
@@ -1104,6 +1137,7 @@ INDEX_HTML = """
         <button onclick="toggleMenu(event, 'topmenu')" title="More">⋯</button>
         <div class="menu" id="topmenu" style="display:none;">
           <button onclick="doScanNow()">▶ Get orders now</button>
+          <button onclick="doCatalogScan()">📇 Compare SKUs with AS400</button>
           <button onclick="doStatus()">Check AS400</button>
           <button onclick="doUpdate()">⟳ Update app</button>
           <button onclick="openMaintenance()">🛠 Maintenance</button>
@@ -1693,6 +1727,30 @@ const STATE_LABELS = {
   order_inquiry:['✅ Viewing an order. Ready to capture.', 'ok'],
   unknown:      ['⚠️ Unrecognized screen. Log in manually to the order-search screen.', 'warn'],
 };
+
+async function doCatalogScan() {
+  // Reads a batch of SKUs off AS400 and reports what it found, so the
+  // comparison has something to look at today instead of in a week.
+  const n = prompt('How many SKUs to read from AS400 now? (1-50)', '10');
+  if (!n) return;
+  msg('Reading ' + n + ' SKUs off AS400 — this holds the terminal for a minute…', 'warn');
+  try {
+    const r = await fetch('/api/catalog-scan', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({count: parseInt(n, 10)})
+    });
+    const d = await r.json();
+    if (!r.ok) { msg(d.error || 'Catalogue scan failed', 'err'); return; }
+    const bits = [d.read + ' read'];
+    if (d.unknown) bits.push(d.unknown + " AS400 doesn't have");
+    if (d.failed) bits.push(d.failed + ' failed');
+    if (d.stopped) bits.push('stopped: ' + d.stopped);
+    msg(bits.join(' · '), d.read ? 'ok' : 'warn');
+    if (d.rows && d.rows.length) console.table(d.rows);
+  } catch (e) {
+    msg('Catalogue scan failed: ' + e, 'err');
+  }
+}
 
 async function doScanNow() {
   msg('Kicking the scanner — capturing the next order…', 'warn');
