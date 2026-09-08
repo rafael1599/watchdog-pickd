@@ -709,7 +709,7 @@ siempre («una vez leído, no se vuelve») convertido en código.
 en el catálogo crearía una fila de metadata sin inventario detrás, que es la forma huérfana que
 pickd limpió con una migración entera.
 
-### 19.4 ❓Q15 — ¿dónde vive el partidor en pickd?
+### 19.4 ~~❓Q15~~ — ¿dónde vive el partidor en pickd? **CONTESTADA — §20**
 
 *Default propuesto:* **la misma acción Preview/Apply que pide ❓Q13** para las 47 filas sucias. Son
 el mismo trabajo — proponer un split, **simular el export (R12)**, enseñar qué se fusiona y qué se
@@ -720,3 +720,88 @@ llave del export.
 **No automático, y esa es la razón:** R12 nació porque una propuesta mía echaba dos filas sanas del
 archivo de FedEx sin avisar. Un partidor que escriba `model` solo, de noche, no puede enseñar eso a
 nadie.
+
+---
+
+## 20) Exploración de largo plazo, y el plan que sale de ella (8 sep 2026)
+
+Rafael pidió explorar alternativas antes de definir la superficie. La exploración movió el diseño,
+así que va escrita: la propuesta de §19.4 —«la misma acción Preview/Apply que pide Q13»— era
+**mi error**, y aquí está por qué.
+
+### 20.1 Lo que la exploración encontró
+
+**El backlog es cuatro veces lo que dijimos.** Las 47 de §17.4 eran sólo las medidas. Sobre las 836
+bicis del catálogo:
+
+| | |
+|---|---|
+| `model` de **4 palabras o más** | **227** |
+| `model` **sin `size`** | **263** |
+| con el **color** dentro del `model` | 52 |
+| con el **año** dentro | 34 |
+| con una **comilla doble literal** | **16** ← y el formato del export la prohíbe |
+
+**`model` no es sólo la llave del export.** Lo consumen ~20 sitios (labels, `ShipScreen`,
+`DoubleCheckView`, `warehouse-map`, Scratch & Dent) y **`ItemDetailView` lo edita a mano**. Eso
+descarta derivarlo al vuelo desde `as400_description`: quedarían dos nombres para una misma cosa y
+el piso vería el sucio.
+
+**La casa ya tiene el patrón, y no es un diálogo por lotes.** Es `MeasureCartonsScreen`: «la misma
+lista, ordenada por demanda, con el formulario para arreglarlo en la tarjeta; la misma forma que
+Double Check, porque es el mismo trabajo».
+
+**Y Q13 y Q15 NO eran el mismo trabajo.** Partir `CODA S2 L16 2026 GLOSS BLACK` es mecánico.
+Decidir si `JUV CAPRI 2.4` lleva talla, si la `L` de `KROMO L` es *large* o parte del nombre, o si
+un `TAXI TRIKE` tiene talla de cuadro, es criterio de negocio. Juntarlos en una superficie era
+confundir dos cosas.
+
+### 20.2 La decisión: que el AS400 quite el criterio de en medio
+
+**El paso deja de filtrar por «`model` vacío» y lee TODAS las bicis consultables.** Son **745** de
+las 836 (las otras 91 son guías y seriales que R6 excluye por forma), de las cuales **465 con
+stock**. A un SKU por hueco son ~30 días hábiles; con la ventana nocturna de ❓Q11, días.
+
+**No pisa nada.** `as400_description` está vacía en las 836, así que llenarla es exactamente el
+pacto de siempre —sólo sobre hueco vacío— y `model` sigue sin tocarse desde el watchdog.
+
+**Lo que compra:** las 227 sucias dejan de necesitar criterio. Con el nombre del fabricante delante,
+`parseBikeName` decide; sobre los nombres no truncados que ya tenemos parte el **77%**, así que la
+gente vería ~190 tarjetas en vez de 745.
+
+**Consecuencia que obligó a un cambio:** ahora cada hueco aterriza en una bici cualquiera, y su peso
+casi siempre es el 45 del trigger. Sin separarlo, la fase del nombre y la del peso se desplegarían
+como una sola. `plan_write` recibe `with_weight` y el paso se lo pasa desde `SKU_ENRICH_WEIGHT`,
+que es lo que §10 prometía.
+
+### 20.3 La superficie: **una pantalla, dos carriles, UNA simulación**
+
+Y esto ya no es cuestión de gusto: **los dos carriles escriben en la misma llave y se rompen entre
+sí.** Si el carril mecánico funde `03-3777RD` y `03-3778BK` en `model = DIVIDE` y el carril humano,
+en otra pantalla, le da `DIVIDE` a un tercero cuya caja mide 10″ menos, **los tres** se caen del
+archivo por `dimension_conflict`. Es literalmente lo que casi pasó el 8 sep con `RENEGADE A1 LTD` y
+`JUV MISS DAISY` (§17.2): la simulación no cazó una fila mala, cazó una **interacción**.
+
+Dos superficies = dos simulaciones que no se ven entre sí. Así que:
+
+- **Carril de arriba — «se parte solo»:** `parseBikeName` sobre `as400_description`, aplicable en
+  bloque.
+- **Carril de abajo — «necesita criterio»:** tarjeta a tarjeta, con la forma de `MeasureCartonsScreen`.
+- **Una sola simulación de `buildFedexDimensions` sobre el resultado combinado** (**R12**), y no se
+  escribe si algún SKU pasa a excepción.
+
+### 20.4 Y una regla en la escritura, DESPUÉS de limpiar
+
+Las 227 se regeneran solas: `model` lo escriben catorce caminos y una persona lo edita a mano. El
+playbook de la casa ya lo resolvió una vez, en `canonical_sku` (`20260826220000`): *«cada intento
+anterior añadió una lectura tolerante; esto añade una regla en la escritura»*.
+
+Un CHECK que rechace un `model` con **año de 4 dígitos** o **comilla doble**. **Va después de la
+limpieza**: hoy 34 y 16 filas lo violan y la migración fallaría al aplicarse. ❓ **Q16** — si además
+debe rechazar el color dentro del modelo (52 filas) o eso es demasiado frágil para un CHECK.
+
+### 20.5 El orden
+
+1. **Ensanchar la cola** — hecho aquí. El watchdog lee las 745 hacia `as400_description`.
+2. **La pantalla de pickd**, dos carriles y una simulación (❓Q15 contestada).
+3. **El CHECK**, cuando 1 y 2 hayan dejado el catálogo limpio.

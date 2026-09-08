@@ -56,6 +56,17 @@ def enabled() -> bool:
     return os.getenv("SKU_ENRICH", "0") in ("1", "true", "True", "yes")
 
 
+def weight_enabled() -> bool:
+    """F4's switch, kept separate from F3 now that every read touches a weight.
+
+    The queue no longer filters on "no model" (Rafael, 2026-09-08), so every gap
+    lands on a bike whose weight is probably the trigger's 45. Without this the
+    name phase and the weight phase would ship as one, and §10 promised they
+    could be separated from .env.
+    """
+    return os.getenv("SKU_ENRICH_WEIGHT", "0") in ("1", "true", "True", "yes")
+
+
 def writes_enabled() -> bool:
     """F3's switch. While this is off the step logs its plan and writes nothing."""
     return os.getenv("SKU_ENRICH_WRITE", "0") in ("1", "true", "True", "yes")
@@ -127,42 +138,58 @@ def mark_unknown(sku: str, reason: str = "not_in_as400") -> None:
 def select_sku_queue(rows, unknown=None) -> list:
     """Order the catalogue rows into the queue, most valuable first. Pure.
 
-    1. bikes ON THE FLOOR with no model — the ones a picker can be holding.
-    2. the rest with no model.
-    3. bikes whose weight nobody has ever put on a scale, most ordered first
-       (that ordering is the caller's — `get_bike_demand_ranking` already sorts
-       by demand, and re-sorting here would be a second answer to one question).
+    Every bike that hasn't been read yet is a candidate (Rafael, 2026-09-08) —
+    not only the ones with no model. Reading a bike whose model is dirty is what
+    turns cleaning those 227 rows from "somebody decides whether JUV CAPRI 2.4
+    carries a size" into "the manufacturer's own name says", and it costs
+    nothing: `as400_description` is empty on all 836, so nothing is overwritten.
+
+    The order, most valuable first:
+      1. no model at all, on the floor — a picker can be holding it right now.
+      2. no model, no stock.
+      3. a model nobody split (`size` is empty), on the floor — the 263.
+      4. everything else, stock first.
 
     Rows AS400 has already refused (`unknown`), rows whose SKU is not a stock
     number (R6), and rows ALREADY READ never enter. That last one is not an
-    optimisation: `model` stays empty until Pickd splits the description, so
+    optimisation: `model` stays as it is until Pickd splits the description, so
     without it the same SKU would come back every gap for ever (Q7).
     """
     unknown = unknown or {}
-    floor, rest, weights = [], [], []
-    for r in rows:
-        sku = (r.get("sku") or "").strip().upper()
-        if not sku or sku in unknown or not is_lookupable(sku):
-            continue
-        if (r.get("as400_description") or "").strip():
-            # Already read. AS400 has nothing left to tell us about this SKU —
-            # including its weight, which came back on the same screen — and the
-            # model stays empty until Pickd splits the description, so anything
-            # short of skipping the whole row loops for ever (Q7).
-            continue
+
+    def rank(r):
         has_model = bool((r.get("model") or "").strip())
+        has_size = bool((r.get("size") or "").strip())
         in_stock = (r.get("qty") or 0) > 0
         if not has_model:
-            (floor if in_stock else rest).append(r)
-        elif not r.get("weight_verified"):
-            weights.append(r)
-    return floor + rest + weights
+            band = 0 if in_stock else 1
+        elif not has_size:
+            band = 2 if in_stock else 3
+        else:
+            band = 4 if in_stock else 5
+        return band
+
+    candidates = [
+        r
+        for r in rows
+        if (r.get("sku") or "").strip().upper()
+        and (r.get("sku") or "").strip().upper() not in unknown
+        and is_lookupable(r.get("sku") or "")
+        # Already read: AS400 has nothing left to tell us about this SKU — the
+        # weight came back on the same screen — and its model does not change
+        # until Pickd splits, so anything short of skipping loops for ever (Q7).
+        and not (r.get("as400_description") or "").strip()
+    ]
+    # Stable: rows inside a band keep the order the caller sent them in, which is
+    # the demand order the RPC already decided. Two answers to one question is
+    # how the ranking and the queue drift apart.
+    return sorted(candidates, key=rank)
 
 
 # ── what a write WOULD be (§6) ───────────────────────────────────────────────
 
 
-def plan_write(row: dict, parsed: dict) -> dict:
+def plan_write(row: dict, parsed: dict, with_weight: bool = True) -> dict:
     """The columns this SKU would get, given the screen. Pure, and the whole of
     the write rule lives here so F3 has nothing left to decide.
 
@@ -170,8 +197,13 @@ def plan_write(row: dict, parsed: dict) -> dict:
     — the same pact as `customers.phone` and the sealing of `as400_account`.
     Filling a hole is safe; overwriting what a person typed is not.
 
-      as400_description  the catalogue name, RAW and unsplit, and only when
-                         `model` is empty. The watchdog does not split it:
+      as400_description  the catalogue name, RAW and unsplit, whenever the
+                         column is empty — which is EVERY bike, not just the
+                         ones with no model (Rafael, 2026-09-08). Reading a bike
+                         whose model is dirty is what turns cleaning those 227
+                         rows from a judgement call into a mechanical one, and
+                         it overwrites nothing: the column is the empty gap.
+                         The watchdog does not split it:
                          `parseBikeName` lives in Pickd's TypeScript and is not
                          mirrored here (Rafael, 2026-09-02 and 2026-09-08 —
                          "pickd la parte"). It writes what it read; Pickd parses
@@ -195,12 +227,12 @@ def plan_write(row: dict, parsed: dict) -> dict:
     """
     plan: dict = {}
 
-    if not (row.get("weight_verified")) and parsed.get("weight_lbs") is not None:
+    if with_weight and not (row.get("weight_verified")) and parsed.get("weight_lbs") is not None:
         weight = parsed["weight_lbs"]
         if weight > 0 and weight != row.get("weight_lbs"):
             plan["weight_lbs"] = weight
 
-    if not (row.get("model") or "").strip() and not (row.get("as400_description") or "").strip():
+    if not (row.get("as400_description") or "").strip():
         description = (parsed.get("description") or "").strip()
         if description:
             plan["as400_description"] = description
@@ -288,7 +320,7 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn) -> dict:
             )
             return {"action": "mismatch", "sku": sku, "screen_sku": parsed.get("sku")}
 
-        plan = plan_write(row, parsed)
+        plan = plan_write(row, parsed, with_weight=weight_enabled())
 
         log.info(
             "SKU %s in %.2fs — description=%r weight=%s kind=%s on_hand=%s",
@@ -359,23 +391,10 @@ def fetch_candidates(client=None) -> list:
         client.table("sku_metadata")
         .select(_META_COLS)
         .eq("is_bike", True)
-        .or_("model.is.null,model.eq.")
-        .is_("as400_description", "null")  # already read → never again (Q7)
+        .is_("as400_description", "null")  # every bike, once (Q7)
         .limit(QUEUE_FETCH_LIMIT)
         .execute()
     ).data or []
-
-    if not rows and os.getenv("SKU_ENRICH_WEIGHT", "0") in ("1", "true", "True", "yes"):
-        # F4. Only once the names are done, and behind its own switch so the two
-        # phases can be separated from .env without a trip to Bay 2.
-        rows = (
-            client.table("sku_metadata")
-            .select(_META_COLS)
-            .eq("is_bike", True)
-            .eq("weight_verified", False)
-            .limit(QUEUE_FETCH_LIMIT)
-            .execute()
-        ).data or []
 
     skus = [r["sku"] for r in rows if is_lookupable(r.get("sku") or "")]
     if not skus:

@@ -91,17 +91,33 @@ def test_a_sku_that_is_not_a_stock_number_never_reaches_the_terminal():
 
 
 def test_the_queue_puts_the_bikes_on_the_floor_first():
+    # Every unread bike is a candidate now (Rafael, 2026-09-08) — reading the
+    # ones whose model is dirty is what makes cleaning them mechanical. The
+    # order is what changes, not the membership.
     rows = [
-        {"sku": "03-4159BL", "model": "KROMO", "qty": 33, "weight_verified": False},
+        {"sku": "03-9999BK", "model": "CODA S2", "size": "17", "qty": 5},  # already fine
+        {"sku": "03-4159BL", "model": "KROMO L 2025 MIDNIGHT", "size": None, "qty": 33},
         {"sku": "03-4894BL", "model": None, "qty": 0},
         {"sku": "03-3492BL", "model": None, "qty": 1},  # ROW 32, a picker can hold it
-        {"sku": "03-9999BK", "model": "X", "qty": 5, "weight_verified": True},
+        {"sku": "03-8888BK", "model": "TAXI 24 COSMO BLUE", "size": None, "qty": 0},
     ]
     assert [r["sku"] for r in select_sku_queue(rows)] == [
-        "03-3492BL",  # no model, in stock
+        "03-3492BL",  # no model, on the floor
         "03-4894BL",  # no model, no stock
-        "03-4159BL",  # has a model, weight never on a scale
-    ]  # the verified weight isn't in the queue at all
+        "03-4159BL",  # model nobody split, on the floor — one of the 263
+        "03-8888BK",  # model nobody split, no stock
+        "03-9999BK",  # already split; still read once, but last
+    ]
+
+
+def test_the_queue_keeps_the_order_it_was_handed_inside_a_band():
+    # The RPC already sorted by demand. Re-sorting here would be a second answer
+    # to one question, which is how a ranking and a queue drift apart.
+    rows = [
+        {"sku": "03-1111BK", "model": None, "qty": 2},
+        {"sku": "03-2222BK", "model": None, "qty": 9},
+    ]
+    assert [r["sku"] for r in select_sku_queue(rows)] == ["03-1111BK", "03-2222BK"]
 
 
 def test_a_sku_as400_already_refused_does_not_come_back():
@@ -136,12 +152,27 @@ def test_an_unchanged_weight_is_not_a_write():
     assert plan_write(row, {"weight_lbs": 36.0}) == {}
 
 
-def test_the_name_is_only_planned_when_the_model_is_empty():
+def test_the_name_is_recorded_even_when_a_model_is_already_there():
+    # This is the widening of 2026-09-08 and the whole point of it: the 227 rows
+    # with a dirty model are exactly the ones that need the manufacturer's name,
+    # and writing it overwrites nothing — `as400_description` is the empty gap.
     parsed = {"description": "CODA S2 L16 2026 GLOSS BLACK", "weight_lbs": None}
     gap = {"sku": "03-3933BK", "model": None, "weight_verified": True}
-    taken = {"sku": "03-3933BK", "model": "CODA S2", "weight_verified": True}
+    dirty = {"sku": "03-3933BK", "model": "CODA S2 L16", "weight_verified": True}
     assert plan_write(gap, parsed)["as400_description"] == "CODA S2 L16 2026 GLOSS BLACK"
-    assert plan_write(taken, parsed) == {}
+    assert plan_write(dirty, parsed)["as400_description"] == "CODA S2 L16 2026 GLOSS BLACK"
+    # and it still never touches the grouping key itself
+    for never in ("model", "size", "color"):
+        assert never not in plan_write(dirty, parsed)
+
+
+def test_the_weight_is_its_own_phase(monkeypatch):
+    # Now that every gap lands on a bike, the name phase and the weight phase
+    # would otherwise ship as one. §10 promised .env could separate them.
+    row = {"sku": "03-3933BK", "model": "CODA S2", "weight_lbs": 45, "weight_verified": False}
+    parsed = {"description": "CODA S2 L16 2026 GLOSS BLACK", "weight_lbs": 36.0}
+    assert "weight_lbs" not in plan_write(row, parsed, with_weight=False)
+    assert plan_write(row, parsed, with_weight=True)["weight_lbs"] == 36.0
 
 
 def test_the_watchdog_writes_the_name_raw_and_never_splits_it():
@@ -265,7 +296,9 @@ def test_the_step_reads_logs_and_writes_nothing():
     assert res["action"] == "read"
     assert res["parsed"]["description"] == "CODA S2 L16 2026 GLOSS BLACK"
     assert res["parsed"]["weight_lbs"] == 36.0
-    assert res["plan"]["weight_lbs"] == 36.0  # a PLAN — F2 logs it, nothing applies it
+    # A PLAN — F2 logs it, nothing applies it. No weight: that is F4's switch.
+    assert res["plan"]["as400_description"] == "CODA S2 L16 2026 GLOSS BLACK"
+    assert "weight_lbs" not in res["plan"]
     assert res["returned"] is True
 
 
@@ -474,5 +507,11 @@ def test_the_step_writes_only_once_f3_is_switched_on(monkeypatch):
     assert res["action"] == "written"
     assert written[0][0] == "03-3933BK"
     assert written[0][1]["as400_description"] == "CODA S2 L16 2026 GLOSS BLACK"
-    assert written[0][1]["weight_lbs"] == 36.0
-    assert "weight_verified" not in written[0][1]
+    assert "weight_lbs" not in written[0][1]  # F4 is off
+
+    monkeypatch.setenv("SKU_ENRICH_WEIGHT", "1")
+    run_sku_step(
+        object(), dict(row), capture_fn=lambda s, d: STOCK_DETAIL, return_fn=lambda d: None
+    )
+    assert written[1][1]["weight_lbs"] == 36.0
+    assert "weight_verified" not in written[1][1]
