@@ -1273,7 +1273,9 @@ def capture_stock_inquiry(
     The route (docs/as400-screen-map.md §2.12, Rafael 2026-09-02):
 
         order search ──F7──▶ menu ──2 + ENTER──▶ Stock Inquiry
-            ──digits, TAB, colour, TAB, X, ENTER──▶ the detail screen
+            ──digits, TAB, colour, TAB, X──▶ the detail screen
+
+    The X is the last key: it submits on its own, and nothing follows it.
 
     Raises StockSkuNotFound when the SKU has a shape AS400 cannot look up (R6)
     or the lookup does not land on a stock screen, and StockScreenMismatch when
@@ -1309,10 +1311,26 @@ def capture_stock_inquiry(
         if classify_screen(read()) != STATE_MENU:
             raise StockScreenMismatch("F7 didn't land on the SALESN menu — not typing further.")
 
+    # 02, never 03. Rafael, 2026-09-08: "el 2 es para stock inquiry, el 3 es
+    # para órdenes". Option 3 is only ever typed on the way BACK, by
+    # return_to_order_search, which is its actual job.
     driver.type_text("2")  # 02. Stock File Inquiry
     time.sleep(step_wait)
     driver.key("enter")
     time.sleep(page_wait)
+
+    # Confirm we are INSIDE the stock program before typing a SKU into it, and
+    # this guard is not ceremony. Without it, a `2` that never took — the menu
+    # missed it, the screen was slow, we were somewhere else entirely — means
+    # the SKU gets typed into whatever is in front, the check further down finds
+    # no stock screen, and the step reports StockSkuNotFound. That marks the SKU
+    # as one AS400 does not have (R7) and removes it from the queue FOR EVER,
+    # although AS400 knows it perfectly well. A navigation failure would poison
+    # the queue one good SKU at a time, silently.
+    if classify_screen(read()) != STATE_STOCK_INQUIRY:
+        raise StockScreenMismatch(
+            "Option 2 didn't open Stock Inquiry — not typing a SKU into an unknown screen."
+        )
 
     # The lookup itself. A SKU with no colour suffix takes a blank TAB — that is
     # the 126 bikes shaped like `01-0169`, and they are in the queue, not out.
@@ -1321,17 +1339,17 @@ def capture_stock_inquiry(
     if colour:
         driver.type_text(colour)
     driver.key("tab")
+    # The X is the last key. Rafael, 2026-09-08: "después de presionar X no se
+    # debe presionar otra tecla, solo copiar de frente". It submits by itself,
+    # and the ENTER that used to follow it was a guess of mine.
     driver.type_text("X")
-    # ❓ Rafael's walkthrough ends at the X. ENTER is the 5250 default for
-    # submitting a field, and if the X already submitted it this lands on the
-    # result screen, where ENTER only redraws (§2.9) — harmless either way.
-    driver.key("enter")
     time.sleep(page_wait)
 
     screen = read()
     if classify_screen(screen) != STATE_STOCK_INQUIRY:
-        # Includes whatever AS400 shows for a stock number it doesn't have. We
-        # have never seen that screen; phase F2 logs it so it can be mapped.
+        # We were on the stock program a moment ago, so this is the SKU's own
+        # answer: whatever AS400 shows for a stock number it doesn't have. Nobody
+        # has seen that screen — F2 logs it so it can be mapped.
         raise StockSkuNotFound(f"The lookup for {sku} didn't land on a stock screen.")
     if not is_stock_detail_screen(screen):
         # R10: same title, no fields. Reading here would report `Weight` as

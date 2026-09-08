@@ -215,9 +215,10 @@ def test_a_sku_already_read_is_not_queued_again():
 
 
 def test_the_lookup_types_exactly_what_the_operator_types():
-    # Rafael, 2026-09-02: 2 → ENTER → the digits WITHOUT the dash → TAB → the
-    # colour code → TAB → X.
-    driver = FakeDriver([ORDER_SEARCH, MENU, STOCK_DETAIL])
+    # Rafael, 2026-09-02 and 2026-09-08: 2 → ENTER → the digits WITHOUT the dash
+    # → TAB → the colour code → TAB → X, and NOTHING after the X — it submits by
+    # itself. Option 2, never 3: 3 is the order screen.
+    driver = FakeDriver([ORDER_SEARCH, MENU, STOCK_DETAIL, STOCK_DETAIL])
     assert capture_stock_inquiry("03-3933BK", driver, page_wait=0, step_wait=0) == STOCK_DETAIL
     assert driver.actions == [
         ("key", "f7"),  # order search → menu
@@ -228,15 +229,25 @@ def test_the_lookup_types_exactly_what_the_operator_types():
         ("text", "BK"),
         ("key", "tab"),
         ("text", "X"),
-        ("key", "enter"),
     ]
+    assert ("text", "3") not in driver.actions  # 3 is for orders, never for stock
+
+
+def test_a_menu_that_did_not_open_stock_inquiry_never_gets_a_sku_typed_into_it():
+    # And it must NOT read as "AS400 doesn't have this SKU". That answer marks
+    # the SKU and drops it from the queue for ever (R7), so a navigation failure
+    # would quietly poison the queue one good SKU at a time.
+    driver = FakeDriver([ORDER_SEARCH, MENU, MENU])  # option 2 didn't take
+    with pytest.raises(StockScreenMismatch):
+        capture_stock_inquiry("03-3933BK", driver, page_wait=0, step_wait=0)
+    assert ("text", "033933") not in driver.actions  # nothing typed into it
 
 
 def test_a_sku_with_no_colour_suffix_tabs_straight_past_the_field():
     # Rafael, 2026-09-02: "se presiona tab directo sin llenar el color, si el sku
     # no lo tiene". The 126 bikes shaped like this are in the queue, not excluded.
     screen = STOCK_DETAIL.replace("Stock Number: 03 3933 BK", "Stock Number: 01 0169   ")
-    driver = FakeDriver([ORDER_SEARCH, MENU, screen])
+    driver = FakeDriver([ORDER_SEARCH, MENU, screen, screen])
     capture_stock_inquiry("01-0169", driver, page_wait=0, step_wait=0)
     typed = [a for a in driver.actions if a[0] == "text"]
     assert typed == [("text", "2"), ("text", "010169"), ("text", "X")]
@@ -246,13 +257,14 @@ def test_a_sku_with_no_colour_suffix_tabs_straight_past_the_field():
 def test_the_notes_screen_is_refused_instead_of_read():
     # R10. Same title, no fields: reading here would report the weight as ABSENT
     # rather than as "I am not where I think I am".
-    driver = FakeDriver([ORDER_SEARCH, MENU, STOCK_NOTES])
+    driver = FakeDriver([ORDER_SEARCH, MENU, STOCK_NOTES, STOCK_NOTES])
     with pytest.raises(StockScreenMismatch):
         capture_stock_inquiry("03-3933BK", driver, page_wait=0, step_wait=0)
 
 
 def test_a_lookup_that_lands_nowhere_is_an_unknown_sku():
-    driver = FakeDriver([ORDER_SEARCH, MENU, "Invalid stock number"])
+    # The stock program DID open, so this is the SKU's own answer, not navigation.
+    driver = FakeDriver([ORDER_SEARCH, MENU, STOCK_DETAIL, "Invalid stock number"])
     with pytest.raises(StockSkuNotFound):
         capture_stock_inquiry("03-3933BK", driver, page_wait=0, step_wait=0)
 
