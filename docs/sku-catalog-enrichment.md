@@ -855,3 +855,50 @@ línea de `.env`, sin deploy, si algo en el piso no cuadra.
 
 **§9 queda reemplazado por esta sección** en lo que toca a la cadencia. Lo que NO cambia, y no se
 negocia: el `capture_lock`, el gate de inactividad, y que la orden siempre va primero.
+
+---
+
+## 22) La pantalla de nombres: diseñada, y **en stand by** (8 sep 2026)
+
+Rafael, 8 sep: *«dejemos esta pantalla en stand by, cuando recibamos los datos volvemos a
+considerarla con la data en la mano»*. Correcto, y por una razón concreta: el reparto entre los dos
+carriles —«se parte solo» contra «necesita criterio»— está estimado en **77 % / 23 %** a partir de
+los nombres **no truncados que ya tenemos**, que son un proxy. Con las 745 descripciones reales del
+AS400 puede salir muy distinto, y de ese número depende si la pantalla es un lote con una cola
+pequeña al lado o al revés.
+
+**Lo que NO está en stand by:** el watchdog sigue leyendo hacia `as400_description`. Los datos son
+justamente lo que falta.
+
+### 22.1 Lo decidido, para no volver a discutirlo
+
+- **La entrada natural ya existe.** `/export` monta `FedexDimensionsExportCard`, que bajo el botón
+  de exportar tiene un botón-fila con contador hacia `/export/measure`. Y `fedexCartonGap` ya
+  etiqueta `no_model: 'No model on the record'`: la app **ya sabe** que una caja que FedEx no puede
+  cotizar tiene dos causas —sin medir y sin nombre— y sólo construimos la mitad. La de nombres es la
+  hermana exacta de la de medir.
+- **El contador NO puede ser «excepciones `no_model`»** — hoy son 4. El daño real son las 227 con
+  nombre sucio, que **no fallan**: producen registros con nombre basura, y por eso son invisibles.
+  El contador es *bicis donde el nombre del AS400, partido, no coincide con lo guardado*.
+- **Colisiones (Rafael):** la fila que tiraría a otra fuera del archivo **se desmarca sola**, se
+  explica en ámbar con los números (`esto tiraría a 03-4270BK: cajas de 55.75″ y 54″`) y pasa al
+  carril de criterio. El resto del lote se aplica. Avanza lo que se puede, no esconde nada.
+- **Aplicar (Rafael):** el carril mecánico llega **todo marcado**; se revisa, se desmarca lo que
+  no guste, se simula, se aplica en bloque. Con ~190 tarjetas es la única forma de que se acabe.
+- **La simulación es la puerta:** sin correr `buildFedexDimensions` sobre el resultado **combinado**
+  de los dos carriles, no hay botón de aplicar (**R12**, §20.3).
+
+### 22.2 ❓Q17 — «también la estación» choca con dónde vive la pantalla
+
+Rafael quiere que **la estación también la trabaje**, no sólo admin. Pero `/export` y
+`/export/measure` son **admin-only** en `App.tsx` (hoy: 6 admins, 2 staff). Colgar de ahí una
+pantalla que staff debe usar no funciona, y hay dos salidas y ninguna es gratis:
+
+1. **Sacar `/export` de admin-only** — arrastra el CSV de FedEx, el resto del ExportScreen y
+   cualquier cosa que viva ahí. Es la más simple y la que más reparte.
+2. **Ruta propia fuera de `/export`** (p. ej. `/catalog/names`) con su propia entrada en el menú, y
+   el botón-fila de `/export` como atajo para admin. Más código, permisos exactos.
+
+*Default propuesto:* la **2**. La llave de agrupación del export merece una puerta propia, y abrir
+`/export` entero para llegar a una pantalla es abrir de más. **Se decide con la data, junto con el
+resto.**
