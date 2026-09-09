@@ -293,19 +293,6 @@ def test_manual_capture_of_void_order_is_rejected_clearly(client, monkeypatch):
     assert scanned_store.get("880138") is None
 
 
-def test_add_order_pallet_estimate_fail_open(client):
-    # Without DB access the bike catalog is unreachable: the entry must still be
-    # created, with pallets_est=None (the card falls back to items · units).
-    entry = appmod._add_order(CAPTURE_TEXT)
-    assert entry["pallets_est"] is None
-
-
-def test_add_order_pallet_estimate_with_catalog(client, monkeypatch):
-    monkeypatch.setattr(appmod, "get_bike_skus", lambda: set())  # parts-only world
-    entry = appmod._add_order(CAPTURE_TEXT)
-    assert entry["pallets_est"] == 1  # parts-only order → one pallet
-
-
 def test_as400_endpoint_reflects_health(client, monkeypatch):
     appmod.auto_scanner.note_as400(True)
     data = client.get("/api/as400", headers=HDR).get_json()

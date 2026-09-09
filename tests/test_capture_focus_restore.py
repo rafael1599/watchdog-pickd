@@ -113,5 +113,7 @@ def test_topbar_is_sticky_and_wraps_the_capture_controls():
     assert "position: sticky" in html
     topbar_start = html.index('id="topbar"')
     capture_input = html.index('id="num"')
-    overlay = html.index('id="vboard-overlay"')
+    # The Maintenance modal is the element that lives OUTSIDE the topbar (the
+    # Verification Board mirror that used to play this role was removed 8 Sep).
+    overlay = html.index('id="maint-overlay"')
     assert topbar_start < capture_input < overlay  # input inside, overlay outside

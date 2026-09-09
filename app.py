@@ -54,17 +54,12 @@ from as400_capture import (  # noqa: E402
 )
 from auto_scanner import capture_lock, manual_waiting, start_auto_scanner  # noqa: E402
 from pipeline import (  # noqa: E402
-    estimate_pallets,
     meaningful_note,
     preview_order,
     process_order_text,
-    resolve_order_items,
 )
 from supabase_client import (  # noqa: E402
     find_orders_in_pickd,
-    get_bike_skus,
-    get_verification_board,
-    get_verification_count,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
@@ -144,33 +139,6 @@ AUTO_ARCHIVE_DAYS = int(os.getenv("AUTO_ARCHIVE_DAYS", "8"))
 # queue (still recoverable via Restore). Matched as a case/whitespace-
 # insensitive substring of the parsed Bill-to customer.
 AUTO_ARCHIVE_CUSTOMERS = ("EBAY PART SALES",)
-
-# Verification-board read cache. The UI polls /api/verification on every load(),
-# so we throttle the Supabase read behind a short TTL to avoid hammering it.
-VERIFICATION_TTL_SEC = int(os.getenv("VERIFICATION_TTL_SEC", "30"))
-_verification_cache: dict = {"ts": 0.0, "data": None}
-_verification_lock = threading.Lock()
-
-
-def _refresh_verification() -> dict:
-    """Return {count, board}, refreshing from Supabase at most once per TTL.
-
-    On error (e.g. Supabase env not set) returns a cached value if present, else
-    a zeroed snapshot — the UI counter should never crash the page.
-    """
-    with _verification_lock:
-        now = time.monotonic()
-        cached = _verification_cache["data"]
-        if cached is not None and (now - _verification_cache["ts"]) < VERIFICATION_TTL_SEC:
-            return cached
-        try:
-            data = {"count": get_verification_count(), "board": get_verification_board()}
-        except Exception as e:  # noqa: BLE001
-            logging.warning("Verification read failed: %s", e)
-            return cached if cached is not None else {"count": 0, "board": {}}
-        _verification_cache["ts"] = now
-        _verification_cache["data"] = data
-        return data
 
 
 def _load_archive() -> None:
@@ -307,14 +275,6 @@ def _auto_archive_stale() -> int:
 def _add_order(raw_text: str, auto_archive: bool = True) -> dict:
     global _next_id
     preview = preview_order(raw_text)
-    # Pallet estimate (same rule PickD applies): needs the bike catalog, which is
-    # one cached Supabase query per hour. Fail-open: without DB access the card
-    # simply falls back to showing units only.
-    try:
-        pallets_est = estimate_pallets(preview["items"], get_bike_skus())
-    except Exception as e:  # noqa: BLE001
-        logging.debug("Pallet estimate unavailable: %s", e)
-        pallets_est = None
     with _lock:
         oid = _next_id
         _next_id += 1
@@ -337,7 +297,6 @@ def _add_order(raw_text: str, auto_archive: bool = True) -> dict:
             "ship_to": preview.get("ship_to"),
             "item_count": preview["item_count"],
             "total_units": preview["total_units"],
-            "pallets_est": pallets_est,
             "subtotal": preview.get("subtotal"),
             "parsed_total": preview.get("parsed_total"),
             "total_mismatch": preview.get("total_mismatch", False),
@@ -737,29 +696,6 @@ def send(oid: int):
         door.release(send_key)
 
 
-@app.get("/api/orders/<int:oid>/detail")
-def order_detail(oid: int):
-    """Read-only pick-location detail for a captured order (like PickD's
-    double-check view), resolved fresh from inventory without reserving anything."""
-    with _lock:
-        entry = _orders.get(oid)
-    if not entry:
-        return jsonify({"error": "Order not found."}), 404
-    try:
-        items = resolve_order_items(entry["raw_text"])
-    except Exception as e:
-        return jsonify({"error": f"Error resolving detail: {e}"}), 500
-    return jsonify(
-        {
-            "order_number": entry["order_number"],
-            "customer": entry["customer"],
-            "ship_to": entry.get("ship_to"),
-            "total_units": entry["total_units"],
-            "items": items,
-        }
-    )
-
-
 @app.delete("/api/orders/<int:oid>")
 def remove(oid: int):
     with _lock:
@@ -783,15 +719,6 @@ def archive(oid: int):
     if entry.get("order_number"):
         scanned_store.delete(entry["order_number"])
     return jsonify({"ok": True})
-
-
-@app.get("/api/verification")
-def verification():
-    """Read-only mirror of PickD's verification queue: {count, board}.
-
-    Throttled behind VERIFICATION_TTL_SEC so the UI polling doesn't hammer Supabase.
-    """
-    return jsonify(_refresh_verification())
 
 
 @app.get("/api/archived")
@@ -1041,16 +968,13 @@ INDEX_HTML = """
              background: #16a34a; color: #fff; font-weight: 700; font-size: 1rem;
              padding: .8rem 1.4rem; border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.25);
              z-index: 1000; max-width: 90vw; text-align: center; display: none; }
-    /* Verification board (read-only mirror) badge + modal. */
-    .vbadge { display: inline-block; min-width: 1.4rem; text-align: center;
-              background: #dc2626; color: #fff; font-weight: 800; font-size: .8rem;
-              border-radius: 999px; padding: .05rem .45rem; margin-left: .35rem; }
-    #vboard-overlay, #maint-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5);
+    /* Maintenance modal. */
+    #maint-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5);
                       display: none; z-index: 900; }
-    #vboard, #maint { position: absolute; top: 5%; left: 50%; transform: translateX(-50%);
+    #maint { position: absolute; top: 5%; left: 50%; transform: translateX(-50%);
               width: min(640px, 92vw); max-height: 85vh; overflow: auto;
               background: #fff; color: #111; border-radius: 12px; padding: 1rem; }
-    @media (prefers-color-scheme: dark) { #vboard, #maint { background: #17171c; color: #e5e7eb; } }
+    @media (prefers-color-scheme: dark) { #maint { background: #17171c; color: #e5e7eb; } }
     .maint-action { margin-bottom: 1rem; }
     .maint-action h3 { font-size: .95rem; margin: .2rem 0 .2rem; }
     .maint-action .what { font-size: .85rem; color: #6b7280; margin: 0 0 .5rem; }
@@ -1060,54 +984,9 @@ INDEX_HTML = """
     .maint-counts b { text-align: right; font-variant-numeric: tabular-nums; }
     .maint-lines { font-size: .75rem; white-space: pre-wrap; max-height: 40vh; overflow: auto;
                    border: 1px solid #d1d5db; border-radius: 8px; padding: .5rem; margin-top: .4rem; }
-    .vgroup { margin-bottom: .8rem; }
-    .vgroup h3 { font-size: .85rem; text-transform: uppercase; letter-spacing: .05em;
-                 color: #6b7280; margin: .4rem 0 .3rem; }
-    .vrow { display: flex; gap: .6rem; align-items: center; padding: .35rem .5rem;
-            border: 1px solid #d1d5db; border-radius: 8px; margin-bottom: .3rem;
-            font-size: .85rem; }
     /* Read-only detail panel — dark, double-check inspired. */
     .detail { background: #0f0f12; color: #e5e7eb; border-radius: 12px;
               padding: .6rem; margin: .2rem 0 .8rem; }
-    .detail .dhead { display: flex; gap: 1rem; flex-wrap: wrap; font-size: .8rem;
-                     color: #9ca3af; padding: .2rem .4rem .6rem; }
-    .detail .dhead b { color: #e5e7eb; }
-    .ditem { display: flex; align-items: center; gap: .7rem; background: #17171c;
-             border: 1px solid #26262e; border-radius: 12px; padding: .55rem .7rem;
-             margin-bottom: .45rem; }
-    .ditem.prob  { background: rgba(239,68,68,.07); border-color: rgba(239,68,68,.35); }
-    .ditem.lowst { background: rgba(232,160,74,.07); border-color: rgba(232,160,74,.35); }
-    .ditem .qty { text-align: center; min-width: 42px; border-right: 1px solid #26262e;
-                  padding-right: .6rem; }
-    .ditem .qty .lbl { font-size: .55rem; letter-spacing: .15em; color: #9ca3af; }
-    .ditem .qty b { display: block; font-size: 1.4rem; font-weight: 800; line-height: 1; }
-    .ditem .qty.alert b { color: #e8a04a; }
-    .ditem .mid { flex: 1; min-width: 0; }
-    .ditem .sku { font-size: 1.05rem; font-weight: 800; white-space: nowrap;
-                  overflow: hidden; text-overflow: ellipsis; }
-    .ditem .sku.bad { color: #f87171; }
-    .ditem .name { font-size: .72rem; color: #9ca3af; text-transform: uppercase;
-                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .ditem .badge { font-size: .58rem; font-weight: 800; letter-spacing: .08em;
-                    padding: .08rem .3rem; border-radius: 5px; margin-left: .4rem;
-                    vertical-align: middle; }
-    .badge.unreg { background: rgba(239,68,68,.2); color: #fca5a5; }
-    .badge.low   { background: rgba(232,160,74,.2); color: #f0c089; }
-    .dist { display: inline-flex; gap: .25rem; margin-top: .3rem; flex-wrap: wrap; }
-    .dist .tile { min-width: 30px; text-align: center; border-radius: 5px;
-                  padding: .1rem .25rem; background: #e8a04a; color: #3a1f06;
-                  border: 1px solid #5c2e0a; }
-    .dist .tile b { display: block; font-size: .9rem; font-weight: 800; line-height: 1; }
-    .dist .tile .t { font-size: .5rem; letter-spacing: .06em; }
-    .ditem .loc { text-align: right; min-width: 64px; }
-    .ditem .loc .lbl { font-size: .55rem; letter-spacing: .15em; color: #9ca3af; }
-    .ditem .loc b { display: block; font-family: ui-monospace, monospace; font-weight: 800;
-                    font-size: 1.4rem; color: #e8a04a; line-height: 1.05; }
-    .ditem .loc .none { color: #6b7280; font-size: 1rem; }
-    .ditem .loc .sub { display: inline-block; font-size: .6rem; font-weight: 700;
-                       color: #e8a04a; background: rgba(232,160,74,.15);
-                       border: 1px solid rgba(232,160,74,.4); border-radius: 5px;
-                       padding: 0 .3rem; margin-top: .2rem; }
   </style>
 </head>
 <body>
@@ -1117,9 +996,6 @@ INDEX_HTML = """
     <div class="row">
       <button id="conn" class="statuschip" onclick="doConnect()" title="Reconnect AS400">
         <span class="dot" id="dot"></span> AS400
-      </button>
-      <button id="vbtn" class="statuschip" onclick="openBoard()" title="Verification Board (live mirror)">
-        Verification<span id="vbadge" class="vbadge" style="display:none;">0</span>
       </button>
       <div class="more" id="topmore">
         <button onclick="toggleMenu(event, 'topmenu')" title="More">⋯</button>
@@ -1137,15 +1013,6 @@ INDEX_HTML = """
              oninput="applyFilter()"
              onkeydown="if(event.key==='Enter') onSearchEnter()">
       <button id="cap" onclick="doCapture()" title="Fetch this order number from AS400">Capture</button>
-    </div>
-  </div>
-  <div id="vboard-overlay" onclick="if(event.target===this) closeBoard()">
-    <div id="vboard">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <h2 style="font-size:1.1rem; margin:.2rem 0;">Verification Board <span class="muted">(live mirror)</span></h2>
-        <button class="secondary" onclick="closeBoard()">Close</button>
-      </div>
-      <div id="vboard-body"><p class="muted">Loading…</p></div>
     </div>
   </div>
   <div id="maint-overlay" onclick="if(event.target===this) closeMaintenance()">
@@ -1308,7 +1175,6 @@ async function load() {
   try { if (rp.ok) prefix = (await rp.json()).prefix || ''; } catch (e) { /* prefill is best-effort */ }
   applyPrefill(prefix);              // store the day prefix for capture reconstruction
   render(_allOrders, _allArchived);  // render() applies the current (effective) filter
-  refreshVerification();  // keep the red counter live on each load
   refreshAs400Dot();      // dot goes green from real scanner/capture activity
 }
 
@@ -1325,50 +1191,6 @@ async function refreshAs400Dot() {
     else if (d.state === 'err') setDot('err');
   } catch(e) { /* network blip — leave the dot as-is */ }
 }
-
-async function refreshVerification() {
-  try {
-    const r = await fetch('/api/verification');
-    if (!r.ok) return;
-    const data = await r.json();
-    const badge = document.getElementById('vbadge');
-    const n = data.count ?? 0;
-    badge.textContent = n;
-    badge.style.display = n > 0 ? 'inline-block' : 'none';
-    window._vboard = data.board || {};
-    // If the board modal is open, re-render it with the fresh snapshot.
-    if (document.getElementById('vboard-overlay').style.display === 'block') renderBoard();
-  } catch(e) { /* counter is best-effort; never break the page */ }
-}
-
-const VSTATUS_LABELS = {
-  active: 'Active', ready_to_double_check: 'Ready to double-check',
-  double_checking: 'Double-checking', needs_correction: 'Needs correction',
-  reopened: 'Reopened',
-};
-
-function renderBoard() {
-  const board = window._vboard || {};
-  const body = document.getElementById('vboard-body');
-  const groups = Object.keys(board).filter(s => (board[s] || []).length);
-  if (!groups.length) { body.innerHTML = '<p class="muted">Nothing in verification right now.</p>'; return; }
-  body.innerHTML = groups.map(s => {
-    const rows = board[s].map(o =>
-      `<div class="vrow">
-        <span><b>#${o.order_number ?? '—'}</b></span>
-        <span>${o.ship_to || o.customer || 'Unknown'}</span>
-        <span class="muted" style="margin-left:auto;">${o.items} items</span>
-      </div>`).join('');
-    return `<div class="vgroup"><h3>${VSTATUS_LABELS[s] || s} (${board[s].length})</h3>${rows}</div>`;
-  }).join('');
-}
-
-function openBoard() {
-  document.getElementById('vboard-overlay').style.display = 'block';
-  renderBoard();
-  refreshVerification();
-}
-function closeBoard() { document.getElementById('vboard-overlay').style.display = 'none'; }
 
 // --- Maintenance panel: every action from /api/maintenance gets a card with a
 // one-sentence explanation, Preview (dry run) and Apply. The result renders in
@@ -1423,15 +1245,10 @@ async function runMaintenance(id, apply) {
   }
 }
 
-// "2 pallets · 20 units" — pallets estimated with PickD's own rule (parts-only = 1;
-// bikes = ceil(units/12)). Falls back to the item count only if the estimate is
-// unavailable (e.g. Supabase unreachable when the order was captured).
+// "13 items · 20 units". Pallets are Pickd's to count — it does, on the board
+// and in Double Check — and the watcher's port of that rule had drifted from it.
 function palletStats(o) {
-  const units = `${o.total_units ?? '—'} units`;
-  if (o.pallets_est != null) {
-    return `${o.pallets_est} ${o.pallets_est === 1 ? 'pallet' : 'pallets'} · ${units}`;
-  }
-  return `${o.item_count} items · ${units}`;
+  return `${o.item_count} items · ${o.total_units ?? '—'} units`;
 }
 
 function card(o) {
@@ -1465,7 +1282,7 @@ function card(o) {
       + ` <button class="linkbtn" onclick="event.stopPropagation(); doRestore('${am.aid}')">Unarchive</button></div>`
     : '';
   const mm = o.total_mismatch ? '<span class="badge amber">⚠ TOTAL</span>' : '';
-  return `<div class="card tappable" onclick="toggleDetail(${o.id})" title="Tap to see items">
+  return `<div class="card tappable" onclick="toggleDetail(${o.id})" title="Tap for address and notes">
       <div class="chead">
         <span class="onum">#${o.order_number ?? '—'}</span>
         <span class="ocust">${o.ship_to || o.customer || ''}</span>
@@ -1476,8 +1293,7 @@ function card(o) {
       ${odate}
       ${note}
       <div class="detail" id="detail-${o.id}" style="display:none;">
-        <div class="dinfo">${dinfo}</div>
-        <div id="ditems-${o.id}"></div>
+        <div class="dinfo">${dinfo || '<span class="muted">No address or notes on this capture.</span>'}</div>
       </div>
       ${archNote}
       ${status}
@@ -1514,71 +1330,18 @@ function archCard(a) {
     </div>`;
 }
 
-function distFigures(distribution) {
-  if (!Array.isArray(distribution) || !distribution.length) return '';
-  const tiles = distribution.map(d => {
-    const type = (d.type || 'OTHER').toUpperCase();
-    const n = d.count ?? d.units_each ?? '';
-    return `<span class="tile" title="${type}${d.units_each?(' · '+d.units_each+' each'):''}"><b>${n}</b><span class="t">${type.slice(0,4)}</span></span>`;
-  }).join('');
-  return `<div class="dist">${tiles}</div>`;
-}
-
-function locCell(it) {
-  const loc = (it.location || '').trim();
-  if (!loc) return `<div class="loc"><span class="lbl">LOC</span><span class="none">—</span></div>`;
-  const isRow = /row/i.test(loc);
-  const label = isRow ? 'ROW' : 'LOC';
-  const value = isRow ? loc.replace(/row/i, '').trim() : loc.toUpperCase();
-  const sub = it.sublocation ? `<span class="sub">${it.sublocation}</span>` : '';
-  return `<div class="loc"><span class="lbl">${label}</span><b>${value}</b>${sub}</div>`;
-}
-
-function ditem(it) {
-  const qty = it.pickingQty ?? it.qty ?? 0;
-  const prob = it.sku_not_found ? ' prob' : (it.insufficient_stock ? ' lowst' : '');
-  const skuBad = it.sku_not_found ? ' bad' : '';
-  let badges = '';
-  if (it.sku_not_found) badges += '<span class="badge unreg">UNREG</span>';
-  if (it.insufficient_stock) badges += '<span class="badge low">LOW STOCK</span>';
-  const name = (it.item_name || it.description || '').toString();
-  return `<div class="ditem${prob}">
-      <div class="qty${qty!=1?' alert':''}"><span class="lbl">QTY</span><b>${qty}</b></div>
-      <div class="mid">
-        <div class="sku${skuBad}">${it.sku ?? it.raw_sku ?? '—'}${badges}</div>
-        <div class="name">${name}</div>
-        ${distFigures(it.distribution)}
-      </div>
-      ${locCell(it)}
-    </div>`;
-}
-
-async function toggleDetail(id) {
+// The panel under a card: the total-mismatch banner, the ship-to address and
+// the carrier. It used to also resolve pick locations against live inventory,
+// which is Double Check's job in Pickd and was a read against reservations for
+// a card nobody sends from here any more. An open panel still pauses the 8s
+// refresh (uiBusy), so what the operator is reading does not get repainted.
+function toggleDetail(id) {
   const box = document.getElementById('detail-'+id);
-  const itemsBox = document.getElementById('ditems-'+id);
   const chev = document.getElementById('chev-'+id);
-  if (!box || !itemsBox) return;
-  if (box.style.display !== 'none') { box.style.display='none'; if(chev) chev.textContent='▾'; return; }
-  box.style.display = 'block';
-  if (chev) chev.textContent = '▴';
-  if (itemsBox.dataset.loaded) return;        // already fetched this session
-  itemsBox.innerHTML = '<div class="dhead">Resolving pick locations…</div>';
-  try {
-    const r = await fetch(`/api/orders/${id}/detail`);
-    const data = await r.json();
-    if (!r.ok) { itemsBox.innerHTML = `<div class="dhead err">${data.error || 'Error loading detail.'}</div>`; return; }
-    const items = data.items || [];
-    const probs = items.filter(i => i.sku_not_found || i.insufficient_stock).length;
-    const head = `<div class="dhead">
-        <span>Lines <b>${items.length}</b></span>
-        <span>Units <b>${data.total_units ?? '—'}</b></span>
-        ${probs ? `<span class="err">⚠ ${probs} need attention</span>` : '<span class="ok">✓ all resolved</span>'}
-      </div>`;
-    itemsBox.innerHTML = head + (items.length ? items.map(ditem).join('') : '<div class="dhead">No items.</div>');
-    itemsBox.dataset.loaded = '1';
-  } catch(e) {
-    itemsBox.innerHTML = `<div class="dhead err">Network error: ${e}</div>`;
-  }
+  if (!box) return;
+  const open = box.style.display !== 'none';
+  box.style.display = open ? 'none' : 'block';
+  if (chev) chev.textContent = open ? '▾' : '▴';
 }
 
 function toggleMenu(ev, id) {

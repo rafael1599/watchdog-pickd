@@ -971,3 +971,31 @@ que **no es teórica**: `resumed after 61s paused` aparece continuamente y hay �
 **Consecuencia honesta:** «nunca perezoso» tiene un techo, y no lo pone el diseño sino cuánto está
 esa Mac ocupada. El escáner ya no dormirá por su cuenta, pero seguirá cediendo — y ese techo es
 justo lo que ❓Q11 (la ventana nocturna) existe para saltarse: de noche no hay a quién ceder.
+
+---
+
+## 25) Fase 4: los tres cortes del watcher, aplicados (8 sep 2026)
+
+Cada uno con lo que se pierde de verdad, tal como se analizó antes de tocar nada:
+
+**4a — `estimate_pallets`.** Se pierde el texto «N pallets · M units» en la tarjeta de Bay 2; cae a
+«N items · M units». Nada llegaba a la base. **Y el port estaba mal:** decía que las partes se
+apilan en el último pallet de bicis, y la función real de pickd (`calculatePalletsWithBikeAwareness`)
+les da su propio contenedor — 5 bicis + 9 partes son 2, no 1. Lo cazó un test de la puerta. Se
+conserva `get_bike_skus` (lo usa `door.py` para embeber `is_bike`); su test vive ahora en
+`tests/test_bike_skus_cache.py`.
+
+**4b — el espejo del Verification Board.** Se pierde ver la cola de pickd desde Bay 2; para eso está
+pickd. Se quitó sólo `#vboard*` del CSS compartido con Maintenance (el modal de Maintenance sigue
+intacto) y **el corte se llevó una línea de más** — `_VARIANT_BASE_RE`, una constante vecina de
+`get_verification_board` — que tiró 21 tests de la resolución de SKUs. Restaurada. Es exactamente
+la clase de vecino que el plan avisaba con `COMBINABLE_STATUSES`; la lección es cortar por función,
+no por «hasta el siguiente def».
+
+**4c — el preview de ubicaciones.** Se pierde la resolución de ubicaciones de picking al tocar una
+tarjeta en Bay 2 (`resolve_order_items`, una lectura real contra reservas vivas). Es trabajo de
+Double Check en pickd. **Se conserva el panel ligero** con lo que no era preview: el banner de total
+mismatch, la dirección y el transportista — y con él el guardia `uiBusy()`, que deja de repintar
+mientras alguien lee.
+
+Neto: `app.py` 1888 → ~1650 líneas; tres archivos de test fuera y uno reescrito. Suite: 505.

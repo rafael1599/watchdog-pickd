@@ -13,9 +13,8 @@ import re
 from typing import Optional
 
 from extractor import compute_hash
-from parser import normalize_sku, parse_order
+from parser import parse_order
 from supabase_client import (
-    _to_cart_items,
     append_to_order,
     check_duplicate,
     combine_into_order,
@@ -71,39 +70,6 @@ def meaningful_note(raw) -> Optional[str]:
     return text
 
 
-# Max bike units per pallet — same constant PickD uses (pickingLogic.ts).
-BIKES_PER_PALLET = 12
-
-
-def estimate_pallets(items: list, bike_skus: set) -> int:
-    """Estimate how many pallets PickD will compute for these items.
-
-    Faithful port of pickd's calculatePalletsWithBikeAwareness COUNT (we only
-    need the number, not the per-pallet item layout):
-      - no items → 0
-      - parts-only order → 1 pallet (everything consolidates onto one)
-      - bikes present → ceil(bike_units / 12); parts stack onto the last bike
-        pallet, so they never add a pallet of their own.
-    SKUs are compared normalized (the parser emits '033684BR'; the bike catalog
-    set must be normalized too — see supabase_client.get_bike_skus).
-    """
-    bike_units = 0
-    part_units = 0
-    for item in items:
-        qty = int(item.get("qty") or 0)
-        if qty <= 0:
-            continue
-        if normalize_sku(item.get("sku") or "") in bike_skus:
-            bike_units += qty
-        else:
-            part_units += qty
-    if bike_units == 0 and part_units == 0:
-        return 0
-    if bike_units == 0:
-        return 1
-    return -(-bike_units // BIKES_PER_PALLET)  # ceil division
-
-
 def preview_order(text: str) -> dict:
     """
     Parse order text WITHOUT touching Supabase. Used to show a preview
@@ -146,25 +112,6 @@ def preview_order(text: str) -> dict:
         "order_date": data.get("order_date"),  # AS400 'Order Date' as ISO YYYY-MM-DD
         "items": items,
     }
-
-
-def resolve_order_items(text: str) -> list:
-    """Resolve a captured order's items to pick locations/stock — READ-ONLY.
-
-    Reuses the exact resolver that 'Send to PickD' uses (`_to_cart_items`): it
-    reads sku_metadata / inventory / active picking lists and assigns the best
-    location per SKU, but creates and reserves NOTHING. Used to preview an order's
-    detail (locations, distribution, problem flags) before it is sent.
-
-    Each returned item carries: sku, raw_sku, pickingQty, item_name, description,
-    warehouse, location, location_hint, sublocation, distribution, unit_price,
-    sku_not_found, insufficient_stock, available_qty.
-    """
-    data = parse_order(text)
-    items = data.get("items", [])
-    if not items:
-        return []
-    return _to_cart_items(get_client(), items)
 
 
 def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
