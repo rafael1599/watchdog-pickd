@@ -215,6 +215,23 @@ def find_orders_in_pickd(numbers: list) -> set:
     return wanted & present
 
 
+def source_for(file_name: str) -> str:
+    """`picking_lists.source` from where the text came.
+
+    Until 2026-09-08 every order the watcher created said `pdf_import`, so Pickd
+    could not tell an AS400 capture from a dropped PDF (only 60 of 179 carried
+    an AS400 account to hint at it). The create path is shared by both, so the
+    label is derived from the `file_name` each caller already passes: the Bay 2
+    UI sends `as400_app`, the folder watcher sends `scanned:<n>` when it reuses
+    a cached capture, the door sends `pickd_door:<n>`. A real PDF keeps its
+    file name and its old label. Nothing in Pickd filters on this column.
+    """
+    name = str(file_name or "")
+    if name.startswith(("as400_app", "scanned:", "pickd_door:")):
+        return "as400"
+    return "pdf_import"
+
+
 def create_order(order_data: dict, pdf_hash: str, file_name: str, group_id: str = None) -> dict:
     """
     Create a new picking list from parsed PDF data.
@@ -275,7 +292,7 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str, group_id: str 
         "user_id": PDF_IMPORT_USER_ID or None,
         "order_number": order_number,
         "status": "ready_to_double_check",
-        "source": "pdf_import",
+        "source": source_for(file_name),
         "is_addon": False,
         "items": cart_items,
         "customer_id": customer_id,

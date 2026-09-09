@@ -62,3 +62,24 @@ def test_group_id_in_payload_when_provided():
 def test_group_id_omitted_when_absent():
     payload = _run_create({"order_number": "880009", "items": [{"sku": "X", "qty": 1}]})
     assert "group_id" not in payload
+
+
+# ── picking_lists.source says where the text came from ───────────────────────
+
+
+def test_source_is_as400_for_every_as400_path():
+    # The Bay 2 UI, the folder watcher reusing a cached capture, and the door.
+    from supabase_client import source_for
+
+    assert source_for("as400_app") == "as400"
+    assert source_for("scanned:881390") == "as400"
+    assert source_for("pickd_door:881390") == "as400"
+
+
+def test_source_stays_pdf_import_for_a_real_pdf():
+    # Until 2026-09-08 everything said pdf_import; a dropped PDF still should.
+    from supabase_client import source_for
+
+    assert source_for("880300 MATTHEWS.pdf") == "pdf_import"
+    assert source_for("") == "pdf_import"
+    assert source_for(None) == "pdf_import"

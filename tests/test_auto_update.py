@@ -136,3 +136,11 @@ def test_a_ready_update_looks_again_in_seconds_not_minutes(monkeypatch):
     # The window it is waiting for is seconds wide.
     monkeypatch.setenv("AUTO_UPDATE_RETRY_SEC", "20")
     assert auto_update.retry_sec() < auto_update.poll_sec()
+
+
+def test_it_never_restarts_with_a_send_in_flight():
+    # The send does not take capture_lock (it never drives the terminal), so
+    # without this an update could kill process_order_text between the
+    # picking_lists insert and the row being marked sent.
+    assert why_not_now(BEHIND, idle=IDLE, lock_free=True, door_busy=True) == "a send is in flight"
+    assert why_not_now(BEHIND, idle=IDLE, lock_free=True, door_busy=False) is None

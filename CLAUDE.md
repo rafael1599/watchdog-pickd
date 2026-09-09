@@ -31,6 +31,30 @@ python3 watcher.py
 
 El watcher se instala automaticamente como LaunchAgent en macOS (`com.antigravity.watchdog-pickd`).
 
+## La puerta: pickd ve las capturas, Bay 2 ejecuta (8 sep 2026)
+
+Rafael: *«el watcher se encarga de la parte operativa y pickd de la visual»*. `door.py` publica
+cada entrada de la caché en `as400_captures` (migración `20260909030530` de pickd) — parseo,
+ítems con `is_bike` embebido y grafía canónica, texto crudo — para que el Live Board pinte la
+orden FedEx/regular con cliente, pallets, bicis y partes **antes** de que nadie la traiga. «Traer»
+sólo marca `requested`; `door.py` la sondea cada 10 s y envía por `process_order_text`, el mismo
+camino del botón Send. **Nada viaja de pickd a Bay 2**: este Mac está detrás del NAT.
+
+Tres decisiones de diseño que no son obvias y hay que respetar al tocarlo:
+- **No se publica desde `run_scan_step`.** Con la tabla ausente PostgREST daría 404 en cada
+  captura y el escáner pasaría a una orden cada 5 min. Publica un reconciliador en su hilo,
+  idempotente, con backoff — que además es el backfill.
+- **El lock de envío es `door.sending`, por número de orden**, compartido con `/api/orders/<id>/send`.
+  Sin él, «Traer» y el botón de Bay 2 a la vez crearían dos filas (no hay UNIQUE en
+  `order_number`).
+- **`door.busy` frena `auto_update`**: el envío no toma `capture_lock` y un reinicio a medias
+  dejaría la fila en `sending` (se recupera a los 2 min, pero mejor no fabricarlo).
+
+Las reglas de basura viven en `door.classify` (ebay → junk; sin cliente, página perdida, stale →
+held; 8 días → archived) porque antes sólo corrían cuando alguien abría la UI de Bay 2.
+`picking_lists.source` es ahora `as400` para todo lo que viene del terminal
+(`supabase_client.source_for`). Apagar todo: `AS400_DOOR=0` + restart.
+
 ## Actualizar: un push es el deploy (8 sep 2026)
 
 `auto_update.py` mira `origin` cada 5 minutos desde Bay 2 y, cuando es seguro, corre el

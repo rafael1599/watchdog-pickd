@@ -30,7 +30,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("SCAN_CURSOR_PATH", str(tmp_path / "cursor"))
     appmod._archive.clear()
     appmod._orders.clear()
-    appmod._sending.clear()
+    appmod.door.sending.clear()
     appmod._next_id = 1
     appmod.app.testing = True
     return appmod.app.test_client()
@@ -38,7 +38,7 @@ def client(tmp_path, monkeypatch):
 
 def test_concurrent_send_is_rejected_while_in_flight(client):
     entry = appmod._add_order(ORDER_TEXT)
-    appmod._sending.add(entry["id"])  # a send is mid-flight
+    appmod.door.claim(str(entry["order_number"]))  # a send is mid-flight, keyed by order number
 
     r = client.post(f"/api/orders/{entry['id']}/send", headers=HDR)
 

@@ -121,7 +121,9 @@ def check_remote() -> dict:
     }
 
 
-def why_not_now(state: dict, *, idle: float, lock_free: bool) -> str | None:
+def why_not_now(
+    state: dict, *, idle: float, lock_free: bool, door_busy: bool = False
+) -> str | None:
     """The reason this poll should not update, or None to go ahead. Pure.
 
     Split out because it is the whole safety argument, and an argument that
@@ -136,6 +138,11 @@ def why_not_now(state: dict, *, idle: float, lock_free: bool) -> str | None:
         return "there are uncommitted changes here — update.sh would refuse to pull"
     if not lock_free:
         return "a capture is running"
+    if door_busy:
+        # A send is between a picking_lists insert and the row being marked
+        # sent. Restarting here strands it as `sending` (door.recover_stuck
+        # would repair it two minutes later, but why make it).
+        return "a send is in flight"
     if idle < idle_needed():
         return f"somebody is using the Mac (idle {idle:.0f}s)"
     return None
@@ -189,6 +196,15 @@ _attempted: str | None = None
 _last_reason: str | None = None
 
 
+def _door_busy() -> bool:
+    try:
+        import door
+
+        return door.busy.is_set()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _tick(idle_fn, lock_free_fn) -> str | None:
     """One poll. Returns what it did or why it didn't, for the log and the tests."""
     global _attempted, _last_reason
@@ -197,7 +213,7 @@ def _tick(idle_fn, lock_free_fn) -> str | None:
     except Exception as e:  # noqa: BLE001 — a network blip must not kill the thread
         return f"could not reach the remote ({e})"
 
-    reason = why_not_now(state, idle=idle_fn(), lock_free=lock_free_fn())
+    reason = why_not_now(state, idle=idle_fn(), lock_free=lock_free_fn(), door_busy=_door_busy())
 
     # Ask the catalogue work to stand down while we wait, and stop asking the
     # moment there is nothing to wait for.

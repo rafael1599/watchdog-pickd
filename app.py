@@ -36,6 +36,7 @@ from flask import Flask, abort, jsonify, render_template_string, request  # noqa
 
 import auto_scanner  # noqa: E402
 import auto_update  # noqa: E402
+import door  # noqa: E402
 import maintenance  # noqa: E402
 import scanned_store  # noqa: E402
 import sku_enrichment  # noqa: E402
@@ -123,8 +124,10 @@ def _guard_localhost_only():
 _orders: dict[int, dict] = {}
 _next_id = 1
 _lock = threading.Lock()
-# Order ids with a send currently in flight (server-side double-click guard).
-_sending: set[int] = set()
+# Sends in flight, keyed by ORDER NUMBER and shared with door.py — the door has
+# no card id, and without one shared key a tap in Pickd and a click here at the
+# same moment would both miss in find_existing_order and create two rows.
+_sending = door.sending
 
 # Archived orders the operator chose NOT to send. Unlike the pending queue these
 # are persisted to a local JSON file so they survive an app restart. Keyed by a
@@ -232,9 +235,11 @@ def _find_archived_by_number(order_number) -> dict | None:
 
 
 def _is_auto_archive_customer(customer) -> bool:
-    """True when the Bill-to customer marks a parts-only order (e.g. eBay)."""
-    norm = " ".join(str(customer or "").upper().split())
-    return any(c in norm for c in AUTO_ARCHIVE_CUSTOMERS)
+    """True when the Bill-to customer marks a parts-only order (e.g. eBay).
+
+    The rule itself lives in door.py now, so the door and this UI agree on what
+    junk is; this stays as the name the rest of app.py already uses."""
+    return door.is_junk_customer(customer)
 
 
 def _archive_entry(entry: dict) -> str:
@@ -689,9 +694,9 @@ def send(oid: int):
             return jsonify({"error": "This order was already sent."}), 409
         # Concurrency guard: the UI locks the button, this locks the server —
         # two parallel sends of the same card would race process_order_text.
-        if oid in _sending:
+        send_key = str(entry.get("order_number") or f"card:{oid}")
+        if not door.claim(send_key):
             return jsonify({"error": "Send already in progress for this order."}), 409
-        _sending.add(oid)
 
     try:
         try:
@@ -729,8 +734,7 @@ def send(oid: int):
             scanned_store.delete(entry["order_number"])
         return jsonify({**_public(entry), "result": result})
     finally:
-        with _lock:
-            _sending.discard(oid)
+        door.release(send_key)
 
 
 @app.get("/api/orders/<int:oid>/detail")
@@ -1855,6 +1859,9 @@ if __name__ == "__main__":
     # ⟳ button runs, but only when no capture is running and nobody is using the
     # Mac. See auto_update.py — the safety argument lives there.
     auto_update.start_auto_update()
+    # The door: publish the scan cache to Pickd, execute the requests Pickd
+    # makes. Its own thread, never the terminal — see door.py.
+    door.start_door()
     # threaded=True so UI requests are served promptly even while the auto-scanner's
     # background thread is busy driving Mocha (otherwise the page hangs blank until
     # the scan cycle finishes).
