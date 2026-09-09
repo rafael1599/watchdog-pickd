@@ -83,6 +83,25 @@ sirve para DDL (PostgREST no expone DDL). Corre en `update.sh` después del `git
 pull`; si `SUPABASE_DB_URL` no está seteada, se omite sin fallar. Coexiste con la
 migración propia de PickD (ambas usan `IF NOT EXISTS`).
 
+### La clase de envío cuenta BICIS, no unidades (8 sep 2026)
+
+`classify_shipping` (pipeline.py) es el **tercer espejo** de una regla que vive además en
+`src/utils/shippingClassification.ts` de pickd y en la función `classify_picking_list_fedex`
+de la DB. El archivo de pickd lleva una nota de «keep both in sync» que este lado nunca vio,
+y este lado se desvió: contaba **todas** las unidades, así que **cinco pedales salían como
+camión**. Lo cazó Rafael comparándolo con Double Check View.
+
+La regla real, en palabras de pickd: *«Parts never make an order 'regular' on their own: an
+order of 50 small parts still ships FedEx. Only bike volume (or a heavy item) forces a
+truck.»* Ahora `preview_order` cuenta bicis con `get_bike_skus()` (cacheado con TTL) y
+devuelve `shipping_type_basis` = `bikes` o `units-fallback`, para que un respaldo nunca se
+confunda con una respuesta.
+
+**No portada a propósito:** la regla 1 de pickd, «cualquier ítem de más de 50 lb → camión».
+Necesita pesos por SKU que este lado no tiene al previsualizar, y adivinarlos sería una
+cuarta respuesta en vez de una tercera. Sólo AÑADE órdenes `regular`, así que su ausencia
+puede dejar una parte pesada como FedEx **en el color local**, nunca en el envío.
+
 ### Cuenta AS400 y ship-to → la llave de FedEx (`fedex_recipient_id`)
 
 El header `Order Number: 880036   Account Number: 0010495 00` trae la cuenta bill-to

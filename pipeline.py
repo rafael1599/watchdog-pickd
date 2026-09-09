@@ -74,13 +74,40 @@ def meaningful_note(raw) -> Optional[str]:
     return text
 
 
-def classify_shipping(ship_via: Optional[str], total_units: int) -> str:
+def count_bike_units(items: list, bike_skus: set) -> int:
+    """Bike units in these items. Same counting `estimate_pallets` does."""
+    total = 0
+    for item in items or []:
+        qty = int(item.get("qty") or 0)
+        if qty > 0 and normalize_sku(item.get("sku") or "") in (bike_skus or set()):
+            total += qty
+    return total
+
+
+def classify_shipping(ship_via: Optional[str], bike_units: int) -> str:
     """Classify an order as 'fedex' or 'regular' for local UI colouring.
 
-    Uses BOTH the 'Ship Via' carrier (when it clearly names one) and the
-    verification-board units heuristic as a fallback:
-      (a) ship_via contains a FedEx hint → 'fedex'; a freight/LTL/UPS hint → 'regular'.
-      (b) otherwise total_units >= 5 → 'regular', else 'fedex'.
+      (a) ship_via names a carrier → believe it (FedEx hint, or freight/LTL/UPS).
+      (b) otherwise BIKES >= 5 → 'regular', else 'fedex'.
+
+    Rule (b) counts **bikes**, not units, and that is the whole point of this
+    function's existence being worth checking. Pickd's own rule says it in as
+    many words (`src/utils/shippingClassification.ts`): "Parts never make an
+    order 'regular' on their own: an order of 50 small parts still ships FedEx.
+    Only bike volume (or a heavy item) forces a truck." This counted every unit,
+    so five pedals were classified as a truck — spotted by Rafael on 2026-09-08,
+    comparing it against Double Check View.
+
+    Third mirror of one rule, and the one that had drifted: the other two are
+    that TypeScript file and the DB's `classify_picking_list_fedex`. Pickd's file
+    carries a "keep both in sync" note that this side never saw.
+
+    NOT ported on purpose: Pickd's rule 1, "any item over 50 lbs → regular". It
+    needs per-SKU weights, which this side does not have at preview time, and
+    guessing them would be a fourth answer rather than a third. It only ever
+    ADDS 'regular' orders, so missing it can leave a heavy single part looking
+    like FedEx here while Pickd calls it a truck — the local colour, never the
+    shipment.
     """
     via = (ship_via or "").upper()
     if via:
@@ -88,7 +115,7 @@ def classify_shipping(ship_via: Optional[str], total_units: int) -> str:
             return "fedex"
         if any(h in via for h in _REGULAR_HINTS):
             return "regular"
-    return "regular" if (total_units or 0) >= HEURISTIC_REGULAR_UNITS else "fedex"
+    return "regular" if (bike_units or 0) >= HEURISTIC_REGULAR_UNITS else "fedex"
 
 
 # Max bike units per pallet — same constant PickD uses (pickingLogic.ts).
@@ -124,10 +151,17 @@ def estimate_pallets(items: list, bike_skus: set) -> int:
     return -(-bike_units // BIKES_PER_PALLET)  # ceil division
 
 
-def preview_order(text: str) -> dict:
+def preview_order(text: str, bike_skus=None) -> dict:
     """
-    Parse order text WITHOUT touching Supabase. Used to show a preview
-    (customer, order number, total item count) before the user sends it.
+    Parse order text into a preview (customer, order number, counts) before the
+    user sends it. Creates and reserves nothing.
+
+    `bike_skus` is the catalogue's normalized bike SKUs, needed to tell a truck
+    order from a FedEx one — five bikes are a pallet, five pedals are a box.
+    Pass it explicitly (tests do, with a plain set) or leave it None and the
+    cached lookup answers. If the catalogue can't be reached the classification
+    falls back to counting units, which is what this did for everything until
+    2026-09-08, and `shipping_type_basis` says so rather than pretending.
     """
     data = parse_order(text)
     items = data.get("items", [])
@@ -141,6 +175,16 @@ def preview_order(text: str) -> dict:
     total_mismatch = subtotal is not None and abs(parsed_total - subtotal) > 0.01
 
     total_units = sum(int(i.get("qty") or 0) for i in items)
+
+    if bike_skus is None:
+        try:
+            from supabase_client import get_bike_skus  # local: no DB dep at import
+
+            bike_skus = get_bike_skus()
+        except Exception as e:  # noqa: BLE001 — a preview must never fail on this
+            log.info("preview: no bike catalog (%s) — classifying by units", e)
+    basis = "bikes" if bike_skus is not None else "units-fallback"
+    units_for_class = count_bike_units(items, bike_skus) if bike_skus is not None else total_units
 
     return {
         "order_number": data.get("order_number"),
@@ -159,7 +203,9 @@ def preview_order(text: str) -> dict:
         "ship_via": data.get("ship_via"),
         "order_date": data.get("order_date"),  # AS400 'Order Date' as ISO YYYY-MM-DD
         # Local-only shipping class for UI colouring (NOT written to PickD).
-        "shipping_type": classify_shipping(data.get("ship_via"), total_units),
+        "shipping_type": classify_shipping(data.get("ship_via"), units_for_class),
+        # "bikes" (the real rule) or "units-fallback" (the catalog was unreachable).
+        "shipping_type_basis": basis,
         "items": items,
     }
 
