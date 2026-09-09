@@ -31,7 +31,7 @@ import auto_scanner  # noqa: E402
 import scanned_store  # noqa: E402
 from as400_capture import _is_order_header_screen  # noqa: E402
 from parser import parse_order  # noqa: E402
-from pipeline import classify_shipping, meaningful_note, preview_order  # noqa: E402
+from pipeline import meaningful_note, preview_order  # noqa: E402
 
 HEADER = """                            O R D E R   I N Q U I R Y
 
@@ -122,13 +122,6 @@ def test_header_fields():
 def test_a_populated_ship_via_survives_the_shipped_from_cut():
     # The fix for the empty field must not break the filled one.
     assert parse_order(CAPTURE)["ship_via"] == "R&L"
-
-
-def test_rl_is_a_truck_carrier_not_a_parcel_one():
-    # R&L is LTL freight. Without the hint this only landed on 'regular' through
-    # the units fallback, so a small R&L order would have been coloured FedEx.
-    assert classify_shipping("R&L", 10) == "regular"
-    assert classify_shipping("R&L", 2) == "regular"
 
 
 def test_delivery_instruction_survives_the_noise_filter():

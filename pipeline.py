@@ -32,15 +32,12 @@ log = logging.getLogger("pickd-pipeline")
 
 # Carrier hints in the AS400 'Ship Via' field that map to a shipping class. These
 # are LOCAL-ONLY (used to colour the UI); PickD keeps its own auto-classification.
-_FEDEX_HINTS = ("FEDEX", "FDX")
 # Grows with the carriers actually seen in the header — never with guesses. Seen
 # so far: FEDEX, R&L (LTL freight, order 880996), and blank.
-_REGULAR_HINTS = ("UPS", "TRUCK", "TRK", "FREIGHT", "ABF", "LTL", "GROUND FREIGHT", "R&L")
 
 # Verification-board heuristic fallback: an order of 5+ total units is "regular"
 # (palletized / big), fewer is small-parcel "fedex". We lack per-SKU weights
 # locally, so only the units rule applies.
-HEURISTIC_REGULAR_UNITS = 5
 
 # ── Note filtering (mirror of pickd's meaningfulNote, src/features/picking/utils) ──
 # Order Comments mix real instructions with freight boilerplate. The red note on
@@ -72,50 +69,6 @@ def meaningful_note(raw) -> Optional[str]:
     if _NOTE_NOISE.search(text):
         return None
     return text
-
-
-def count_bike_units(items: list, bike_skus: set) -> int:
-    """Bike units in these items. Same counting `estimate_pallets` does."""
-    total = 0
-    for item in items or []:
-        qty = int(item.get("qty") or 0)
-        if qty > 0 and normalize_sku(item.get("sku") or "") in (bike_skus or set()):
-            total += qty
-    return total
-
-
-def classify_shipping(ship_via: Optional[str], bike_units: int) -> str:
-    """Classify an order as 'fedex' or 'regular' for local UI colouring.
-
-      (a) ship_via names a carrier → believe it (FedEx hint, or freight/LTL/UPS).
-      (b) otherwise BIKES >= 5 → 'regular', else 'fedex'.
-
-    Rule (b) counts **bikes**, not units, and that is the whole point of this
-    function's existence being worth checking. Pickd's own rule says it in as
-    many words (`src/utils/shippingClassification.ts`): "Parts never make an
-    order 'regular' on their own: an order of 50 small parts still ships FedEx.
-    Only bike volume (or a heavy item) forces a truck." This counted every unit,
-    so five pedals were classified as a truck — spotted by Rafael on 2026-09-08,
-    comparing it against Double Check View.
-
-    Third mirror of one rule, and the one that had drifted: the other two are
-    that TypeScript file and the DB's `classify_picking_list_fedex`. Pickd's file
-    carries a "keep both in sync" note that this side never saw.
-
-    NOT ported on purpose: Pickd's rule 1, "any item over 50 lbs → regular". It
-    needs per-SKU weights, which this side does not have at preview time, and
-    guessing them would be a fourth answer rather than a third. It only ever
-    ADDS 'regular' orders, so missing it can leave a heavy single part looking
-    like FedEx here while Pickd calls it a truck — the local colour, never the
-    shipment.
-    """
-    via = (ship_via or "").upper()
-    if via:
-        if any(h in via for h in _FEDEX_HINTS):
-            return "fedex"
-        if any(h in via for h in _REGULAR_HINTS):
-            return "regular"
-    return "regular" if (bike_units or 0) >= HEURISTIC_REGULAR_UNITS else "fedex"
 
 
 # Max bike units per pallet — same constant PickD uses (pickingLogic.ts).
@@ -151,17 +104,16 @@ def estimate_pallets(items: list, bike_skus: set) -> int:
     return -(-bike_units // BIKES_PER_PALLET)  # ceil division
 
 
-def preview_order(text: str, bike_skus=None) -> dict:
+def preview_order(text: str) -> dict:
     """
-    Parse order text into a preview (customer, order number, counts) before the
-    user sends it. Creates and reserves nothing.
+    Parse order text WITHOUT touching Supabase. Used to show a preview
+    (customer, order number, total item count) before the user sends it.
 
-    `bike_skus` is the catalogue's normalized bike SKUs, needed to tell a truck
-    order from a FedEx one — five bikes are a pallet, five pedals are a box.
-    Pass it explicitly (tests do, with a plain set) or leave it None and the
-    cached lookup answers. If the catalogue can't be reached the classification
-    falls back to counting units, which is what this did for everything until
-    2026-09-08, and `shipping_type_basis` says so rather than pretending.
+    It does NOT say whether the order is FedEx or a truck. That rule lives in
+    Pickd — `src/utils/shippingClassification.ts` and the DB's
+    `classify_picking_list_fedex` — and a third copy here only ever drifted:
+    it counted every unit, so five pedals read as a truck (Rafael, 2026-09-08).
+    The watcher's job is to send the order; Pickd decides what it is.
     """
     data = parse_order(text)
     items = data.get("items", [])
@@ -175,16 +127,6 @@ def preview_order(text: str, bike_skus=None) -> dict:
     total_mismatch = subtotal is not None and abs(parsed_total - subtotal) > 0.01
 
     total_units = sum(int(i.get("qty") or 0) for i in items)
-
-    if bike_skus is None:
-        try:
-            from supabase_client import get_bike_skus  # local: no DB dep at import
-
-            bike_skus = get_bike_skus()
-        except Exception as e:  # noqa: BLE001 — a preview must never fail on this
-            log.info("preview: no bike catalog (%s) — classifying by units", e)
-    basis = "bikes" if bike_skus is not None else "units-fallback"
-    units_for_class = count_bike_units(items, bike_skus) if bike_skus is not None else total_units
 
     return {
         "order_number": data.get("order_number"),
@@ -202,10 +144,6 @@ def preview_order(text: str, bike_skus=None) -> dict:
         "shipping_address": data.get("shipping_address"),
         "ship_via": data.get("ship_via"),
         "order_date": data.get("order_date"),  # AS400 'Order Date' as ISO YYYY-MM-DD
-        # Local-only shipping class for UI colouring (NOT written to PickD).
-        "shipping_type": classify_shipping(data.get("ship_via"), units_for_class),
-        # "bikes" (the real rule) or "units-fallback" (the catalog was unreachable).
-        "shipping_type_basis": basis,
         "items": items,
     }
 

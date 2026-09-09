@@ -337,7 +337,6 @@ def _add_order(raw_text: str, auto_archive: bool = True) -> dict:
             "parsed_total": preview.get("parsed_total"),
             "total_mismatch": preview.get("total_mismatch", False),
             "ship_via": preview.get("ship_via"),
-            "shipping_type": preview.get("shipping_type"),
             "order_date": preview.get("order_date"),
             "shipping_address": preview.get("shipping_address"),
             "order_comments": preview.get("order_comments"),
@@ -1022,27 +1021,12 @@ INDEX_HTML = """
                background: rgba(37,99,235,.12); color: #2563eb;
                border: 1px solid rgba(37,99,235,.35); }
     /* FedEx orders get a purple accent (mirrors PickD's verification palette). */
-    .card.fedex { border-left: 5px solid #a855f7; background: rgba(168,85,247,.06); }
     /* Two lanes: FedEx (left, purple) and Truck (right, emerald) — same palette
        as PickD's Verification Board (FDX purple / TRK emerald). */
-    .lanes { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; align-items: start; }
     /* The two lanes MUST survive Safari at half-screen (the operator's 50/50
        setup) — cards reflow inside them instead of the lanes collapsing. Only a
        truly tiny window (a phone) stacks to one column. */
     @media (max-width: 560px) { .lanes { grid-template-columns: 1fr; } }
-    .lane { border-radius: 12px; padding: .6rem; }
-    .lane-fedex { background: rgba(168,85,247,.08); border: 1px solid rgba(168,85,247,.25); }
-    .lane-truck { background: rgba(16,185,129,.07); border: 1px solid rgba(16,185,129,.22); }
-    .lane-title { font-size: .75rem; font-weight: 800; letter-spacing: .08em;
-                  text-transform: uppercase; margin: 0 0 .5rem .2rem; }
-    .lane-fedex .lane-title { color: #a855f7; }
-    .lane-truck .lane-title { color: #10b981; }
-    .lane-truck .card { border-left: 5px solid rgba(16,185,129,.6); }
-    .lane-empty { font-size: .85rem; margin: .2rem; }
-    .fdx-badge { font-size: .8rem; font-weight: 800; letter-spacing: .04em;
-                 padding: .05rem .5rem; border-radius: 999px; align-self: center;
-                 background: rgba(168,85,247,.12); color: #a855f7;
-                 border: 1px solid rgba(168,85,247,.45); }
     /* Order Comments are operationally important → prominent red note on the card. */
     .order-note { background: rgba(220,38,38,.1); border: 1px solid rgba(220,38,38,.5);
                   color: #dc2626; border-radius: 8px; padding: .5rem .7rem;
@@ -1078,7 +1062,6 @@ INDEX_HTML = """
     .vrow { display: flex; gap: .6rem; align-items: center; padding: .35rem .5rem;
             border: 1px solid #d1d5db; border-radius: 8px; margin-bottom: .3rem;
             font-size: .85rem; }
-    .vrow.fedex { border-left: 4px solid #a855f7; }
     /* Read-only detail panel — dark, double-check inspired. */
     .detail { background: #0f0f12; color: #e5e7eb; border-radius: 12px;
               padding: .6rem; margin: .2rem 0 .8rem; }
@@ -1250,7 +1233,7 @@ function applyPrefill(prefix) {
 // each item's SKU/description — the fields the operator would search by.
 function orderMatches(o, q) {
   if (!q) return true;
-  const parts = [o.order_number, o.customer, o.ship_to, o.shipping_type];
+  const parts = [o.order_number, o.customer, o.ship_to];
   for (const it of (o.items || [])) parts.push(it.sku, it.raw_sku, it.description, it.item_name);
   return parts.filter(Boolean).join(' ').toLowerCase().includes(q);
 }
@@ -1367,10 +1350,10 @@ function renderBoard() {
   if (!groups.length) { body.innerHTML = '<p class="muted">Nothing in verification right now.</p>'; return; }
   body.innerHTML = groups.map(s => {
     const rows = board[s].map(o =>
-      `<div class="vrow${o.shipping_type === 'fedex' ? ' fedex' : ''}">
+      `<div class="vrow">
         <span><b>#${o.order_number ?? '—'}</b></span>
         <span>${o.ship_to || o.customer || 'Unknown'}</span>
-        <span class="muted" style="margin-left:auto;">${o.items} items${o.shipping_type ? ' · ' + o.shipping_type : ''}</span>
+        <span class="muted" style="margin-left:auto;">${o.items} items</span>
       </div>`).join('');
     return `<div class="vgroup"><h3>${VSTATUS_LABELS[s] || s} (${board[s].length})</h3>${rows}</div>`;
   }).join('');
@@ -1457,8 +1440,7 @@ function card(o) {
   // Context that lives INSIDE the detail panel (the compact card stays clean):
   // ship-to, carrier and the total-mismatch explanation.
   // FedEx orders get a purple accent + FDX badge (regular orders: no special paint).
-  const isFedex = o.shipping_type === 'fedex';
-  const fdx = isFedex ? `<span class="fdx-badge">FDX</span>` : '';
+
   const odate = o.order_date ? `<div class="orderdate">Order date: ${o.order_date}</div>` : '';
   // Meaningful Order Comments → prominent red note in the main view (freight
   // boilerplate like a bare 'FREE FREIGHT' is filtered server-side; the full
@@ -1479,11 +1461,11 @@ function card(o) {
       + ` <button class="linkbtn" onclick="event.stopPropagation(); doRestore('${am.aid}')">Unarchive</button></div>`
     : '';
   const mm = o.total_mismatch ? '<span class="badge amber">⚠ TOTAL</span>' : '';
-  return `<div class="card tappable${isFedex ? ' fedex' : ''}" onclick="toggleDetail(${o.id})" title="Tap to see items">
+  return `<div class="card tappable" onclick="toggleDetail(${o.id})" title="Tap to see items">
       <div class="chead">
         <span class="onum">#${o.order_number ?? '—'}</span>
         <span class="ocust">${o.ship_to || o.customer || ''}</span>
-        ${fdx}${mm}
+        ${mm}
         <span class="ostats">${palletStats(o)}</span>
         <span class="chev" id="chev-${o.id}">▾</span>
       </div>
@@ -1654,20 +1636,11 @@ function render(orders, archived) {
       html += '<p class="muted">No orders yet. The scanner adds them automatically, or capture one above.</p>';
     }
   } else {
-    // Two lanes (like the Verification Board): FedEx on the LEFT, trucks on the
-    // RIGHT, each with its background tint. Cards stay full/sendable as before.
-    const fedex = active.filter(o => o.shipping_type === 'fedex');
-    const trucks = active.filter(o => o.shipping_type !== 'fedex');
-    html += `<div class="lanes">
-      <div class="lane lane-fedex">
-        <div class="lane-title">FedEx (${fedex.length})</div>
-        ${fedex.map(card).join('') || '<p class="muted lane-empty">No FedEx orders.</p>'}
-      </div>
-      <div class="lane lane-truck">
-        <div class="lane-title">Truck (${trucks.length})</div>
-        ${trucks.map(card).join('') || '<p class="muted lane-empty">No truck orders.</p>'}
-      </div>
-    </div>`;
+    // One list, in capture order. It used to be two lanes, FedEx and trucks,
+    // split by a rule this side had no business owning — and got wrong (it
+    // counted parts as bike volume). Pickd classifies orders; the watcher sends
+    // them. Rafael, 2026-09-08.
+    html += active.map(card).join('');
   }
   // Already in PickD (arrived via PDF or elsewhere) — kept locally, out of the way.
   // Cards keep their Send button: re-sending appends any missing SKUs (delta).
