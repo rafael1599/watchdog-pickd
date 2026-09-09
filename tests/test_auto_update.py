@@ -86,3 +86,53 @@ def test_the_poll_never_goes_below_a_minute(monkeypatch):
     # A tight poll would mean a `git fetch` per second against GitHub.
     monkeypatch.setenv("AUTO_UPDATE_POLL_SEC", "1")
     assert auto_update.poll_sec() == 60.0
+
+
+# ── the two changes of 2026-09-08 must not block each other ──────────────────
+
+
+def test_a_blocked_update_asks_the_catalogue_work_to_stand_down(monkeypatch):
+    # The scanner stopped sleeping — bursts of up to 300s holding capture_lock —
+    # and the updater refuses to restart during a capture. Without this flag the
+    # lock is free about 5 seconds in every 305, and a poll every 300s would
+    # take hours to land on one.
+    monkeypatch.setattr(auto_update, "_attempted", None)
+    monkeypatch.setattr(auto_update, "_last_reason", None)
+    monkeypatch.setattr(auto_update, "check_remote", lambda: dict(BEHIND))
+    auto_update.update_pending.clear()
+
+    assert auto_update._tick(lambda: IDLE, lambda: False) == "a capture is running"
+    assert auto_update.update_pending.is_set()
+
+
+def test_it_stops_asking_once_there_is_nothing_to_wait_for(monkeypatch):
+    monkeypatch.setattr(auto_update, "check_remote", lambda: dict(UP_TO_DATE))
+    auto_update.update_pending.set()
+    auto_update._tick(lambda: IDLE, lambda: True)
+    assert not auto_update.update_pending.is_set()
+
+
+def test_uncommitted_work_does_not_hold_the_catalogue_hostage(monkeypatch):
+    # A dirty tree is a message for a person, not a deploy that is about to land.
+    # Asking the scanner to stand down for it would stop the catalogue work all
+    # day for something no amount of waiting fixes.
+    monkeypatch.setattr(auto_update, "check_remote", lambda: dict(DIRTY))
+    auto_update.update_pending.set()
+    auto_update._tick(lambda: IDLE, lambda: True)
+    assert not auto_update.update_pending.is_set()
+
+
+def test_the_flag_clears_once_the_update_is_launched(monkeypatch):
+    monkeypatch.setattr(auto_update, "_attempted", None)
+    monkeypatch.setattr(auto_update, "_last_reason", None)
+    monkeypatch.setattr(auto_update, "check_remote", lambda: dict(BEHIND))
+    monkeypatch.setattr(auto_update, "start_update", lambda: True)
+    auto_update.update_pending.set()
+    assert auto_update._tick(lambda: IDLE, lambda: True) == "updating"
+    assert not auto_update.update_pending.is_set()
+
+
+def test_a_ready_update_looks_again_in_seconds_not_minutes(monkeypatch):
+    # The window it is waiting for is seconds wide.
+    monkeypatch.setenv("AUTO_UPDATE_RETRY_SEC", "20")
+    assert auto_update.retry_sec() < auto_update.poll_sec()

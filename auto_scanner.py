@@ -290,6 +290,7 @@ def _run_sku_gap() -> float:
     """
     started = time.monotonic()
     try:
+        import auto_update
         import sku_enrichment
 
         if not sku_enrichment.enabled():
@@ -306,6 +307,15 @@ def _run_sku_gap() -> float:
             # asked for orders, not for catalogue work.
             if system_idle_seconds() < IDLE_THRESHOLD_SEC or _kick.is_set():
                 log.info("auto-scan: the operator is back — SKU queue yields after %d", done)
+                return time.monotonic() - started
+            # A pending update wins as well. This burst holds capture_lock for up
+            # to five minutes and the updater refuses to restart during a
+            # capture, so without standing down the two would block each other
+            # for hours: the lock would be free about five seconds in every three
+            # hundred. Catalogue work is the lowest-priority thing here — it
+            # yields to the operator, to the orders, and to a deploy.
+            if auto_update.update_pending.is_set():
+                log.info("auto-scan: an update is waiting — SKU queue yields after %d", done)
                 return time.monotonic() - started
             row = sku_enrichment.next_sku()
             if not row:

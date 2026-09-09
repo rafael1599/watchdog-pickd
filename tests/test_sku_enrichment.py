@@ -705,3 +705,19 @@ def test_the_switch_being_off_reports_no_time_spent(monkeypatch):
 
     monkeypatch.delenv("SKU_ENRICH", raising=False)
     assert auto_scanner._run_sku_gap() == 0.0
+
+
+def test_the_catalogue_stands_down_for_a_pending_update(monkeypatch):
+    # Catalogue work is the lowest-priority thing here: it yields to the
+    # operator, to the orders, and to a deploy waiting for the terminal.
+    import auto_scanner
+    import auto_update
+
+    monkeypatch.setenv("SKU_ENRICH_MAX_PER_GAP", "10")
+    seen = _gap_harness(monkeypatch)
+    auto_update.update_pending.set()
+    try:
+        auto_scanner._run_sku_gap()
+    finally:
+        auto_update.update_pending.clear()
+    assert seen == []

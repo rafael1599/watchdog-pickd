@@ -58,6 +58,16 @@ def poll_sec() -> float:
     return max(60.0, float(os.getenv("AUTO_UPDATE_POLL_SEC", "300")))
 
 
+def retry_sec() -> float:
+    """How soon to look again when an update is READY but the moment is not.
+
+    The full interval would be wrong here: the catalogue work has just been
+    asked to stand down and will free the terminal within seconds, and waiting
+    five more minutes to notice would waste the window we just made.
+    """
+    return max(5.0, float(os.getenv("AUTO_UPDATE_RETRY_SEC", "20")))
+
+
 def idle_needed() -> float:
     """A restart takes the UI away from whoever is looking at it. Same threshold
     as the scanner's own gate — this is the same courtesy."""
@@ -158,6 +168,18 @@ def start_update() -> bool:
         return False
 
 
+# Raised when an update is waiting for the terminal to go quiet. The catalogue
+# work watches this and stands down: it is the lowest-priority thing in the
+# system, so it yields to an update exactly as it already yields to the operator
+# and to the orders.
+#
+# Without it the two changes of 2026-09-08 deadlock each other in slow motion:
+# the scanner stopped sleeping (bursts of up to 300s holding capture_lock) and
+# the updater refuses to restart during a capture, so the lock is free about 5
+# seconds in every 305 — 1.6% of the time — and a poll every 300s would take
+# hours to land on one.
+update_pending = threading.Event()
+
 _stop = threading.Event()
 _thread: threading.Thread | None = None
 # The commit we last launched an update FOR. If the remote is still that commit
@@ -176,6 +198,14 @@ def _tick(idle_fn, lock_free_fn) -> str | None:
         return f"could not reach the remote ({e})"
 
     reason = why_not_now(state, idle=idle_fn(), lock_free=lock_free_fn())
+
+    # Ask the catalogue work to stand down while we wait, and stop asking the
+    # moment there is nothing to wait for.
+    if state["behind"] and not state["dirty"]:
+        update_pending.set()
+    else:
+        update_pending.clear()
+
     if reason:
         # Say a NEW reason once. The same one every five minutes all day is how
         # a real problem gets lost among the routine ones.
@@ -189,6 +219,7 @@ def _tick(idle_fn, lock_free_fn) -> str | None:
 
     _last_reason = None
     _attempted = state["remote"]
+    update_pending.clear()
     log.warning(
         "auto-update: origin/%s moved (%s → %s) — updating now",
         state["branch"],
@@ -201,9 +232,15 @@ def _tick(idle_fn, lock_free_fn) -> str | None:
 def _loop(idle_fn, lock_free_fn) -> None:
     # A restart is the normal end of this thread's life, so it says nothing on
     # the way out.
-    while not _stop.wait(poll_sec()):
+    delay = poll_sec()
+    while not _stop.wait(delay):
+        delay = poll_sec()
         try:
             _tick(idle_fn, lock_free_fn)
+            # An update that is ready and merely blocked deserves a fast second
+            # look: the window it is waiting for is seconds wide, not minutes.
+            if update_pending.is_set():
+                delay = retry_sec()
         except Exception:
             log.exception("auto-update: poll crashed — the daemon keeps going")
 
