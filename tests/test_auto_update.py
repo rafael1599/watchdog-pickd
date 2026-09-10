@@ -43,6 +43,53 @@ def test_it_refuses_over_uncommitted_work_instead_of_letting_the_pull_fail():
     assert "uncommitted" in why_not_now(DIRTY, idle=IDLE, lock_free=True)
 
 
+def test_untracked_files_are_not_local_work(monkeypatch):
+    """The bug this updater wrote for itself.
+
+    `update.sh` does `mkdir -p logs` on its way in and `logs/` was not ignored,
+    so the FIRST successful auto-update left the tree permanently "dirty" under
+    a plain `--porcelain` — and every poll after it refused. Bay 2 sat 18 hours
+    on 812012d repeating "there are uncommitted changes here" to nobody.
+
+    `git pull --ff-only` does not refuse over untracked files it is not going to
+    overwrite. What this gate is for is a tracked file somebody edited on the
+    Mac, and that is what `--untracked-files=no` reports.
+    """
+    calls = []
+
+    def fake_git(*args, cwd=None):
+        calls.append(args)
+        if args[0] == "ls-remote":
+            return "bbb\trefs/heads/main"
+        if args[0] == "rev-parse":
+            return "main" if "--abbrev-ref" in args else "aaa"
+        if args[0] == "status":
+            # An untracked logs/ dir is invisible to -uno, which is the point.
+            return "" if "--untracked-files=no" in args else "?? logs/"
+        return ""
+
+    monkeypatch.setattr(auto_update, "_git", fake_git)
+    state = auto_update.check_remote()
+
+    assert state["dirty"] is False
+    assert why_not_now(state, idle=IDLE, lock_free=True) is None
+    assert ("status", "--porcelain", "--untracked-files=no") in calls
+
+
+def test_a_tracked_edit_on_the_mac_still_stops_the_update(monkeypatch):
+    def fake_git(*args, cwd=None):
+        if args[0] == "ls-remote":
+            return "bbb\trefs/heads/main"
+        if args[0] == "rev-parse":
+            return "main" if "--abbrev-ref" in args else "aaa"
+        if args[0] == "status":
+            return " M watcher.py"
+        return ""
+
+    monkeypatch.setattr(auto_update, "_git", fake_git)
+    assert auto_update.check_remote()["dirty"] is True
+
+
 def test_a_capture_outranks_a_dirty_tree_being_reported():
     # Ordering is not arbitrary: the dirty tree is a message for a person, the
     # running capture is a thing that would break. Both refuse, so either order

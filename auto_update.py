@@ -109,7 +109,19 @@ def check_remote() -> dict:
     line = _git("ls-remote", "origin", f"refs/heads/{b}")
     remote = line.split()[0] if line else ""
     local = _git("rev-parse", "HEAD")
-    dirty = bool(_git("status", "--porcelain"))
+    # `--untracked-files=no`, and the reason is the bug this file wrote itself.
+    # A plain `--porcelain` counts untracked files as dirty, `update.sh` does
+    # `mkdir -p logs` on its way in, and `logs/` was not ignored — so the FIRST
+    # successful auto-update made the tree permanently dirty and every poll from
+    # then on refused. Bay 2 sat 18 hours on 812012d saying "there are
+    # uncommitted changes here" every five minutes, to nobody.
+    #
+    # It was also just wrong: `git pull --ff-only` does not refuse over
+    # untracked files it is not going to overwrite (verified), and if it ever
+    # would, update.sh already fails and says so. What this gate is for is LOCAL
+    # WORK — a tracked file somebody edited on the Mac — and that is exactly
+    # what -uno reports.
+    dirty = bool(_git("status", "--porcelain", "--untracked-files=no"))
     if not remote:
         raise RuntimeError(f"origin has no branch {b}")
     return {

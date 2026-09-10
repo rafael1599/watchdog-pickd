@@ -11,6 +11,12 @@ processed/
 errors/
 venv/
 
+# Runtime output of the machine, not of the project. It was NOT ignored until
+# 10 sep 2026, and update.sh creates it (`mkdir -p logs`) — so the first
+# successful auto-update left the tree permanently "dirty" and every poll after
+# it refused. See auto_update.check_remote.
+logs/
+
 # Claude (skills symlink + local config)
 .claude/skills
 .claude/skills/
