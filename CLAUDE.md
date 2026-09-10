@@ -2,6 +2,17 @@
 
 Daemon que monitorea una carpeta (`~/send-to-pickd/`) por archivos PDF de ordenes de compra, extrae el texto con pdfplumber, parsea los datos (numero de orden, cliente, items/SKUs), y los inserta en Supabase como picking lists para la app web de PickD.
 
+> **El auto-deploy se paró solo, y así se ve (10 sep 2026).** Un push es el deploy
+> (`auto_update.py`), pero `update.sh` hace `mkdir -p logs`, `logs/` no estaba en `.gitignore` y el
+> gate leía `git status --porcelain` — que cuenta lo no trackeado. O sea: **el primer auto-update
+> exitoso creó el directorio que bloqueó todos los siguientes**. Bay 2 estuvo 18 h en `812012d`
+> diciendo «there are uncommitted changes here» cada 5 min a nadie (el poller solo loguea un motivo
+> **nuevo**, que es la regla correcta y es también por lo que pasó desapercibido). Arreglado en los dos
+> sitios: `logs/` ignorado y `dirty` con `--untracked-files=no` — `git pull --ff-only` **no** se niega
+> por archivos sin trackear que no va a sobrescribir, así que el gate solo debe mirar trabajo local
+> real. **Para saber qué corre de verdad:** `select version, seen_at from as400_watcher_heartbeat`; la
+> versión se sella al arrancar el proceso, así que si no se mueve es que no se ha reiniciado.
+
 > **El watcher tampoco decide de dónde se recoge (10 sep 2026).** `_to_cart_items` ya no asigna
 > `location` / `sublocation` / `location_hint` / `distribution` ni publica `available_qty`: manda la
 > línea con `location: None` y **PickD la planifica** al tomar la orden (`planPickForList`), contra el
