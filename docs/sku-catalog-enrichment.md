@@ -144,7 +144,7 @@ guion da los seis dígitos, y las letras van al segundo campo. `canonical_sku` y
 | `Weight` | `36` | candidato para `weight_lbs` — **no es báscula**, ver §4.3 |
 | `B-Bike/P-Part` | `B` | la clasificación **autoritativa**; hoy PickD la adivina con un trigger por prefijo |
 | `Model Year` | `2025` | el año, que `parseBikeName` descarta a propósito |
-| `On Hand NJ/FL/CA` | `56 / 0 / 0` | otra fuente de verdad del stock — fuera de alcance, §5 |
+| `On Hand NJ/FL/CA` | `56 / 0 / 0` | otra fuente de verdad del stock. **`NJ` es LUDLOW** (Rafael, 10 sep 2026). Ya no está fuera de alcance: va entero a `as400_snapshot` y lo compara `v_inventory_vs_as400` en PickD — vacío hasta F3 |
 | `Vendor No`, `Bin Location`, `Unit Meas`, precios por nivel | | fuera de alcance |
 | **largo / ancho / alto** | **no está** | **la pantalla no trae medidas** |
 | Teclas | `Cmd10 NOTES`, `Cmd7 EXIT` | `Cmd10` sin explorar |
