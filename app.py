@@ -771,24 +771,50 @@ def catalog_scan():
     blocking, so it can never fight a capture that is already under way.
     """
     body = request.get_json(silent=True) or {}
-    count = max(1, min(int(body.get("count") or 10), 50))
+    # `count` still bounds the OLD synchronous batch, kept for anything that
+    # asks for a fixed number. Without it the run goes until the operator comes
+    # back (Rafael, 10 sep 2026: "no se pare hasta que yo mueva algo").
+    count = body.get("count")
 
-    if not capture_lock.acquire(blocking=False):
-        return jsonify({"error": "A capture is running right now — try again in a moment."}), 409
-    try:
-        driver = MochaDriver()
+    if count:
+        count = max(1, min(int(count), 50))
+        if not capture_lock.acquire(blocking=False):
+            return jsonify(
+                {"error": "A capture is running right now — try again in a moment."}
+            ), 409
         try:
-            bootstrap_session(driver)
-        except Exception as e:  # noqa: BLE001 — the operator needs the reason, not a trace
-            return jsonify({"error": f"AS400 isn't ready: {e}"}), 409
-        result = sku_enrichment.run_catalog_batch(driver, count=count)
-        auto_scanner.note_as400(True)
-        return jsonify(result)
-    except Exception as e:  # noqa: BLE001
-        logging.exception("catalog scan failed")
-        return jsonify({"error": str(e)}), 500
-    finally:
-        capture_lock.release()
+            driver = MochaDriver()
+            try:
+                bootstrap_session(driver)
+            except Exception as e:  # noqa: BLE001 — the operator needs the reason, not a trace
+                return jsonify({"error": f"AS400 isn't ready: {e}"}), 409
+            result = sku_enrichment.run_catalog_batch(driver, count=count)
+            auto_scanner.note_as400(True)
+            return jsonify(result)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("catalog scan failed")
+            return jsonify({"error": str(e)}), 500
+        finally:
+            capture_lock.release()
+
+    # The open-ended run. It cannot be synchronous: it is meant to outlast this
+    # request by hours, so the request only starts it and says so.
+    def _open():
+        driver = MochaDriver()
+        bootstrap_session(driver)
+        return driver
+
+    if sku_enrichment.catalogue_run_active():
+        return jsonify({"error": "The catalogue run is already going."}), 409
+    if not sku_enrichment.start_catalogue_run(_open, capture_lock, auto_scanner.note_as400):
+        return jsonify({"error": "A capture is running right now — try again in a moment."}), 409
+    return jsonify(
+        {
+            "started": True,
+            "message": "Reading the catalogue until you touch the Mac. "
+            "Press Get orders now to take the terminal back.",
+        }
+    )
 
 
 @app.get("/api/maintenance")

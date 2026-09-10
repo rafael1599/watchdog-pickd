@@ -9,6 +9,7 @@ connection with no RLS underneath, so its rules are pinned before it can write.
 
 import pytest
 
+import sku_enrichment  # noqa: E402
 from as400_capture import (
     AS400ManualLoginRequired,
     StockScreenMismatch,
@@ -721,3 +722,108 @@ def test_the_catalogue_stands_down_for_a_pending_update(monkeypatch):
     finally:
         auto_update.update_pending.clear()
     assert seen == []
+
+
+# ── the operator's open-ended run ────────────────────────────────────────────
+#
+# Rafael, 10 sep 2026: "quiero que cuando lo active manualmente no se pare hasta
+# que yo mueva algo… si yo quiero órdenes regreso y presiono get orders now".
+
+
+def _step_ok(_driver, row):
+    return {"action": "read", "sku": row.get("sku")}
+
+
+def _queue(monkeypatch, n):
+    rows = [{"sku": f"03-000{i}BK"} for i in range(n)]
+    monkeypatch.setattr(sku_enrichment, "next_sku", lambda: rows.pop(0) if rows else None)
+
+
+def test_it_keeps_going_while_nobody_touches_the_mac(monkeypatch):
+    _queue(monkeypatch, 5)
+    out = sku_enrichment.run_until_disturbed(
+        None,
+        idle_fn=lambda: 1e9,
+        kick_fn=lambda: False,
+        update_pending_fn=lambda: False,
+        step_fn=_step_ok,
+    )
+    assert out["read"] == 5
+    assert out["stopped"] == "the queue is empty"
+
+
+def test_zero_idle_at_the_start_does_not_stop_it_before_the_first_lookup(monkeypatch):
+    # The operator just clicked the button, so idle is 0. Reading that as "the
+    # operator is here" is what used to make it do one and stop.
+    _queue(monkeypatch, 3)
+    out = sku_enrichment.run_until_disturbed(
+        None,
+        idle_fn=lambda: 1e9,
+        kick_fn=lambda: False,
+        update_pending_fn=lambda: False,
+        step_fn=_step_ok,
+    )
+    assert out["read"] == 3
+
+
+def test_a_touch_after_it_started_stops_it(monkeypatch):
+    # Idle that no longer keeps up with our own elapsed time means somebody
+    # touched the machine after we began.
+    _queue(monkeypatch, 10)
+    calls = {"n": 0}
+
+    def idle():
+        calls["n"] += 1
+        return 1e9 if calls["n"] <= 2 else 0.0
+
+    out = sku_enrichment.run_until_disturbed(
+        None, idle_fn=idle, kick_fn=lambda: False, update_pending_fn=lambda: False, step_fn=_step_ok
+    )
+    assert out["read"] == 2
+    assert out["stopped"] == "the operator is back"
+
+
+def test_get_orders_now_takes_the_terminal_back(monkeypatch):
+    _queue(monkeypatch, 10)
+    kicked = {"v": False}
+
+    def step(driver, row):
+        kicked["v"] = True  # the operator presses it while a lookup is running
+        return _step_ok(driver, row)
+
+    out = sku_enrichment.run_until_disturbed(
+        None,
+        idle_fn=lambda: 1e9,
+        kick_fn=lambda: kicked["v"],
+        update_pending_fn=lambda: False,
+        step_fn=step,
+    )
+    assert out["read"] == 1
+    assert out["stopped"] == "orders requested"
+
+
+def test_it_yields_to_a_pending_deploy(monkeypatch):
+    # The run holds capture_lock and the updater refuses to restart during a
+    # capture — without this it would pin Bay 2 to an old build for hours.
+    _queue(monkeypatch, 10)
+    out = sku_enrichment.run_until_disturbed(
+        None,
+        idle_fn=lambda: 1e9,
+        kick_fn=lambda: False,
+        update_pending_fn=lambda: True,
+        step_fn=_step_ok,
+    )
+    assert out["read"] == 0
+    assert out["stopped"] == "an update is waiting"
+
+
+def test_it_stops_when_the_as400_goes_away(monkeypatch):
+    _queue(monkeypatch, 10)
+    out = sku_enrichment.run_until_disturbed(
+        None,
+        idle_fn=lambda: 1e9,
+        kick_fn=lambda: False,
+        update_pending_fn=lambda: False,
+        step_fn=lambda d, r: {"action": "unavailable"},
+    )
+    assert out["stopped"] == "the AS400 is not available"

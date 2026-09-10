@@ -480,6 +480,142 @@ def next_sku(client=None) -> dict | None:
     return queue[0] if queue else None
 
 
+# The manual run lives on its own thread: an unbounded loop cannot sit inside a
+# Flask request, and this one is meant to last until somebody touches the Mac.
+_run_thread: threading.Thread | None = None
+_run_stop = threading.Event()
+_run_last: dict = {}
+
+
+def catalogue_run_active() -> bool:
+    return bool(_run_thread and _run_thread.is_alive())
+
+
+def stop_catalogue_run() -> None:
+    _run_stop.set()
+
+
+def start_catalogue_run(open_driver, lock, note_as400=None) -> bool:
+    """Start the operator's run in the background. False if one is already up.
+
+    The lock is taken by the THREAD, not by the caller, and released in its
+    `finally` — a run that lasts until the operator returns cannot borrow the
+    request's lifetime for either.
+    """
+    global _run_thread
+    if catalogue_run_active():
+        return False
+    if not lock.acquire(blocking=False):
+        return False
+    _run_stop.clear()
+
+    def _body():
+        try:
+            driver = open_driver()
+            result = run_until_disturbed(driver, stop_fn=_run_stop.is_set)
+            _run_last.clear()
+            _run_last.update(result)
+            log.info("catalogue run finished: %s", result)
+            if note_as400:
+                note_as400(True)
+        except Exception as e:  # noqa: BLE001 — a side errand may not take the app down
+            _run_last.clear()
+            _run_last.update({"stopped": f"error: {e}"})
+            log.exception("catalogue run failed")
+        finally:
+            lock.release()
+
+    _run_thread = threading.Thread(target=_body, daemon=True, name="catalogue-run")
+    _run_thread.start()
+    return True
+
+
+def catalogue_run_state() -> dict:
+    return {"active": catalogue_run_active(), "last": dict(_run_last)}
+
+
+def run_until_disturbed(
+    driver,
+    *,
+    idle_fn=None,
+    kick_fn=None,
+    update_pending_fn=None,
+    stop_fn=None,
+    note=None,
+    step_fn=None,
+) -> dict:
+    """Read SKUs back to back until something asks for the terminal. Pure-ish.
+
+    Rafael, 10 sep 2026: "quiero que cuando lo active manualmente no se pare
+    hasta que yo mueva algo… si yo quiero órdenes regreso y presiono get orders
+    now". So the operator's own hands are the brake, not a count and not a
+    budget.
+
+    The idle gate cannot be the usual "idle < 60": the operator just clicked a
+    button, so idle is ZERO at the start and the run would stop before its first
+    lookup. What matters is whether anybody touched the Mac AFTER we began —
+    and if nobody has, `system_idle_seconds()` grows at least as fast as our own
+    elapsed time. When it is smaller than that, the machine was touched.
+
+    It stops for three other things, and each is somebody with a better claim:
+      - "get orders now": they asked for orders, not for the catalogue.
+      - a pending deploy: this run holds `capture_lock` and the updater refuses
+        to restart during a capture, so without yielding it would keep Bay 2 on
+        an old build for as long as the run lasts.
+      - the AS400 going away: hammering a terminal that is not there is how a
+        session gets stuck.
+    """
+    from auto_scanner import _kick, system_idle_seconds
+
+    idle_fn = idle_fn or system_idle_seconds
+    kick_fn = kick_fn or _kick.is_set
+    stop_fn = stop_fn or (lambda: False)
+    step_fn = step_fn or run_sku_step
+    if update_pending_fn is None:
+        import auto_update
+
+        update_pending_fn = auto_update.update_pending.is_set
+
+    started = time.monotonic()
+    out = {"read": 0, "unknown": 0, "failed": 0, "stopped": None}
+
+    while True:
+        if stop_fn():
+            out["stopped"] = "asked to stop"
+            break
+        # Touched since we began? Idle grows with us when nobody is there.
+        if idle_fn() < time.monotonic() - started:
+            out["stopped"] = "the operator is back"
+            break
+        if kick_fn():
+            out["stopped"] = "orders requested"
+            break
+        if update_pending_fn():
+            out["stopped"] = "an update is waiting"
+            break
+
+        row = next_sku()
+        if not row:
+            out["stopped"] = "the queue is empty"
+            break
+
+        res = step_fn(driver, row)
+        action = res.get("action")
+        if action in ("read", "written"):
+            out["read"] += 1
+        elif action == "unknown":
+            out["unknown"] += 1
+        else:
+            out["failed"] += 1
+        if action == "unavailable":
+            out["stopped"] = "the AS400 is not available"
+            break
+        if note:
+            note(out)
+
+    return out
+
+
 def run_catalog_batch(driver, count: int = 10, budget_sec: float = 180.0) -> dict:
     """Read `count` SKUs off AS400 right now. The operator's "compare" button.
 
