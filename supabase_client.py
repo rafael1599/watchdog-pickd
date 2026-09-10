@@ -484,14 +484,6 @@ def _variant_base(norm_sku: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-RETURN_TO_STOCK_LOCATION = "RETURN TO STOCK"
-
-
-def _is_return_to_stock(entry: dict) -> bool:
-    """The floor a cancelled order's units land on — picked before any shelf."""
-    return (entry.get("location") or "").strip().upper() == RETURN_TO_STOCK_LOCATION
-
-
 def _pick_by_stock(matches: list, available: dict, requested_qty: int) -> Optional[str]:
     """Choose the catalog SKU for one order line among its variant siblings.
 
@@ -610,15 +602,17 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
             }
         )
 
-    # Step 2: Fetch locations and total stock from inventory for found SKUs
-    inventory_data_map = {}  # SKU -> List of all inventory entries
+    # Step 2: total stock per SKU, and a name to show. Two things only — the
+    # shelves, their distribution and their hints stopped being read here when
+    # PickD took over the address, and fetching them per import was work nobody
+    # spent.
+    inventory_data_map = {}  # SKU -> its inventory rows, read only for item_name
     total_stock_map = {}
 
     if found_db_skus:
-        # Fetch inventory for LUDLOW including distribution and hints
         inv_res = (
             client.table("inventory")
-            .select("sku, location, quantity, distribution, location_hint, item_name, sublocation")
+            .select("sku, quantity, item_name")
             .in_("sku", found_db_skus)
             .eq("warehouse", "LUDLOW")
             .eq("is_active", True)
@@ -636,9 +630,10 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
                 inventory_data_map[sku] = []
             inventory_data_map[sku].append(inv)
 
-    # Step 2b: Query active picking lists to calculate already-reserved stock.
-    # This prevents two concurrent orders from over-assigning the same location.
-    reserved_map = {}  # (sku, location) -> reserved_qty
+    # Step 2b: what open orders already hold, per SKU. Not per location any
+    # more — PickD decides addresses now, so an order on the board may have none
+    # yet, and requiring one here would make it invisible to the availability
+    # below (which decides the SKU and the insufficient_stock flag).
     reserved_by_sku = {}  # sku -> total reserved across all locations
 
     if found_db_skus:
@@ -651,20 +646,15 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         for pl in active_lists.data or []:
             for pl_item in pl.get("items") or []:
                 sku = pl_item.get("sku", "")
-                loc = pl_item.get("location", "")
                 qty = pl_item.get("pickingQty", 0)
-                if sku in found_db_skus and loc and qty > 0:
-                    key = (sku, loc)
-                    reserved_map[key] = reserved_map.get(key, 0) + qty
+                if sku in found_db_skus and qty > 0:
                     reserved_by_sku[sku] = reserved_by_sku.get(sku, 0) + qty
 
         # Adjust total_stock_map to reflect reservations
         for sku in total_stock_map:
             total_stock_map[sku] = max(0, total_stock_map[sku] - reserved_by_sku.get(sku, 0))
 
-    # Step 3: Build final cart items using prioritization logic
-    # PALLET (0) > LINE (1) > TOWER (2) > OTHER (3)
-    PRIORITY = {"PALLET": 0, "LINE": 1, "TOWER": 2, "OTHER": 3}
+    # Step 3: Build final cart items
 
     cart_items = []
     for res in item_results:
@@ -688,86 +678,21 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         available_qty = total_stock_map.get(db_sku, 0) if db_sku else 0
         insufficient_stock = requested_qty > available_qty
 
-        # Find best location for this SKU
-        assigned_location = None
-        assigned_hint = None
-        assigned_sublocation = None
-        assigned_distribution = []
-        assigned_item_name = None
-
+        # The catalogue name, for display. Any inventory row of this SKU carries
+        # it; WHICH one stopped mattering when PickD took over the address.
+        #
+        # Everything that used to live here — flattening each location's
+        # distribution into candidates, subtracting reservations per shelf,
+        # ranking RETURN TO STOCK first, then PALLET > LINE > TOWER, then fewest
+        # units_each — is gone. It was a second implementation of pickd's
+        # utils/pickLocation.ts that had to be kept in step with it by hand, and
+        # it answered at import time a question that is only answerable when
+        # somebody actually walks: PickD replans from live stock the moment the
+        # order is taken up (planPickForList).
         sku_entries = inventory_data_map.get(db_sku, []) if db_sku else []
-        if sku_entries:
-            # Flatten all distribution options per location to compare them
-            candidates = []
-            for entry in sku_entries:
-                dist_list = entry.get("distribution") or []
-                if not isinstance(dist_list, list) or not dist_list:
-                    candidates.append(
-                        {
-                            "entry": entry,
-                            "priority": 4,
-                            "units_each": entry["quantity"],
-                            "has_dist": False,
-                        }
-                    )
-                    continue
-
-                for d in dist_list:
-                    candidates.append(
-                        {
-                            "entry": entry,
-                            "priority": PRIORITY.get(d.get("type"), 3),
-                            "units_each": d.get("units_each", 999999),
-                            "has_dist": True,
-                        }
-                    )
-
-            # Calculate effective available stock per candidate (physical - reserved)
-            for c in candidates:
-                entry = c["entry"]
-                loc = entry.get("location") or ""
-                reserved = reserved_map.get((db_sku, loc), 0)
-                c["effective_qty"] = max(0, (entry.get("quantity") or 0) - reserved)
-
-            # Filter: only locations with effective stock > 0
-            in_stock = [c for c in candidates if c["effective_qty"] > 0]
-
-            # If no location has stock, leave location=None (item stays flagged
-            # with insufficient_stock=True and the picker sees the warning)
-            active_candidates = in_stock if in_stock else None
-
-            if active_candidates:
-                # Sort: RETURN TO STOCK first, then priority (Pallet=0), then
-                # units_each (fewer is better), then effective quantity (more is
-                # better).
-                #
-                # RETURN TO STOCK is the floor where a cancelled order's units
-                # wait for somebody to walk them back to their shelf. They owe
-                # that trip either way, so the next order that needs the SKU is
-                # the trip — pointing the picker at a full row instead just
-                # grows the pile (Rafael, 2026-09-01). Matched by name, not by
-                # picking_order: 420 says *when* on the walk (right after ROW
-                # 43), not that it wins. Mirror of `isReturnToStock` in
-                # pickd's src/features/picking/utils/pickLocation.ts — the app
-                # re-plans the route from live stock, so both have to agree.
-                active_candidates.sort(
-                    key=lambda x: (
-                        0 if _is_return_to_stock(x["entry"]) else 1,
-                        x["priority"],
-                        x["units_each"],
-                        -x["effective_qty"],
-                    )
-                )
-
-                best_match = active_candidates[0]["entry"]
-                assigned_location = best_match["location"]
-                assigned_hint = best_match.get("location_hint")
-                assigned_sublocation = best_match.get("sublocation")
-                assigned_distribution = best_match.get("distribution") or []
-                assigned_item_name = best_match.get("item_name")
-            else:
-                # No stock anywhere — grab item_name from any entry for display
-                assigned_item_name = sku_entries[0].get("item_name")
+        assigned_item_name = next(
+            (e.get("item_name") for e in sku_entries if e.get("item_name")), None
+        )
 
         cart_items.append(
             {
@@ -777,15 +702,17 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
                 "description": item.get("description", ""),
                 "raw_sku": item.get("raw_sku", normalized_pdf_sku),
                 "unit_price": item.get("unit_price", 0),
-                "location": assigned_location,
-                "location_hint": assigned_hint,
-                "sublocation": assigned_sublocation,
-                "distribution": assigned_distribution,
+                # Left for PickD to fill. `location_hint`, `sublocation` and
+                # `distribution` are gone with it: PickD reads all three off the
+                # live inventory row it plans onto, and nothing ever read
+                # `available_qty` — it was a snapshot that went stale on arrival.
+                "location": None,
                 "warehouse": "LUDLOW",
                 "source": "pdf_import",
                 "sku_not_found": res["not_found"],
+                # Total across every shelf, minus what open orders hold. Never
+                # depended on a location, so it means exactly what it always did.
                 "insufficient_stock": insufficient_stock,
-                "available_qty": available_qty,
             }
         )
     return cart_items

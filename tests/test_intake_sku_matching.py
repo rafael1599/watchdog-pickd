@@ -132,7 +132,8 @@ def test_sibling_with_stock_beats_dead_exact_match():
         client, [{"sku": "033768BL", "raw_sku": "03 3768 BLD", "qty": 1, "description": "d"}]
     )
     assert items[0]["sku"] == "03-3768BL"
-    assert items[0]["location"] == "ROW 43"
+    # Where it comes from is PickD's call now (planPickForList).
+    assert items[0]["location"] is None
     assert items[0]["insufficient_stock"] is False
     assert items[0]["sku_not_found"] is False
 
@@ -147,7 +148,7 @@ def test_sibling_with_stock_beats_dead_canonical_match():
         client, [{"sku": "033769BL", "raw_sku": "03 3769 BLT", "qty": 1, "description": "d"}]
     )
     assert items[0]["sku"] == "03-3769BLD"
-    assert items[0]["location"] == "ROW 41"
+    assert items[0]["location"] is None
     assert items[0]["insufficient_stock"] is False
 
 
@@ -188,7 +189,8 @@ def test_partial_stock_still_prefers_the_fuller_sibling():
     )
     assert items[0]["sku"] == "03-3768BL"
     assert items[0]["insufficient_stock"] is True
-    assert items[0]["available_qty"] == 4
+    # available_qty left the line with the address; the flag it fed remains.
+    assert items[0]["insufficient_stock"] is True
 
 
 def test_reservations_count_against_a_sibling():
@@ -261,43 +263,3 @@ def test_not_found_line_without_raw_sku_falls_back_to_the_parsed_key():
     client = _client_with_catalog([])
     items = _to_cart_items(client, [{"sku": "034664BR", "qty": 1, "description": "d"}])
     assert items[0]["sku"] == "03-4664BR"
-
-
-def test_return_to_stock_wins_over_a_fuller_shelf():
-    # Units that came back from a cancelled order are loose on the floor and owe
-    # a put-away trip. The next order that needs the SKU is that trip, so the
-    # card points there even though ROW 28 holds forty (Rafael, 2026-09-01).
-    client = _client_with_catalog(
-        ["03-4663GN"],
-        inventory=[
-            _row("03-4663GN", "ROW 28", 40),
-            _row("03-4663GN", "RETURN TO STOCK", 2),
-        ],
-    )
-    items = _to_cart_items(client, [{"sku": "034663GN", "qty": 1, "description": "d"}])
-    assert items[0]["location"] == "RETURN TO STOCK"
-
-
-def test_return_to_stock_is_matched_by_name_not_by_case():
-    client = _client_with_catalog(
-        ["03-4663GN"],
-        inventory=[
-            _row("03-4663GN", "ROW 28", 40),
-            _row("03-4663GN", " return to stock ", 1),
-        ],
-    )
-    items = _to_cart_items(client, [{"sku": "034663GN", "qty": 1, "description": "d"}])
-    assert items[0]["location"] == " return to stock "
-
-
-def test_an_empty_return_to_stock_row_does_not_win():
-    # Zero on the floor is not a stop: only rows with effective stock compete.
-    client = _client_with_catalog(
-        ["03-4663GN"],
-        inventory=[
-            _row("03-4663GN", "ROW 28", 40),
-            _row("03-4663GN", "RETURN TO STOCK", 0),
-        ],
-    )
-    items = _to_cart_items(client, [{"sku": "034663GN", "qty": 1, "description": "d"}])
-    assert items[0]["location"] == "ROW 28"

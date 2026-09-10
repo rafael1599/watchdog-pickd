@@ -2,6 +2,17 @@
 
 Daemon que monitorea una carpeta (`~/send-to-pickd/`) por archivos PDF de ordenes de compra, extrae el texto con pdfplumber, parsea los datos (numero de orden, cliente, items/SKUs), y los inserta en Supabase como picking lists para la app web de PickD.
 
+> **El watcher tampoco decide de dónde se recoge (10 sep 2026).** `_to_cart_items` ya no asigna
+> `location` / `sublocation` / `location_hint` / `distribution` ni publica `available_qty`: manda la
+> línea con `location: None` y **PickD la planifica** al tomar la orden (`planPickForList`), contra el
+> stock vivo y descontando lo que otras órdenes abiertas ya tienen apartado. Con eso murió el espejo
+> `_is_return_to_stock` — la copia a mano de `isReturnToStock` de pickd — junto con el ranking
+> PALLET > LINE > TOWER y la reserva por ubicación. Lo que **queda** aquí es transcripción y resolución
+> de SKU: `_pick_by_stock` sigue eligiendo entre hermanos de variante por stock total, y
+> `insufficient_stock` sigue saliendo del total menos lo reservado — nunca dependió de una ubicación,
+> así que significa exactamente lo mismo que antes. Ojo: la reserva por SKU **ya no exige** que la
+> línea tenga ubicación, o una orden sin planificar sería invisible para esa cuenta.
+
 > **El watcher no combina órdenes (9 sep 2026).** Tenía un auto-combine por cliente en ventana de
 > 24 h (`find_combinable_order_by_customer` + `combine_into_order`, paso 4 del pipeline) que metía la
 > orden nueva en el `group_id` de otra del mismo cliente — incluida una en `double_checking`, o sea
@@ -18,7 +29,6 @@ Daemon que monitorea una carpeta (`~/send-to-pickd/`) por archivos PDF de ordene
 - Deteccion de duplicados via hash SHA-256
 - Creacion, append y reopen de ordenes (**combinar NO**: es decisión de PickD, con una persona confirmando)
 - Resolucion de SKUs contra inventario (con fuzzy matching)
-- Asignacion automatica de ubicaciones (RETURN TO STOCK antes que nada; luego PALLET > LINE > TOWER)
 - Auto-start via launchd (macOS)
 
 ## Como correr
