@@ -482,9 +482,29 @@ def _version() -> str:
 
 
 def heartbeat(client, version: str) -> None:
-    client.table("as400_watcher_heartbeat").upsert(
-        {"id": 1, "seen_at": datetime.now(timezone.utc).isoformat(), "version": version}
-    ).execute()
+    """Say we are alive, and say what we are doing.
+
+    The second half is not decoration. Why the catalogue step is idle lives in
+    Bay 2's log, and reading that log means typing on Bay 2 — which IS the
+    operator coming back, which is one of the reasons the step stands down. The
+    diagnosis switched off the thing it was measuring (Rafael, 10 sep 2026). It
+    rides the beat that was already going out; no new write, no new schedule.
+    """
+    row = {
+        "id": 1,
+        "seen_at": datetime.now(timezone.utc).isoformat(),
+        "version": version,
+    }
+    try:
+        import auto_scanner
+
+        gap = auto_scanner.gap_state()
+        row["last_gap_reason"] = gap.get("reason")
+        row["last_gap_at"] = gap.get("at")
+        row["skus_read_total"] = gap.get("read")
+    except Exception:  # noqa: BLE001 — the beat matters more than the detail
+        pass
+    client.table("as400_watcher_heartbeat").upsert(row).execute()
 
 
 # ── the thread ───────────────────────────────────────────────────────────────

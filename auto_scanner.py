@@ -267,6 +267,26 @@ def _interruptible_wait(seconds: float) -> None:
         _kick.wait(min(0.5, remaining))
 
 
+# What the catalogue step last decided, and when. The door's heartbeat carries
+# it to Supabase so the answer to "why is it doing nothing" does not require
+# typing on Bay 2 — which is itself the operator coming back, and the operator
+# coming back is one of the reasons it stops (Rafael, 10 sep 2026).
+_gap_state: dict = {"reason": None, "at": None, "read": 0}
+
+
+def gap_state() -> dict:
+    """The last decision of the catalogue step. Pure read, for the heartbeat."""
+    return dict(_gap_state)
+
+
+def _note_gap(reason: str, read: int = 0) -> None:
+    from datetime import datetime, timezone
+
+    _gap_state["reason"] = reason
+    _gap_state["at"] = datetime.now(timezone.utc).isoformat()
+    _gap_state["read"] += read
+
+
 def _run_sku_gap() -> float:
     """Spend the gap on the AS400 catalogue, if that is switched on.
 
@@ -294,18 +314,21 @@ def _run_sku_gap() -> float:
         import sku_enrichment
 
         if not sku_enrichment.enabled():
+            _note_gap("switched off (SKU_ENRICH)")
             return 0.0
 
         deadline = started + sku_enrichment.gap_budget_sec()
         done = 0
         for _ in range(sku_enrichment.max_per_gap()):
             if time.monotonic() >= deadline:
+                _note_gap("budget spent")
                 log.info("auto-scan: SKU budget spent after %d lookup(s)", done)
                 return time.monotonic() - started
             # The operator's keyboard wins, always — checked before every single
             # lookup, not once per gap. A manual "get orders now" wins too: they
             # asked for orders, not for catalogue work.
             if system_idle_seconds() < IDLE_THRESHOLD_SEC or _kick.is_set():
+                _note_gap("the operator is back")
                 log.info("auto-scan: the operator is back — SKU queue yields after %d", done)
                 return time.monotonic() - started
             # A pending update wins as well. This burst holds capture_lock for up
@@ -315,14 +338,17 @@ def _run_sku_gap() -> float:
             # hundred. Catalogue work is the lowest-priority thing here — it
             # yields to the operator, to the orders, and to a deploy.
             if auto_update.update_pending.is_set():
+                _note_gap("an update is waiting")
                 log.info("auto-scan: an update is waiting — SKU queue yields after %d", done)
                 return time.monotonic() - started
             row = sku_enrichment.next_sku()
             if not row:
+                _note_gap("the queue is empty")
                 log.info("auto-scan: the SKU queue is empty — nothing to look up")
                 return time.monotonic() - started
             res = sku_enrichment.run_sku_step(_driver_for_sku_step(), row)
             done += 1
+            _note_gap("working", read=1 if res.get("action") in ("read", "written") else 0)
             if not res.get("returned", True):
                 # The terminal isn't back on the order search. Stop touching it;
                 # the next cycle's bootstrap is what recovers.
