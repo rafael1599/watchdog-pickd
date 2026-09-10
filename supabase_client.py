@@ -454,75 +454,20 @@ def resolve_customer(
     return _resolve_customer(client, name, street, city, state, zip_code, account=account)
 
 
-COMBINABLE_STATUSES = ["active", "ready_to_double_check", "needs_correction", "double_checking"]
-
-
-def find_combinable_order_by_customer(
-    customer_id: str, exclude_order_number: str = None
-) -> Optional[dict]:
-    """
-    Find an existing picking list for the same customer that can be combined.
-    Only returns orders in combinable statuses, created within the last 24 hours.
-    Returns the most recently created one.
-
-    Waiting orders (is_waiting_inventory = true — they live in needs_correction,
-    a combinable status) are EXCLUDED: an order parked waiting for inventory must
-    never be auto-combined with a new arrival. Joining one is a manual,
-    user-confirmed action in PickD only (operator rule, 2026-06-11).
-    """
-    client = get_client()
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-
-    query = (
-        client.table("picking_lists")
-        .select("*")
-        .eq("customer_id", customer_id)
-        .in_("status", COMBINABLE_STATUSES)
-        .or_("is_waiting_inventory.is.null,is_waiting_inventory.eq.false")
-        .gte("created_at", cutoff)
-        .order("created_at", desc=True)
-        .limit(1)
-    )
-
-    if exclude_order_number:
-        query = query.neq("order_number", exclude_order_number)
-
-    result = query.execute()
-    if result.data and len(result.data) > 0:
-        return result.data[0]
-    return None
-
-
-def combine_into_order(
-    target_order: dict, new_order_data: dict, pdf_hash: str, file_name: str
-) -> dict:
-    """
-    Link a new PDF order to an existing same-customer picking list via group_id,
-    instead of merging into one row. Both orders stay independent, standalone
-    rows — the app's read side reconstructs the combined view (source_order
-    tagging, combine_meta, pallet_photos) live from group_id for display.
-
-    The target row is never mutated except possibly getting a group_id: no
-    item merging, no order_number concatenation, no status reset. A
-    completed/in-progress verification on the target is undisturbed by an
-    unrelated new order arriving for the same customer.
-    """
-    client = get_client()
-    group_id = target_order.get("group_id")
-
-    if not group_id:
-        group_result = client.table("order_groups").insert({"group_type": "general"}).execute()
-        group_id = group_result.data[0]["id"]
-        # Safe here: group_id is being set in this UPDATE statement itself,
-        # so auto_group_fedex_orders sees NEW.group_id IS NOT NULL and skips.
-        client.table("picking_lists").update({"group_id": group_id}).eq(
-            "id", target_order["id"]
-        ).execute()
-
-    # New order is its own independent row. group_id must be passed into
-    # create_order (set in the same INSERT), not applied via a follow-up
-    # update, for the same trigger-safety reason.
-    return create_order(new_order_data, pdf_hash, file_name, group_id=group_id)
+# The statuses in which an order still holds stock on a shelf: it has been
+# planned but not yet completed or cancelled, so its lines are reserved and
+# must not be handed to another order. Used by the location planner below.
+#
+# This list used to be COMBINABLE_STATUSES and had a second job: deciding which
+# order a new arrival could be auto-combined into, by customer, within 24h. That
+# door is gone (9 sep 2026) — the watcher does not decide that two orders are
+# one shipment. PickD does, with a person confirming. See `combine` in the app.
+STOCK_HOLDING_STATUSES = [
+    "active",
+    "ready_to_double_check",
+    "needs_correction",
+    "double_checking",
+]
 
 
 _VARIANT_BASE_RE = re.compile(r"^(\d{6}[A-Z]{2})[A-Z]?$")
@@ -700,7 +645,7 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         active_lists = (
             client.table("picking_lists")
             .select("items")
-            .in_("status", COMBINABLE_STATUSES)
+            .in_("status", STOCK_HOLDING_STATUSES)
             .execute()
         )
         for pl in active_lists.data or []:

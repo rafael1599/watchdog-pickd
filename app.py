@@ -676,11 +676,11 @@ def send(oid: int):
 
         with _lock:
             entry["result"] = result
+            # Copiado de door.SENT_STATUSES; si cambia allá, cambiar acá.
             entry["sent"] = result["status"] in (
                 "created",
                 "appended",
                 "reopened",
-                "combined",
                 "duplicate",
             )
         if result["status"] == "waiting_locked":

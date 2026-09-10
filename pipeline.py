@@ -17,14 +17,11 @@ from parser import parse_order
 from supabase_client import (
     append_to_order,
     check_duplicate,
-    combine_into_order,
     create_order,
-    find_combinable_order_by_customer,
     find_existing_order,
     get_client,
     get_new_items_delta,
     reopen_completed_order,
-    resolve_customer,
 )
 
 log = logging.getLogger("pickd-pipeline")
@@ -158,7 +155,6 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
 
     result = None
     status = None  # action taken
-    combined_with = None  # order_number this one was grouped with, if any
 
     # 3. Existing order by number → delta append / reopen (self-healing re-send)
     if order_number:
@@ -192,8 +188,7 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
                 status = "reopened"
             elif existing.get("is_waiting_inventory"):
                 # Waiting orders are PARKED: a re-send with new SKUs must never
-                # mutate them automatically — same operator rule as the customer
-                # auto-combine exclusion. Adding to one is a manual action in
+                # mutate them automatically. Adding to one is a manual action in
                 # PickD (unmark waiting / edit the order), then re-send.
                 skus = ", ".join(str(i.get("sku") or i.get("raw_sku") or "?") for i in delta_items)
                 return _result(
@@ -240,29 +235,9 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
             message=f"Identical content already processed on {dup_date}.",
         )
 
-    # 4. Auto-combine by customer
-    if result is None and order_data.get("customer_name"):
-        client = get_client()
-        addr = order_data.get("shipping") or {}
-        customer_id = resolve_customer(
-            client,
-            order_data["customer_name"],
-            street=addr.get("street"),
-            city=addr.get("city"),
-            state=addr.get("state"),
-            zip_code=addr.get("zip_code"),
-            account=order_data.get("as400_account"),
-        )
-        if customer_id:
-            combinable = find_combinable_order_by_customer(
-                customer_id, exclude_order_number=order_number
-            )
-            if combinable:
-                result = combine_into_order(combinable, order_data, pdf_hash, source_name)
-                status = "combined"
-                combined_with = combinable.get("order_number")
-
-    # 5. Fallback: create new
+    # 4. Create it. The watcher does not decide that two orders of the same
+    #    customer are one shipment — PickD does, with a person confirming.
+    #    (create_order resolves the customer itself, so nothing is lost here.)
     if result is None:
         result = create_order(order_data, pdf_hash, source_name)
         status = "created"
@@ -283,11 +258,6 @@ def process_order_text(text: str, source_name: str = "as400_capture") -> dict:
         ).execute()
 
     message = f"Order #{result.get('order_number')} ({len(updated_items)} items)."
-    if combined_with:
-        message = (
-            f"Order #{result.get('order_number')} ({len(updated_items)} items), "
-            f"grouped with #{combined_with}."
-        )
 
     return _result(
         status,

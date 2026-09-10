@@ -2,7 +2,7 @@
 A re-send (same order number) with NEW SKUs must never auto-append into an
 order parked WAITING FOR INVENTORY (is_waiting_inventory = true): waiting
 orders are off-limits for every automatic write, same operator rule as the
-customer auto-combine exclusion. The pipeline returns status="waiting_locked"
+orders the watcher must not touch on its own. The pipeline returns status="waiting_locked"
 without writing anything, and /api/orders/<id>/send surfaces it as a 409 so
 the card stays pending. DB calls are mocked.
 """

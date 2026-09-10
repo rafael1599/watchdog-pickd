@@ -147,7 +147,7 @@ Marcados por quién los resuelve y prioridad.
 
 ### Pendientes — FUERA de este repo (PickD web app + esquema Supabase)
 - [ ] **Reserva diferida a "Start Picking"**: hoy reservar = asignar ubicación al importar,
-      y `COMBINABLE_STATUSES` incluye `ready_to_double_check` (reserva al importar).
+      y `STOCK_HOLDING_STATUSES` incluye `ready_to_double_check` (reserva al importar).
       Requisito nuevo: no reservar hasta presionar Start Picking, y **re-validar/re-asignar
       stock y ubicación en ese momento** (lo calculado al enviar queda stale).
 - [ ] Estado inicial nuevo (ej. `available`) y expiración/archivado de órdenes no iniciadas.

@@ -219,7 +219,7 @@ def test_a_missing_table_is_said_once_not_walked_across_the_whole_cache(monkeypa
 # ── what a pipeline answer means ─────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("status", ["created", "appended", "reopened", "combined", "duplicate"])
+@pytest.mark.parametrize("status", ["created", "appended", "reopened", "duplicate"])
 def test_every_way_of_being_on_the_board_is_sent(status):
     # `duplicate` included: the order is already there, which is the point.
     assert outcome_of({"status": status}) == ("sent", None)

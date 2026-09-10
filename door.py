@@ -290,7 +290,7 @@ def reconcile(client, *, now=None, preview_fn=None, bike_skus=None) -> dict:
 
 # ── the requests ─────────────────────────────────────────────────────────────
 
-SENT_STATUSES = ("created", "appended", "reopened", "combined", "duplicate")
+SENT_STATUSES = ("created", "appended", "reopened", "duplicate")
 
 
 def outcome_of(result: dict) -> tuple[str, str | None]:

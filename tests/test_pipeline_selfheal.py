@@ -80,15 +80,13 @@ def test_resend_with_no_new_skus_is_duplicate():
 
 def test_duplicate_content_without_existing_order_is_not_recreated():
     # Content seen before but the order no longer exists → report duplicate,
-    # never silently recreate or combine it.
+    # never silently recreate it.
     with (
         patch("pipeline.check_duplicate", return_value=DUP_LOG),
         patch("pipeline.find_existing_order", return_value=None),
         patch("pipeline.create_order") as mock_create,
-        patch("pipeline.combine_into_order") as mock_combine,
     ):
         result = pipeline.process_order_text(CAPTURE)
 
     assert result["status"] == "duplicate"
     mock_create.assert_not_called()
-    mock_combine.assert_not_called()

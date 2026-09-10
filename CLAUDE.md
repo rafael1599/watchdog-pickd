@@ -2,11 +2,21 @@
 
 Daemon que monitorea una carpeta (`~/send-to-pickd/`) por archivos PDF de ordenes de compra, extrae el texto con pdfplumber, parsea los datos (numero de orden, cliente, items/SKUs), y los inserta en Supabase como picking lists para la app web de PickD.
 
+> **El watcher no combina órdenes (9 sep 2026).** Tenía un auto-combine por cliente en ventana de
+> 24 h (`find_combinable_order_by_customer` + `combine_into_order`, paso 4 del pipeline) que metía la
+> orden nueva en el `group_id` de otra del mismo cliente — incluida una en `double_checking`, o sea
+> una que alguien estaba verificando en ese momento. PickD tuvo el mismo agujero por su lado
+> (`auto_group_fedex_orders`, bug-023: #881394 se completó a los 5 segundos de nacer, sin una sola
+> línea verificada) y allá se cerró con `group_is_held`. Acá se quitó entero, que era lo que
+> correspondía: decidir que dos órdenes son un solo envío es una decisión de negocio, y la toma una
+> persona en PickD con el botón Combine. `STOCK_HOLDING_STATUSES` es lo único que sobrevive de ese
+> código, con su nombre real: los estados en los que una orden todavía reserva stock.
+
 ## Funcionalidades principales
 
 - Extraccion de texto de PDFs (pdfplumber)
 - Deteccion de duplicados via hash SHA-256
-- Creacion, append, reopen y combinacion de ordenes
+- Creacion, append y reopen de ordenes (**combinar NO**: es decisión de PickD, con una persona confirmando)
 - Resolucion de SKUs contra inventario (con fuzzy matching)
 - Asignacion automatica de ubicaciones (RETURN TO STOCK antes que nada; luego PALLET > LINE > TOWER)
 - Auto-start via launchd (macOS)
@@ -184,7 +194,7 @@ orden → dirección). Es idempotente: una segunda pasada no toca nada.
 | `extractor.py` | Extraccion de texto y hash de PDFs |
 | `parser.py` | Parseo de texto a datos estructurados (orden, cliente, items) |
 | `supabase_client.py` | Operaciones contra Supabase (CRUD picking lists, clientes, inventario) |
-| `pipeline.py` | Texto de orden → Supabase (create/append/reopen/combine); lo usan watcher y app |
+| `pipeline.py` | Texto de orden → Supabase (create/append/reopen); lo usan watcher y app |
 | `migrations.py` | DDL idempotente que el watcher necesita (`ADD COLUMN IF NOT EXISTS`) |
 | `maintenance.py` | Acciones de mantenimiento del panel ⋯ → Maintenance (registro `ACTIONS`, dry-run/apply, un lock) |
 | `scripts/backfill_account_numbers.py` | CLI de la acción "Backfill AS400 accounts" (la lógica está en `maintenance.py`) |
