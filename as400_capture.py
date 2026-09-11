@@ -982,6 +982,21 @@ def return_to_order_search(driver, step_wait: float = 0.6, read_fn=None) -> str:
     )
 
 
+def return_to_search(driver, step_wait: float = 0.6) -> None:
+    """Cmd7 from a stock detail lands back on the Stock Inquiry SEARCH form.
+
+    Rafael, 11 sep 2026: "cmd7 regresa a la pantalla de busqueda, viene vacia".
+    Blank is what makes this safe to do blind — nothing to clear, so the next
+    SKU cannot concatenate onto the last one.
+
+    One key and no read on purpose. The next lookup's own result is the check,
+    and a wrong guess costs that lookup and nothing else: `capture_stock_inquiry`
+    refuses to mark a SKU unknown while it is navigating optimistically.
+    """
+    driver.key("f7")
+    time.sleep(step_wait)
+
+
 def return_to_menu(driver, step_wait: float = 0.6, read_fn=None) -> str:
     """Put the terminal on the SALESN menu, and PROVE it by reading.
 
@@ -1297,6 +1312,7 @@ def capture_stock_inquiry(
     page_wait=None,
     step_wait: float = 0.6,
     read_fn=None,
+    on_search_screen: bool = False,
 ) -> str:
     """Drive the terminal to STOCK INQUIRY for `sku` and return the screen text.
 
@@ -1327,6 +1343,14 @@ def capture_stock_inquiry(
         # filter, so no hand-kept list of exceptions can go stale.
         raise StockSkuNotFound(f"{sku!r} isn't an AS400 stock number — nothing to look up.")
     digits, colour = fields
+
+    # `on_search_screen`: the caller knows we are already on the search form,
+    # because the last lookup ended with Cmd7 and Cmd7 lands there. No read, no
+    # menu, no option 2 — type the next SKU where we stand (Rafael, 11 sep 2026:
+    # "que asuma que sigue en la misma pagina de busqueda"). The cost of being
+    # wrong is handled below, where it would otherwise be expensive.
+    if on_search_screen:
+        return _type_stock_lookup(sku, driver, digits, colour, page_wait, read, optimistic=True)
 
     # Verify before driving, exactly like a capture: never type into a dead or
     # unrecognized screen.
@@ -1367,8 +1391,15 @@ def capture_stock_inquiry(
             "Option 2 didn't open Stock Inquiry — not typing a SKU into an unknown screen."
         )
 
-    # The lookup itself. A SKU with no colour suffix takes a blank TAB — that is
-    # the 126 bikes shaped like `01-0169`, and they are in the queue, not out.
+    return _type_stock_lookup(sku, driver, digits, colour, page_wait, read, optimistic=False)
+
+
+def _type_stock_lookup(sku, driver, digits, colour, page_wait, read, *, optimistic: bool) -> str:
+    """Type one SKU into the Stock Inquiry search form and read what comes back.
+
+    A SKU with no colour suffix takes a blank TAB — that is the 126 bikes shaped
+    like `01-0169`, and they are in the queue, not out.
+    """
     driver.type_text(digits)
     driver.key("tab")
     if colour:
@@ -1382,6 +1413,17 @@ def capture_stock_inquiry(
 
     screen = read()
     if classify_screen(screen) != STATE_STOCK_INQUIRY:
+        if optimistic:
+            # The trap this whole branch has to avoid. Verified, landing
+            # nowhere means AS400 has no such stock number, and the caller
+            # marks it so the queue stops asking (R7) — FOR EVER. Optimistic,
+            # it much more likely means we were not on the search form after
+            # all, and reporting it as "AS400 doesn't have this" would poison
+            # the queue one good SKU at a time, silently. So: a navigation
+            # problem, which costs this lookup and nothing else.
+            raise StockScreenMismatch(
+                f"Assumed the search form for {sku} and landed elsewhere — not marking it."
+            )
         # We were on the stock program a moment ago, so this is the SKU's own
         # answer: whatever AS400 shows for a stock number it doesn't have. Nobody
         # has seen that screen — F2 logs it so it can be mapped.

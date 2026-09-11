@@ -867,9 +867,35 @@ def test_the_run_goes_all_the_way_home_once_at_the_end(monkeypatch):
         idle_fn=lambda: 1e9,
         kick_fn=lambda: False,
         update_pending_fn=lambda: False,
-        step_fn=lambda d, r, home="order_search": hops.append(home) or {"action": "read"},
+        step_fn=lambda d, r, home="order_search", **kw: (
+            hops.append((home, kw.get("on_search_screen"))) or {"action": "read"}
+        ),
         home_fn=lambda _d: home.append("order_search"),
     )
     assert out["read"] == 3
-    assert hops == ["menu", "menu", "menu"]  # never the long way between
-    assert home == ["order_search"]  # and exactly once at the end
+    # Never out to the menu and back between lookups: Cmd7 to the search form,
+    # and from the second one on it does not even look before typing.
+    assert hops == [("search", False), ("search", True), ("search", True)]
+    assert home == ["order_search"]  # the long way home, exactly once, at the end
+
+
+def test_one_bad_lookup_drops_it_back_to_the_verified_way(monkeypatch):
+    # A mismatch means we do not know what is on the screen any more, so the
+    # next SKU must not be typed blind.
+    _queue(monkeypatch, 3)
+    hops = []
+    recovered = []
+    actions = iter(["read", "mismatch", "read"])
+    sku_enrichment.run_until_disturbed(
+        None,
+        idle_fn=lambda: 1e9,
+        kick_fn=lambda: False,
+        update_pending_fn=lambda: False,
+        step_fn=lambda d, r, home="order_search", **kw: (
+            hops.append(kw.get("on_search_screen")) or {"action": next(actions)}
+        ),
+        home_fn=lambda _d: recovered.append(1),
+    )
+    # 1st verified, 2nd optimistic (the 1st read fine), 3rd verified again.
+    assert hops == [False, True, False]
+    assert len(recovered) == 2  # once to recover, once at the end

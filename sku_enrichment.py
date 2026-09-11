@@ -40,6 +40,7 @@ from as400_capture import (
     capture_stock_inquiry,
     return_to_menu,
     return_to_order_search,
+    return_to_search,
 )
 from parser import parse_stock_inquiry
 
@@ -328,6 +329,7 @@ def run_sku_step(
     parse_fn=parse_stock_inquiry,
     return_fn=None,
     home: str = "order_search",
+    on_search_screen: bool = False,
 ) -> dict:
     """Look one SKU up on AS400 and report what it found. ONE SKU, no burst.
 
@@ -344,12 +346,17 @@ def run_sku_step(
     # search and F7 to leave it again. The full trip home runs once, when the
     # run ends — the caller owns that.
     if return_fn is None:
-        return_fn = return_to_menu if home == "menu" else return_to_order_search
+        return_fn = {
+            "search": return_to_search,
+            "menu": return_to_menu,
+        }.get(home, return_to_order_search)
     sku = (row.get("sku") or "").strip().upper()
     started = time.monotonic()
 
     try:
-        result = _look_up(driver, row, sku, started, capture_fn, parse_fn)
+        result = _look_up(
+            driver, row, sku, started, capture_fn, parse_fn, on_search_screen=on_search_screen
+        )
     finally:
         # Part of the step, not a cleanup, and it runs whether the lookup worked
         # or blew up: a step that leaves the terminal on a stock screen costs the
@@ -365,11 +372,15 @@ def run_sku_step(
     return result
 
 
-def _look_up(driver, row, sku, started, capture_fn, parse_fn) -> dict:
+def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_screen=False) -> dict:
     """The lookup itself. Split out so the return trip above owns the `finally`
     and every path reports through one dict."""
     try:
-        screen = capture_fn(sku, driver)
+        screen = (
+            capture_fn(sku, driver, on_search_screen=True)
+            if on_search_screen
+            else capture_fn(sku, driver)
+        )
         parsed = parse_fn(screen)
 
         # The identity guard. If the screen is not showing the SKU we asked for,
@@ -601,6 +612,7 @@ def run_until_disturbed(
 
     started = time.monotonic()
     grace = grace_sec() if grace is None else grace
+    on_search = False  # the first lookup navigates the verified way
     out = {"read": 0, "unknown": 0, "failed": 0, "stopped": None}
 
     while True:
@@ -627,7 +639,12 @@ def run_until_disturbed(
             out["stopped"] = "the queue is empty"
             break
 
-        res = step_fn(driver, row, home="menu")
+        # Optimistic from the second lookup on: the last one ended with Cmd7,
+        # which lands on the search form with the fields blank, so the next SKU
+        # is typed where we stand — no read, no menu, no option 2. The first one
+        # of a run still navigates the verified way, because we do not know
+        # where the terminal was left.
+        res = step_fn(driver, row, home="search", on_search_screen=on_search)
         action = res.get("action")
         if action in ("read", "written"):
             out["read"] += 1
@@ -638,6 +655,21 @@ def run_until_disturbed(
         if action == "unavailable":
             out["stopped"] = "the AS400 is not available"
             break
+
+        # Stay optimistic while it keeps working. The moment one comes back
+        # anything other than a clean read, we do not know what is on the
+        # screen any more: walk the verified way home and verify the next one.
+        if action in ("read", "written"):
+            on_search = True
+        else:
+            on_search = False
+            try:
+                home_fn(driver)
+            except Exception as e:  # noqa: BLE001
+                log.warning("catalogue run: could not recover after %s (%s)", action, e)
+                out["stopped"] = f"lost the terminal after a {action}"
+                break
+
         if note:
             note(out)
 
