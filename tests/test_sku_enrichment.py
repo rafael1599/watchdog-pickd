@@ -633,52 +633,6 @@ def test_the_whole_screen_is_kept_not_just_the_name():
     assert snap["model_year"] == "2025"
 
 
-def test_the_batch_reports_both_sides_so_the_comparison_has_something_to_read(monkeypatch):
-    import sku_enrichment
-
-    queue = iter(
-        [
-            {"sku": "03-3933BK", "model": "CODA S2 L16", "weight_verified": True},
-            {"sku": "03-3492BL", "model": None, "weight_verified": True},
-        ]
-    )
-    monkeypatch.setattr(sku_enrichment, "next_sku", lambda *a, **k: next(queue, None))
-    monkeypatch.setattr(
-        sku_enrichment,
-        "run_sku_step",
-        lambda d, row, **k: {
-            "action": "read",
-            "sku": row["sku"],
-            "returned": True,
-            "parsed": {"description": "CODA S2 L16 2026 GLOSS BLACK", "on_hand": {"NJ": 56}},
-        },
-    )
-    out = sku_enrichment.run_catalog_batch(object(), count=5)
-    assert out["read"] == 2
-    assert out["stopped"] == "queue empty"
-    # Both sides on every row: that IS the comparison.
-    assert out["rows"][0]["as400"] == "CODA S2 L16 2026 GLOSS BLACK"
-    assert out["rows"][0]["pickd"] == "CODA S2 L16"
-    assert out["rows"][0]["on_hand"] == {"NJ": 56}
-
-
-def test_the_batch_stops_when_the_terminal_does_not_come_home(monkeypatch):
-    import sku_enrichment
-
-    monkeypatch.setattr(sku_enrichment, "next_sku", lambda *a, **k: {"sku": "03-3492BL"})
-    monkeypatch.setattr(
-        sku_enrichment,
-        "run_sku_step",
-        lambda d, row, **k: {"action": "read", "sku": row["sku"], "returned": False},
-    )
-    out = sku_enrichment.run_catalog_batch(object(), count=20)
-    assert out["read"] == 1  # one attempt, then it stops touching the terminal
-    assert "order search" in out["stopped"]
-
-
-# ── never lazy: the work replaces the sleep ──────────────────────────────────
-
-
 def test_the_gap_reports_how_long_it_actually_worked(monkeypatch):
     # The loop needs the number to decide whether the wait already happened.
     import auto_scanner
@@ -730,7 +684,7 @@ def test_the_catalogue_stands_down_for_a_pending_update(monkeypatch):
 # que yo mueva algo… si yo quiero órdenes regreso y presiono get orders now".
 
 
-def _step_ok(_driver, row):
+def _step_ok(_driver, row, **_kw):
     return {"action": "read", "sku": row.get("sku")}
 
 
@@ -743,6 +697,7 @@ def test_it_keeps_going_while_nobody_touches_the_mac(monkeypatch):
     _queue(monkeypatch, 5)
     out = sku_enrichment.run_until_disturbed(
         None,
+        home_fn=lambda _d: None,
         idle_fn=lambda: 1e9,
         kick_fn=lambda: False,
         update_pending_fn=lambda: False,
@@ -758,6 +713,7 @@ def test_zero_idle_at_the_start_does_not_stop_it_before_the_first_lookup(monkeyp
     _queue(monkeypatch, 3)
     out = sku_enrichment.run_until_disturbed(
         None,
+        home_fn=lambda _d: None,
         idle_fn=lambda: 1e9,
         kick_fn=lambda: False,
         update_pending_fn=lambda: False,
@@ -777,7 +733,13 @@ def test_a_touch_after_it_started_stops_it(monkeypatch):
         return 1e9 if calls["n"] <= 2 else 0.0
 
     out = sku_enrichment.run_until_disturbed(
-        None, idle_fn=idle, kick_fn=lambda: False, update_pending_fn=lambda: False, step_fn=_step_ok
+        None,
+        home_fn=lambda _d: None,
+        idle_fn=idle,
+        kick_fn=lambda: False,
+        update_pending_fn=lambda: False,
+        step_fn=_step_ok,
+        grace=0,
     )
     assert out["read"] == 2
     assert out["stopped"] == "the operator is back"
@@ -787,12 +749,13 @@ def test_get_orders_now_takes_the_terminal_back(monkeypatch):
     _queue(monkeypatch, 10)
     kicked = {"v": False}
 
-    def step(driver, row):
+    def step(driver, row, **_kw):
         kicked["v"] = True  # the operator presses it while a lookup is running
         return _step_ok(driver, row)
 
     out = sku_enrichment.run_until_disturbed(
         None,
+        home_fn=lambda _d: None,
         idle_fn=lambda: 1e9,
         kick_fn=lambda: kicked["v"],
         update_pending_fn=lambda: False,
@@ -808,6 +771,7 @@ def test_it_yields_to_a_pending_deploy(monkeypatch):
     _queue(monkeypatch, 10)
     out = sku_enrichment.run_until_disturbed(
         None,
+        home_fn=lambda _d: None,
         idle_fn=lambda: 1e9,
         kick_fn=lambda: False,
         update_pending_fn=lambda: True,
@@ -821,9 +785,91 @@ def test_it_stops_when_the_as400_goes_away(monkeypatch):
     _queue(monkeypatch, 10)
     out = sku_enrichment.run_until_disturbed(
         None,
+        home_fn=lambda _d: None,
         idle_fn=lambda: 1e9,
         kick_fn=lambda: False,
         update_pending_fn=lambda: False,
-        step_fn=lambda d, r: {"action": "unavailable"},
+        step_fn=lambda d, r, **_kw: {"action": "unavailable"},
     )
     assert out["stopped"] == "the AS400 is not available"
+
+
+def test_the_grace_window_lets_the_operator_walk_away(monkeypatch):
+    # Pressing the button IS being at the Mac: idle is zero at that moment. With
+    # no grace the very next check reads the hand that just clicked and stops,
+    # so the run could never be watched starting — the same trap as having to
+    # type on Bay 2 to learn why Bay 2 is idle.
+    _queue(monkeypatch, 4)
+    out = sku_enrichment.run_until_disturbed(
+        None,
+        home_fn=lambda _d: None,
+        idle_fn=lambda: 0.0,  # a hand on the mouse the whole time
+        kick_fn=lambda: False,
+        update_pending_fn=lambda: False,
+        step_fn=_step_ok,
+        grace=3600,  # …but we are still inside the grace
+    )
+    assert out["read"] == 4
+    assert out["stopped"] == "the queue is empty"
+
+
+def test_without_the_grace_a_hand_on_the_mouse_stops_it_at_once(monkeypatch):
+    _queue(monkeypatch, 4)
+    out = sku_enrichment.run_until_disturbed(
+        None,
+        home_fn=lambda _d: None,
+        idle_fn=lambda: 0.0,
+        kick_fn=lambda: False,
+        update_pending_fn=lambda: False,
+        step_fn=_step_ok,
+        grace=0,
+    )
+    assert out["read"] == 0
+    assert out["stopped"] == "the operator is back"
+
+
+# ── the short hop between lookups ────────────────────────────────────────────
+#
+# Rafael, 11 sep 2026: "no quiero volver a ver que se sale de la busqueda de sku
+# a proposito en vez de seguir con el siguiente en la lista".
+
+
+def test_between_lookups_it_stops_at_the_menu_not_the_order_search():
+    # Going home between two SKUs means typing 3 to enter the order search and
+    # F7 to leave it again — out of the menu to walk straight back in.
+    used = {}
+
+    def capture(sku, driver):
+        return "STOCK INQUIRY"
+
+    def parse(screen):
+        return {"description": "X", "on_hand": {"NJ": 1}}
+
+    for home, expected in (("menu", "menu"), ("order_search", "order_search")):
+        used.clear()
+        run_sku_step(
+            object(),
+            {"sku": "03-3933BK"},
+            capture_fn=capture,
+            parse_fn=parse,
+            return_fn=lambda _d, h=home: used.setdefault("went", h),
+            home=home,
+        )
+        assert used["went"] == expected
+
+
+def test_the_run_goes_all_the_way_home_once_at_the_end(monkeypatch):
+    _queue(monkeypatch, 3)
+    hops = []
+    home = []
+    out = sku_enrichment.run_until_disturbed(
+        None,
+        idle_fn=lambda: 1e9,
+        kick_fn=lambda: False,
+        update_pending_fn=lambda: False,
+        step_fn=lambda d, r, home="order_search": hops.append(home) or {"action": "read"},
+        home_fn=lambda _d: home.append("order_search"),
+    )
+    assert out["read"] == 3
+    assert hops == ["menu", "menu", "menu"]  # never the long way between
+    assert home == ["order_search"]  # and exactly once at the end

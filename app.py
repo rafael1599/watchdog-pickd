@@ -766,36 +766,15 @@ def catalog_scan():
     The gap loop fills the catalogue at its own pace — 745 bikes take days. This
     is the operator saying "I need to decide what to work on this afternoon".
 
-    Synchronous, like the maintenance panel: a batch of ten is about a minute,
-    and the button stays disabled while it runs. It takes `capture_lock` without
-    blocking, so it can never fight a capture that is already under way.
-    """
-    body = request.get_json(silent=True) or {}
-    # `count` still bounds the OLD synchronous batch, kept for anything that
-    # asks for a fixed number. Without it the run goes until the operator comes
-    # back (Rafael, 10 sep 2026: "no se pare hasta que yo mueva algo").
-    count = body.get("count")
+    One path only, and it is open-ended: it reads until somebody touches the
+    Mac. The bounded batch that used to live here is gone — a count was the
+    reason it stopped after one lap, and leaving it reachable meant the button
+    could fall back into it by sending one (Rafael, 11 sep 2026: "que ni por
+    error se vaya ahí").
 
-    if count:
-        count = max(1, min(int(count), 50))
-        if not capture_lock.acquire(blocking=False):
-            return jsonify(
-                {"error": "A capture is running right now — try again in a moment."}
-            ), 409
-        try:
-            driver = MochaDriver()
-            try:
-                bootstrap_session(driver)
-            except Exception as e:  # noqa: BLE001 — the operator needs the reason, not a trace
-                return jsonify({"error": f"AS400 isn't ready: {e}"}), 409
-            result = sku_enrichment.run_catalog_batch(driver, count=count)
-            auto_scanner.note_as400(True)
-            return jsonify(result)
-        except Exception as e:  # noqa: BLE001
-            logging.exception("catalog scan failed")
-            return jsonify({"error": str(e)}), 500
-        finally:
-            capture_lock.release()
+    The run owns `capture_lock` on its own thread and releases it in a finally,
+    so it can never fight a capture that is already under way.
+    """
 
     # The open-ended run. It cannot be synchronous: it is meant to outlast this
     # request by hours, so the request only starts it and says so.
@@ -1027,7 +1006,7 @@ INDEX_HTML = """
         <button onclick="toggleMenu(event, 'topmenu')" title="More">⋯</button>
         <div class="menu" id="topmenu" style="display:none;">
           <button onclick="doScanNow()">▶ Get orders now</button>
-          <button onclick="doCatalogScan()">📇 Compare SKUs with AS400</button>
+          <button onclick="doCatalogScan()" title="Reads the AS400 catalogue until somebody touches the Mac. Get orders now takes the terminal back.">📇 Compare SKUs with AS400</button>
           <button onclick="doStatus()">Check AS400</button>
           <button onclick="doUpdate()">⟳ Update app</button>
           <button onclick="openMaintenance()">🛠 Maintenance</button>
@@ -1496,24 +1475,16 @@ const STATE_LABELS = {
 };
 
 async function doCatalogScan() {
-  // Reads a batch of SKUs off AS400 and reports what it found, so the
-  // comparison has something to look at today instead of in a week.
-  const n = prompt('How many SKUs to read from AS400 now? (1-50)', '10');
-  if (!n) return;
-  msg('Reading ' + n + ' SKUs off AS400 — this holds the terminal for a minute…', 'warn');
+  // Starts the open-ended run and returns immediately: it is meant to last
+  // until somebody touches the Mac, which no HTTP request can wait for. The
+  // prompt that used to ask "how many?" is gone — a number was the reason it
+  // stopped after one lap (Rafael, 10 sep 2026).
+  msg('Reading the catalogue until you touch the Mac…', 'warn');
   try {
-    const r = await fetch('/api/catalog-scan', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({count: parseInt(n, 10)})
-    });
+    const r = await fetch('/api/catalog-scan', {method: 'POST'});
     const d = await r.json();
     if (!r.ok) { msg(d.error || 'Catalogue scan failed', 'err'); return; }
-    const bits = [d.read + ' read'];
-    if (d.unknown) bits.push(d.unknown + " AS400 doesn't have");
-    if (d.failed) bits.push(d.failed + ' failed');
-    if (d.stopped) bits.push('stopped: ' + d.stopped);
-    msg(bits.join(' · '), d.read ? 'ok' : 'warn');
-    if (d.rows && d.rows.length) console.table(d.rows);
+    msg(d.message || 'Catalogue run started.', 'ok');
   } catch (e) {
     msg('Catalogue scan failed: ' + e, 'err');
   }

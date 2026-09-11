@@ -38,6 +38,7 @@ from as400_capture import (
     StockScreenMismatch,
     StockSkuNotFound,
     capture_stock_inquiry,
+    return_to_menu,
     return_to_order_search,
 )
 from parser import parse_stock_inquiry
@@ -325,7 +326,8 @@ def run_sku_step(
     *,
     capture_fn=capture_stock_inquiry,
     parse_fn=parse_stock_inquiry,
-    return_fn=return_to_order_search,
+    return_fn=None,
+    home: str = "order_search",
 ) -> dict:
     """Look one SKU up on AS400 and report what it found. ONE SKU, no burst.
 
@@ -337,6 +339,12 @@ def run_sku_step(
     on a stock screen costs the scanner its next order — and that is the whole
     budget this feature is spending.
     """
+    # `home="menu"` between two lookups: the menu is a valid starting point for
+    # the next capture, so stopping there skips typing 3 to enter the order
+    # search and F7 to leave it again. The full trip home runs once, when the
+    # run ends — the caller owns that.
+    if return_fn is None:
+        return_fn = return_to_menu if home == "menu" else return_to_order_search
     sku = (row.get("sku") or "").strip().upper()
     started = time.monotonic()
 
@@ -350,7 +358,7 @@ def run_sku_step(
             return_fn(driver)
             returned = True
         except Exception as e:
-            log.warning("SKU %s: could not get back to the order search (%s)", sku, e)
+            log.warning("SKU %s: could not get back to %s (%s)", sku, home, e)
             returned = False
 
     result["returned"] = returned
@@ -534,6 +542,18 @@ def catalogue_run_state() -> dict:
     return {"active": catalogue_run_active(), "last": dict(_run_last)}
 
 
+def grace_sec() -> float:
+    """How long after the click the operator's hands are ignored.
+
+    Without it the run is unusable in the way it is meant to be used: you press
+    the button and you are, by definition, AT the Mac — so the very next check
+    reads your hand on the mouse and stops. You would never see it work, which
+    is the same trap as having to type on Bay 2 to find out why Bay 2 is idle.
+    Two minutes is enough to stand up and leave.
+    """
+    return max(0.0, float(os.getenv("SKU_ENRICH_GRACE_SEC", "120")))
+
+
 def run_until_disturbed(
     driver,
     *,
@@ -543,6 +563,8 @@ def run_until_disturbed(
     stop_fn=None,
     note=None,
     step_fn=None,
+    grace=None,
+    home_fn=None,
 ) -> dict:
     """Read SKUs back to back until something asks for the terminal. Pure-ish.
 
@@ -553,9 +575,9 @@ def run_until_disturbed(
 
     The idle gate cannot be the usual "idle < 60": the operator just clicked a
     button, so idle is ZERO at the start and the run would stop before its first
-    lookup. What matters is whether anybody touched the Mac AFTER we began —
-    and if nobody has, `system_idle_seconds()` grows at least as fast as our own
-    elapsed time. When it is smaller than that, the machine was touched.
+    lookup. What matters is whether anybody touched the Mac after the grace
+    window ran out — and if nobody has, `system_idle_seconds()` grows at least
+    as fast as our own clock. Anything smaller is a hand. See `grace_sec`.
 
     It stops for three other things, and each is somebody with a better claim:
       - "get orders now": they asked for orders, not for the catalogue.
@@ -571,20 +593,26 @@ def run_until_disturbed(
     kick_fn = kick_fn or _kick.is_set
     stop_fn = stop_fn or (lambda: False)
     step_fn = step_fn or run_sku_step
+    home_fn = home_fn or return_to_order_search
     if update_pending_fn is None:
         import auto_update
 
         update_pending_fn = auto_update.update_pending.is_set
 
     started = time.monotonic()
+    grace = grace_sec() if grace is None else grace
     out = {"read": 0, "unknown": 0, "failed": 0, "stopped": None}
 
     while True:
         if stop_fn():
             out["stopped"] = "asked to stop"
             break
-        # Touched since we began? Idle grows with us when nobody is there.
-        if idle_fn() < time.monotonic() - started:
+        # Touched since the grace ran out? When nobody is there, idle grows at
+        # least as fast as our own clock, so anything smaller than the time
+        # since (start + grace) is a hand. Movement DURING the grace is the
+        # operator walking away and does not count.
+        elapsed = time.monotonic() - started
+        if elapsed > grace and idle_fn() < elapsed - grace:
             out["stopped"] = "the operator is back"
             break
         if kick_fn():
@@ -599,7 +627,7 @@ def run_until_disturbed(
             out["stopped"] = "the queue is empty"
             break
 
-        res = step_fn(driver, row)
+        res = step_fn(driver, row, home="menu")
         action = res.get("action")
         if action in ("read", "written"):
             out["read"] += 1
@@ -613,58 +641,13 @@ def run_until_disturbed(
         if note:
             note(out)
 
-    return out
-
-
-def run_catalog_batch(driver, count: int = 10, budget_sec: float = 180.0) -> dict:
-    """Read `count` SKUs off AS400 right now. The operator's "compare" button.
-
-    The gap loop fills the catalogue at its own pace; this is for when somebody
-    wants the data TODAY in order to decide what to work on. It deliberately
-    does NOT check the idle gate: the person asking just clicked a button, so
-    waiting for the Mac to go quiet would mean waiting for them to walk away.
-
-    The caller owns `capture_lock` — driving Mocha from two places at once is
-    the one thing that has always been forbidden here.
-
-    Returns what it read, so the panel can show it without another round trip.
-    """
-    deadline = time.monotonic() + max(1.0, budget_sec)
-    out = {"read": 0, "unknown": 0, "failed": 0, "rows": [], "stopped": None}
-
-    for _ in range(max(1, count)):
-        if time.monotonic() >= deadline:
-            out["stopped"] = "budget"
-            break
-        row = next_sku()
-        if not row:
-            out["stopped"] = "queue empty"
-            break
-        res = run_sku_step(driver, row)
-        action = res.get("action")
-        if action in ("read", "written"):
-            out["read"] += 1
-            parsed = res.get("parsed") or {}
-            out["rows"].append(
-                {
-                    "sku": row.get("sku"),
-                    "as400": parsed.get("description"),
-                    "pickd": row.get("model"),
-                    "on_hand": parsed.get("on_hand"),
-                    "weight": parsed.get("weight_lbs"),
-                    "kind": parsed.get("kind"),
-                }
-            )
-        elif action == "unknown":
-            out["unknown"] += 1
-        else:
-            out["failed"] += 1
-
-        if not res.get("returned", True):
-            out["stopped"] = "the terminal didn't get back to the order search"
-            break
-        if action in ("unavailable", "error"):
-            out["stopped"] = f"AS400 {action}"
-            break
+    # One full trip home for the whole run, not one per lookup. A terminal left
+    # on a stock screen costs the scanner its next order, so this is not
+    # optional — it is just not needed thirty times in a row.
+    try:
+        home_fn(driver)
+    except Exception as e:  # noqa: BLE001
+        log.warning("catalogue run: could not get back to the order search (%s)", e)
+        out["stopped"] = f"{out['stopped']} (did not get home: {e})"
 
     return out

@@ -309,6 +309,7 @@ def _run_sku_gap() -> float:
     Wrapped whole: a side errand may not take the scanner down with it.
     """
     started = time.monotonic()
+    done = 0
     try:
         import auto_update
         import sku_enrichment
@@ -318,7 +319,6 @@ def _run_sku_gap() -> float:
             return 0.0
 
         deadline = started + sku_enrichment.gap_budget_sec()
-        done = 0
         for _ in range(sku_enrichment.max_per_gap()):
             if time.monotonic() >= deadline:
                 _note_gap("budget spent")
@@ -346,7 +346,11 @@ def _run_sku_gap() -> float:
                 _note_gap("the queue is empty")
                 log.info("auto-scan: the SKU queue is empty — nothing to look up")
                 return time.monotonic() - started
-            res = sku_enrichment.run_sku_step(_driver_for_sku_step(), row)
+            # home="menu": the next thing is another SKU, and the menu is a
+            # valid starting point for it. Going all the way back to the order
+            # search here means typing 3 to enter it and F7 to leave it again.
+            # The full trip home is the `finally` below, once per gap.
+            res = sku_enrichment.run_sku_step(_driver_for_sku_step(), row, home="menu")
             done += 1
             _note_gap("working", read=1 if res.get("action") in ("read", "written") else 0)
             if not res.get("returned", True):
@@ -359,6 +363,18 @@ def _run_sku_gap() -> float:
         log.info("auto-scan: SKU count cap reached after %d lookup(s)", done)
     except Exception:
         log.exception("auto-scan: SKU step crashed — the orders keep going")
+    finally:
+        # The full trip home, ONCE per gap. Each lookup only comes back to the
+        # menu (home="menu"), because the next one starts there — but the gap
+        # ends by handing the terminal back to the orders, and that is the
+        # screen the scanner expects to find.
+        if done:
+            try:
+                from as400_capture import return_to_order_search
+
+                return_to_order_search(_driver_for_sku_step())
+            except Exception as e:  # noqa: BLE001
+                log.warning("auto-scan: the terminal didn't get home after the gap (%s)", e)
     return time.monotonic() - started
 
 

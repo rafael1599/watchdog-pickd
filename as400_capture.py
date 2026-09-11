@@ -982,6 +982,41 @@ def return_to_order_search(driver, step_wait: float = 0.6, read_fn=None) -> str:
     )
 
 
+def return_to_menu(driver, step_wait: float = 0.6, read_fn=None) -> str:
+    """Put the terminal on the SALESN menu, and PROVE it by reading.
+
+    The short way home, for when the next thing is another SKU. Going all the
+    way back to the order search between two lookups means typing 3 to enter it
+    and F7 to leave it again — the terminal walks out of the menu to walk
+    straight back in (Rafael, 11 sep 2026: "no quiero volver a ver que se sale
+    de la búsqueda de sku a propósito en vez de seguir con el siguiente"). The
+    menu is a valid starting point for `capture_stock_inquiry`, so stopping here
+    skips both keys.
+
+    The FULL return to the order search still happens once, when the run ends:
+    a terminal left anywhere else costs the scanner its next order.
+    """
+    read = read_fn or driver.copy_screen
+    for _ in range(_unstick_tries()):
+        screen = read()
+        state = classify_screen(screen)
+        if state == STATE_DISCONNECTED:
+            raise AS400Disconnected("The AS400 dropped while returning to the menu.")
+        if state == STATE_MENU:
+            return screen
+        if _is_message_info_screen(screen):
+            raise AS400ManualLoginRequired(
+                "The AS400 is on the 'ADDITIONAL MESSAGE INFORMATION' screen, where no key "
+                "works. Close the session and log back in."
+            )
+        unstick_to_menu(driver, step_wait=step_wait)
+        time.sleep(step_wait)
+
+    raise AS400ManualLoginRequired(
+        f"Couldn't get back to the menu after {_unstick_tries()} tries of F6·F6·F7."
+    )
+
+
 def _advance_toward_order_screen(
     driver, state, login_steps, step_wait, allow_unstick=False
 ) -> bool:
