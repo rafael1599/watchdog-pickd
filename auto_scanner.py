@@ -40,6 +40,8 @@ import time
 
 import scanned_store
 from as400_capture import (
+    STATE_CUSTOMER_DISPLAY,
+    STATE_STOCK_INQUIRY,
     AS400Disconnected,
     AS400ManualLoginRequired,
     CaptureError,
@@ -48,6 +50,7 @@ from as400_capture import (
     OrderVoidSkip,
     bootstrap_session,
     capture_order,
+    classify_screen,
 )
 
 log = logging.getLogger("pickd-auto-scanner")
@@ -74,6 +77,16 @@ MAX_SKIP_CACHED_PER_STEP = int(os.getenv("SCAN_MAX_SKIP_CACHED", "500"))
 # it. Ten minutes is longer than any normal hiccup and far shorter than the 36
 # that went unnoticed on 2026-09-08.
 UNAVAILABLE_LOUD_SEC = float(os.getenv("SCAN_UNAVAILABLE_LOUD_SEC", "600"))
+# A screen the operator went to on purpose is not a stuck terminal, and the
+# difference matters: bootstrap_session unsticks with F6·F6·F7, which yanks
+# somebody out of what they were reading, and then retries five seconds later.
+# From the operator's seat that is the watcher stealing the terminal in a loop
+# (Rafael, 11 sep 2026: "cuando tomo control al watcher no le importa"). These
+# are screens a person navigates to; UNKNOWN, LOGIN and MESSAGE are not.
+OPERATOR_SCREENS = (STATE_CUSTOMER_DISPLAY, STATE_STOCK_INQUIRY)
+# How long the terminal is left alone once it looks like somebody is using it,
+# before assuming they walked away and forgot.
+OPERATOR_HOLD_SEC = float(os.getenv("SCAN_OPERATOR_HOLD_SEC", "600"))
 # Catalogue work long enough to count as "the wait already happened". Below this
 # there was nothing to do — an empty queue, the feature off, the operator on the
 # keyboard — and asking the AS400 for the same missing order every few seconds
@@ -402,6 +415,7 @@ def _loop() -> None:
     # How long the AS400 has been unreachable, and whether we've said so loudly.
     _unavailable_since = None
     _unavailable_shouted = False
+    _operator_since = None
     while not _stop.is_set():
         # Pause while the operator is actively using the computer, or while a manual
         # capture holds the lock — never fight the human for the keyboard. A manual
@@ -440,7 +454,35 @@ def _loop() -> None:
             if action != "unavailable":
                 _unavailable_since = None
                 _unavailable_shouted = False
+                _operator_since = None
             if action == "unavailable":
+                # Is somebody using it, or is it stuck? Unsticking a person's
+                # screen is how the watcher ends up taking the terminal back
+                # every few seconds; waiting out a real jam costs nothing but
+                # time. Ask the screen before reaching for F6·F6·F7.
+                parked = None
+                try:
+                    parked = classify_screen(driver.copy_screen())
+                except Exception:  # noqa: BLE001 — can't read it, treat as stuck
+                    parked = None
+                if parked in OPERATOR_SCREENS:
+                    if _operator_since is None:
+                        _operator_since = time.monotonic()
+                        log.info(
+                            "auto-scan: the operator has the terminal (%s) — standing down",
+                            parked,
+                        )
+                    held = time.monotonic() - _operator_since
+                    if held < OPERATOR_HOLD_SEC:
+                        _kick.clear()
+                        _interruptible_wait(IDLE_POLL_SEC)
+                        continue
+                    log.warning(
+                        "auto-scan: %s for %.0f min — taking the terminal back",
+                        parked,
+                        held / 60,
+                    )
+                _operator_since = None
                 # Try to (re)connect; if it works, retry promptly next iteration.
                 try:
                     bootstrap_session(driver)

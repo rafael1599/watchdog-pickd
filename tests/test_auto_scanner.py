@@ -267,3 +267,30 @@ def test_step_void_message_screen_is_skipped(monkeypatch):
     assert r == {"action": "empty_skipped", "number": "880150"}
     assert scanned_store.get("880150") is None
     assert scanned_store.next_scan_number(880150) == 880151
+
+
+# ── the operator's terminal is not a stuck terminal ──────────────────────────
+#
+# Rafael, 11 sep 2026: "cuando tomo control al watcher no le importa si se
+# crashea capturando la misma pantalla en bucle".
+
+
+def test_the_screens_a_person_navigates_to_are_not_treated_as_a_jam():
+    # Unsticking one of these means F6·F6·F7 on somebody mid-lookup, and then a
+    # retry five seconds later — the watcher taking the terminal back in a loop.
+    from as400_capture import (
+        STATE_CUSTOMER_DISPLAY,
+        STATE_STOCK_INQUIRY,
+        STATE_UNKNOWN,
+    )
+
+    assert STATE_CUSTOMER_DISPLAY in auto_scanner.OPERATOR_SCREENS
+    assert STATE_STOCK_INQUIRY in auto_scanner.OPERATOR_SCREENS
+    # A jam is not a person: UNKNOWN still gets the unstick.
+    assert STATE_UNKNOWN not in auto_scanner.OPERATOR_SCREENS
+
+
+def test_the_hold_is_finite_so_a_forgotten_screen_comes_back():
+    # Standing down for ever would mean one abandoned lookup stops the orders
+    # for the rest of the day.
+    assert 0 < auto_scanner.OPERATOR_HOLD_SEC <= 3600

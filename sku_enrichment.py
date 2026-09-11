@@ -529,12 +529,30 @@ def start_catalogue_run(open_driver, lock, note_as400=None) -> bool:
     _run_stop.clear()
 
     def _body():
+        # The manual run reports to the heartbeat too. Without this the only
+        # thing visible from outside Bay 2 was the gap loop, so "is a run going
+        # right now?" could only be answered by walking to the Mac — which is
+        # the trap this whole beacon exists to avoid.
+        def _note(out):
+            try:
+                import auto_scanner
+
+                auto_scanner._note_gap("working (manual run)", read=1)
+            except Exception:  # noqa: BLE001
+                pass
+
         try:
             driver = open_driver()
-            result = run_until_disturbed(driver, stop_fn=_run_stop.is_set)
+            result = run_until_disturbed(driver, stop_fn=_run_stop.is_set, note=_note)
             _run_last.clear()
             _run_last.update(result)
             log.info("catalogue run finished: %s", result)
+            try:
+                import auto_scanner
+
+                auto_scanner._note_gap(f"manual run ended: {result.get('stopped')}")
+            except Exception:  # noqa: BLE001
+                pass
             if note_as400:
                 note_as400(True)
         except Exception as e:  # noqa: BLE001 — a side errand may not take the app down
