@@ -594,12 +594,28 @@ distintos, códigos de color coherentes con el nombre:
 | `03-4983GY` | Ventura A1 58 CERULEAN | 65 |
 | `03-4984GY` | Ventura A1 61 CERULEAN | 10 |
 
-**La hipótesis viva**, y encaja con la pregunta que este mapa lleva abierta desde el 2 sep («qué
-muestra el cuerpo cuando el SKU **sí** tiene notas — no se ha visto ninguno con contenido»): estos
-SKUs tienen notas en el AS400, y el programa abre esa vista primero. Si es así, la solución es un
-**Cmd7 y reintentar una vez** dentro de `capture_stock_inquiry`, no el aplazamiento.
+> ⚠️ **Corrección del 12 sep, misma tarde: la mitad de esta sección era falsa, y el error es
+> instructivo.** El código detectaba «pantalla de stock **sin campos**» y el mensaje afirmaba
+> «aterrizó en el formulario NOTES». Son dos pantallas distintas: NOTES trae el Stock Number en su
+> cabecera, y **el formulario de búsqueda vuelve en blanco** — que es lo que AS400 devuelve cuando
+> **el número no existe**. Así que una parte de la tabla de arriba no son SKUs con notas: son
+> números que el AS400 no tiene, mal etiquetados por un mensaje que yo escribí sin haber visto
+> nunca la pantalla que nombraba.
+>
+> Costó la barrida de las partes —cero lecturas en veinte minutos— porque cada número muerto se
+> apartaba media hora en vez de marcarse inexistente, y el catálogo de partes está lleno de ellos.
+> `capture_stock_inquiry` los separa desde `bc2a0ae`: sin Stock Number en pantalla es
+> `StockSkuNotFound`; con Stock Number y sin campos, `StockScreenMismatch`.
+>
+> **Qué queda en pie:** que hay SKUs que aterrizan en una pantalla de stock con Stock Number y sin
+> campos. Esos sí son candidatos a NOTES. Cuáles de los siete de la tabla lo son y cuáles eran
+> simplemente números muertos, no se sabrá hasta que la lista se rehaga con el código corregido.
 
-**Cómo comprobarlo, y necesita a alguien delante del terminal:** entrar a `02` a mano con
-`03-4983GY` y ver qué pantalla sale. Un minuto de trabajo que ahorra adivinar. Hasta entonces se
-quedan apartados, y son el resto identificable al final de la barrida: `as400_description IS NULL`
-cuando ya no queda cola.
+**La hipótesis viva** para los que sobrevivan a esa criba, y encaja con la pregunta que este mapa
+lleva abierta desde el 2 sep («qué muestra el cuerpo cuando el SKU **sí** tiene notas — no se ha
+visto ninguno con contenido»): tienen notas en el AS400 y el programa abre esa vista primero. Si es
+así, la solución es un **Cmd7 y reintentar una vez**, no el aplazamiento.
+
+**Cómo comprobarlo, y necesita a alguien delante del terminal:** entrar a `02` a mano con uno de
+los que sigan fallando y **mirar la pantalla**. Un minuto de trabajo que ahorra un día de deducir
+de un mensaje que nadie verificó.
