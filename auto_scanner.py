@@ -410,6 +410,7 @@ def _run_sku_gap() -> float:
     """
     started = time.monotonic()
     done = 0
+    on_search = False  # the first lookup of a gap navigates the verified way
     try:
         import auto_update
         import sku_enrichment
@@ -449,11 +450,21 @@ def _run_sku_gap() -> float:
                 let_sleep()
                 log.info("auto-scan: the SKU queue is empty — nothing to look up")
                 return time.monotonic() - started
-            # home="menu": the next thing is another SKU, and the menu is a
-            # valid starting point for it. Going all the way back to the order
-            # search here means typing 3 to enter it and F7 to leave it again.
-            # The full trip home is the `finally` below, once per gap.
-            res = sku_enrichment.run_sku_step(_driver_for_sku_step(), row, home="menu")
+            # Optimistic from the second lookup on, exactly like the manual run
+            # (`run_until_disturbed`): Cmd7 lands on the search form with the
+            # fields blank, so the next SKU is typed where we stand — no read, no
+            # menu, no option 2. This loop was still going back to the MENU
+            # between lookups, which is ~27 s per SKU against ~7 s measured on
+            # the manual path (11 sep 2026, 03:49–03:51 on Bay 2). The automatic
+            # burst is the one with a whole weekend, and it was the slow one.
+            #
+            # The rule lives in two loops and must stay the same in both: stay
+            # optimistic while the lookups come back clean, and the moment one
+            # does not we no longer know what is on the screen — walk the
+            # verified way home and verify the next one.
+            res = sku_enrichment.run_sku_step(
+                _driver_for_sku_step(), row, home="search", on_search_screen=on_search
+            )
             done += 1
             # "registered" is the discovery queue's own success: a SKU AS400
             # knows and the catalogue didn't, now a row at UNKNOWN.
@@ -477,14 +488,29 @@ def _run_sku_gap() -> float:
                 return time.monotonic() - started
             if res["action"] in ("unavailable", "error"):
                 return time.monotonic() - started
+            if good:
+                on_search = True
+            else:
+                # An `unknown` or a `mismatch` leaves us unsure of the screen.
+                # One Cmd7 is not enough to trust it: walk the verified way home
+                # before the next lookup, and verify that one.
+                on_search = False
+                try:
+                    from as400_capture import return_to_order_search
+
+                    return_to_order_search(_driver_for_sku_step())
+                except Exception as e:  # noqa: BLE001
+                    log.warning("auto-scan: could not recover after a %s (%s)", res["action"], e)
+                    _note_gap(f"lost the terminal after a {res['action']}")
+                    return time.monotonic() - started
         log.info("auto-scan: SKU count cap reached after %d lookup(s)", done)
     except Exception:
         log.exception("auto-scan: SKU step crashed — the orders keep going")
     finally:
         # The full trip home, ONCE per gap. Each lookup only comes back to the
-        # menu (home="menu"), because the next one starts there — but the gap
-        # ends by handing the terminal back to the orders, and that is the
-        # screen the scanner expects to find.
+        # SEARCH form (home="search"), because the next one is typed there — but
+        # the gap ends by handing the terminal back to the orders, and that is
+        # the screen the scanner expects to find.
         if done:
             try:
                 from as400_capture import return_to_order_search

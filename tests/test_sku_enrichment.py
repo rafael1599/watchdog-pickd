@@ -390,7 +390,7 @@ def test_the_gap_does_nothing_while_the_switch_is_off(monkeypatch):
     assert called == []
 
 
-def _gap_harness(monkeypatch, *, idle=1e9, results=None):
+def _gap_harness(monkeypatch, *, idle=1e9, results=None, hops=None):
     """Wire _run_sku_gap up to fakes and return the list of SKUs it looked up.
 
     `system_idle_seconds` is always faked: the real one shells out to ioreg and
@@ -427,6 +427,8 @@ def _gap_harness(monkeypatch, *, idle=1e9, results=None):
 
     def step(driver, row, **kw):
         seen.append(row["sku"])
+        if hops is not None:
+            hops.append(kw.get("on_search_screen"))
         return next(outcomes, {"action": "read", "sku": row["sku"], "returned": True})
 
     monkeypatch.setattr(sku_enrichment, "run_sku_step", step)
@@ -465,6 +467,39 @@ def test_the_burst_stops_the_moment_the_operator_touches_the_keyboard(monkeypatc
 
     auto_scanner._run_sku_gap()
     assert len(seen) == 2  # the third never started
+
+
+def test_the_gap_types_the_next_sku_where_it_stands(monkeypatch):
+    """The automatic burst was the slow one, and it is the one with a weekend.
+
+    Measured on Bay 2 on 11 sep 2026: ~27 s per SKU going back to the MENU
+    between lookups, against ~7 s on the manual run, which types the next SKU on
+    the search form Cmd7 already left us on. Same rule as
+    `run_until_disturbed`: verified first, optimistic while they come back
+    clean, verified again after anything else.
+    """
+    import auto_scanner
+
+    monkeypatch.setenv("SKU_ENRICH_MAX_PER_GAP", "4")
+    hops = []
+    _gap_harness(
+        monkeypatch,
+        hops=hops,
+        results=[
+            {"action": "read", "sku": "A", "returned": True},
+            {"action": "read", "sku": "B", "returned": True},
+            {"action": "unknown", "sku": "C", "returned": True},
+            {"action": "read", "sku": "D", "returned": True},
+        ],
+    )
+    recovered = []
+    import as400_capture
+
+    monkeypatch.setattr(as400_capture, "return_to_order_search", lambda d: recovered.append(1))
+    auto_scanner._run_sku_gap()
+    # 1st verified, 2nd and 3rd optimistic, 4th verified again after the unknown.
+    assert hops == [False, True, True, False]
+    assert len(recovered) == 2  # once to recover from the unknown, once at the end
 
 
 def test_the_heartbeat_says_which_way_the_step_failed(monkeypatch):
