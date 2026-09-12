@@ -572,3 +572,34 @@ Protocolo de exploración, sacado del incidente del 11 de junio:
   `classify_screen` **no puede distinguirlas por el título** — el discriminador tiene que ser un
   campo (`Description:` etiquetado, o `Weight:`). Con esto, la única tecla que le quedaba a §2.12
   sin explorar está mapeada.
+
+### 2.12c Los SKUs que abren directamente en NOTES (12 sep 2026, abierto)
+
+La barrida del fin de semana tropieza de forma **repetible** con un puñado de SKUs que aterrizan en
+§2.12b —el formulario NOTES, mismo título y sin campos— en vez de en el detalle. La guarda
+`is_stock_detail_screen` los rechaza bien, el SKU se aparta con enfriamiento y la cola sigue, así
+que no cuesta más que ese intento. Pero vuelven a fallar cuando el enfriamiento se cumple, o sea
+que **no es una carrera de temporización**: es algo de esos SKUs.
+
+Vistos hasta ahora, y no comparten nada obvio —todos bicis, stock de 0 a 65, modelos y colores
+distintos, códigos de color coherentes con el nombre:
+
+| SKU | modelo en PickD | stock |
+|---|---|---:|
+| `01-2990` | Allegro A3 19 INK (S&D) | 1 |
+| `03-3882BK` | ALLEGRO A1 W 700CX16 | 1 |
+| `03-4091SL` | TRAIL XR SILVER | 15 |
+| `03-4457BK` | BOSS CRUISER CB 26" | 0 |
+| `03-4605OR` | (sin modelo) ORANGE | — |
+| `03-4983GY` | Ventura A1 58 CERULEAN | 65 |
+| `03-4984GY` | Ventura A1 61 CERULEAN | 10 |
+
+**La hipótesis viva**, y encaja con la pregunta que este mapa lleva abierta desde el 2 sep («qué
+muestra el cuerpo cuando el SKU **sí** tiene notas — no se ha visto ninguno con contenido»): estos
+SKUs tienen notas en el AS400, y el programa abre esa vista primero. Si es así, la solución es un
+**Cmd7 y reintentar una vez** dentro de `capture_stock_inquiry`, no el aplazamiento.
+
+**Cómo comprobarlo, y necesita a alguien delante del terminal:** entrar a `02` a mano con
+`03-4983GY` y ver qué pantalla sale. Un minuto de trabajo que ahorra adivinar. Hasta entonces se
+quedan apartados, y son el resto identificable al final de la barrida: `as400_description IS NULL`
+cuando ya no queda cola.
