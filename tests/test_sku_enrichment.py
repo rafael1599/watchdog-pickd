@@ -899,3 +899,78 @@ def test_one_bad_lookup_drops_it_back_to_the_verified_way(monkeypatch):
     # 1st verified, 2nd optimistic (the 1st read fine), 3rd verified again.
     assert hops == [False, True, False]
     assert len(recovered) == 2  # once to recover, once at the end
+
+
+# ── the weekend queue: bikes, then parts ─────────────────────────────────────
+#
+# Rafael, 11 sep 2026: "tienes todo el fin de semana para aprovechar al as400,
+# solo el watcher lo está usando". Parts were out of scope while this was about
+# the bike CATALOGUE — a part has no model, size or colour to split — and very
+# much in scope now that the same screen answers what AS400 thinks is on the
+# shelf: parts are 95% of the units in LUDLOW.
+
+
+class _FakeTable:
+    def __init__(self, store, calls):
+        self.store, self.calls, self.f = store, calls, {}
+
+    def select(self, *_a, **_k):
+        return self
+
+    def eq(self, k, v):
+        self.f[k] = ("eq", v)
+        return self
+
+    def neq(self, k, v):
+        self.f[k] = ("neq", v)
+        return self
+
+    def is_(self, *_a):
+        return self
+
+    def gt(self, *_a):
+        return self
+
+    def in_(self, *_a):
+        return self
+
+    def limit(self, *_a):
+        return self
+
+    def execute(self):
+        want_bikes = self.f.get("is_bike") == ("eq", True)
+        self.calls.append("bikes" if want_bikes else "parts")
+        return type("R", (), {"data": self.store["bikes" if want_bikes else "parts"]})()
+
+
+class _FakeClient:
+    def __init__(self, bikes, parts):
+        self.store = {"bikes": bikes, "parts": parts, "inv": []}
+        self.calls = []
+
+    def table(self, name):
+        if name == "inventory":
+            t = _FakeTable({"bikes": [], "parts": []}, [])
+            return t
+        return _FakeTable(self.store, self.calls)
+
+
+def test_a_bike_still_outranks_every_part():
+    c = _FakeClient(bikes=[{"sku": "03-4039BR"}], parts=[{"sku": "98-6860"}])
+    rows = sku_enrichment.fetch_candidates(c)
+    assert [r["sku"] for r in rows] == ["03-4039BR"]
+    assert "parts" not in c.calls  # never even asked
+
+
+def test_the_parts_come_up_once_the_bikes_run_out():
+    c = _FakeClient(bikes=[], parts=[{"sku": "98-6860"}, {"sku": "12-8342BL"}])
+    rows = sku_enrichment.fetch_candidates(c)
+    assert {r["sku"] for r in rows} == {"98-6860", "12-8342BL"}
+
+
+def test_a_shape_the_as400_cannot_look_up_never_enters():
+    # UPCs and serials: 440 of them. The shape is the filter, so no hand-kept
+    # list of exceptions can go stale.
+    c = _FakeClient(bikes=[], parts=[{"sku": "792584991050"}, {"sku": "32-0419"}])
+    rows = sku_enrichment.fetch_candidates(c)
+    assert [r["sku"] for r in rows] == ["32-0419"]

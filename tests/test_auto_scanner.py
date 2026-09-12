@@ -304,35 +304,62 @@ def test_the_hold_is_finite_so_a_forgotten_screen_comes_back():
 # SKUs that fitted in its grace window and stopped — at 3pm, with nobody there.
 
 
-def test_our_own_keystrokes_do_not_count_as_the_operator(monkeypatch):
-    # HIDIdleTime is tiny because WE just typed; time since our own keystroke
-    # matches it, so nothing newer happened.
-    monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 2.0)
-    monkeypatch.setattr(auto_scanner, "seconds_since_self_input", lambda: 2.0)
-    assert auto_scanner.operator_idle_seconds() >= 2.0
+def test_our_own_typing_opens_the_gate_instead_of_closing_it(monkeypatch):
+    """The bug this function was written for, and then still had.
+
+    Right after the watchdog types, BOTH clocks read zero — the raw idle
+    because the event just landed, and the time since our own stamp for the
+    same reason. Returning either of them says "somebody is at the keyboard",
+    which is how the queue spent eight hours standing down for itself at three
+    in the morning. What has to be remembered is when a PERSON last typed.
+    """
+    monkeypatch.setattr(auto_scanner, "_last_operator_input", None)
+    # A person (or the restart) touched it 5 minutes ago and nothing since.
+    monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 300.0)
+    monkeypatch.setattr(auto_scanner, "seconds_since_self_input", lambda: 1e9)
+    assert auto_scanner.operator_idle_seconds() >= 300.0
+
+    # Now WE type: the raw clock drops to zero, and so does our own stamp.
+    monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 0.2)
+    monkeypatch.setattr(auto_scanner, "seconds_since_self_input", lambda: 0.2)
+    # The person is still five minutes idle, and the gate stays OPEN.
+    assert auto_scanner.operator_idle_seconds() >= 300.0
 
 
 def test_a_real_hand_is_newer_than_our_last_keystroke(monkeypatch):
-    # We typed 40s ago, but the machine says the last event was 1s ago —
-    # somebody else is on it.
+    # We typed 40s ago and the machine says the last event was 1s ago — that is
+    # somebody else, and the gate has to shut.
+    monkeypatch.setattr(auto_scanner, "_last_operator_input", None)
     monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 1.0)
     monkeypatch.setattr(auto_scanner, "seconds_since_self_input", lambda: 40.0)
-    assert auto_scanner.operator_idle_seconds() == 1.0
+    assert auto_scanner.operator_idle_seconds() < 5.0
 
 
-def test_an_untouched_mac_still_reads_as_untouched(monkeypatch):
-    # Nobody has typed at all, ours included.
-    monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 900.0)
-    monkeypatch.setattr(auto_scanner, "seconds_since_self_input", lambda: 900.0)
-    assert auto_scanner.operator_idle_seconds() >= 900.0
+def test_the_operator_ages_out_again_once_they_stop(monkeypatch):
+    import time as _t
+
+    monkeypatch.setattr(auto_scanner, "_last_operator_input", None)
+    monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 1.0)
+    monkeypatch.setattr(auto_scanner, "seconds_since_self_input", lambda: 40.0)
+    auto_scanner.operator_idle_seconds()  # a hand, remembered
+    base = _t.monotonic()
+    monkeypatch.setattr(auto_scanner, "_last_operator_input", base - 120.0)
+    # They walked off and we have been driving since: idle keeps growing.
+    monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 0.1)
+    monkeypatch.setattr(auto_scanner, "seconds_since_self_input", lambda: 0.1)
+    assert auto_scanner.operator_idle_seconds() >= 120.0
 
 
 def test_the_slack_absorbs_the_lag_between_asking_and_the_event_landing(monkeypatch):
-    # The keystroke lands a moment after we asked for it, so idle can read a
-    # touch lower than our own stamp without a person being involved.
+    # The keystroke lands a moment after we asked for it, so the raw clock can
+    # read a touch lower than our own stamp without a person being involved.
+    monkeypatch.setattr(auto_scanner, "_last_operator_input", None)
+    monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 600.0)
+    monkeypatch.setattr(auto_scanner, "seconds_since_self_input", lambda: 1e9)
+    auto_scanner.operator_idle_seconds()
     monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 4.5)
     monkeypatch.setattr(auto_scanner, "seconds_since_self_input", lambda: 5.0)
-    assert auto_scanner.operator_idle_seconds() >= 4.5
+    assert auto_scanner.operator_idle_seconds() >= 600.0
 
 
 # ── staying awake for the weekend ────────────────────────────────────────────

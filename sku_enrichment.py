@@ -464,6 +464,10 @@ def fetch_candidates(client=None) -> list:
 
         client = get_client()
 
+    # Bikes first, and strictly: parts only come up once no bike is left to ask
+    # about. Same cadence the catalogue work already has with the customers
+    # (docs/customer-enrichment.md) — one finite queue at a time, in the order
+    # somebody would work them.
     rows = (
         client.table("sku_metadata")
         .select(_META_COLS)
@@ -472,8 +476,31 @@ def fetch_candidates(client=None) -> list:
         .limit(QUEUE_FETCH_LIMIT)
         .execute()
     ).data or []
+    rows = [r for r in rows if is_lookupable(r.get("sku") or "")]
 
-    skus = [r["sku"] for r in rows if is_lookupable(r.get("sku") or "")]
+    if not rows:
+        # The parts. They were out of scope while this was about the bike
+        # CATALOGUE — a part has no model, size or colour to split. They are
+        # very much in scope now that the same screen answers "what does AS400
+        # think is on the shelf": parts are 1,351 of the 1,923 SKUs with stock
+        # and **95% of the units** (Rafael, 11 sep 2026 — "sea de sku, clientes,
+        # ordenes"). 440 of them have a shape AS400 cannot look up at all (UPCs,
+        # serials) and `is_lookupable` drops those without a list to maintain.
+        rows = [
+            r
+            for r in (
+                client.table("sku_metadata")
+                .select(_META_COLS)
+                .neq("is_bike", True)
+                .is_("as400_description", "null")
+                .limit(QUEUE_FETCH_LIMIT)
+                .execute()
+            ).data
+            or []
+            if is_lookupable(r.get("sku") or "")
+        ]
+
+    skus = [r["sku"] for r in rows]
     if not skus:
         return []
 

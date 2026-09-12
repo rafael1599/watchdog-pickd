@@ -208,30 +208,43 @@ def let_sleep() -> None:
     _awake_proc = None
 
 
+# The last HID event we are confident came from a PERSON. Everything the
+# watchdog types is ours, so the operator's idle has to be measured from here
+# and not from the raw clock — which our own keystrokes reset several times a
+# minute (11 sep 2026).
+_last_operator_input: float | None = None
+
+
 def operator_idle_seconds() -> float:
-    """Seconds since the OPERATOR last touched the Mac — ours don't count.
+    """Seconds since the OPERATOR last touched the Mac. Ours do not count.
 
-    `system_idle_seconds` reads macOS's HIDIdleTime, which is time since the last
-    input event of any kind. The driver types with `System Events keystroke`, and
-    those are real events: every key the watchdog sends resets that clock, so the
-    watchdog reads its own typing as "somebody is at the keyboard" and stands
-    down for itself. That is why the catalogue queue could never chain two
-    lookups, and why the manual run on 11 sep 2026 read exactly the seven SKUs
-    that fitted inside its grace window before stopping — at 3pm, with nobody
-    there.
+    `system_idle_seconds` reads macOS's HIDIdleTime: time since the LAST input
+    event of any kind. The driver types with `System Events keystroke`, and
+    those are real events, so every key and every screen read resets that clock.
+    Reading it directly, the watchdog saw its own typing as somebody at the
+    keyboard and stood down for itself — for eight hours on 11 sep, at three in
+    the morning, with nobody in the building.
 
-    HIDIdleTime is time since the LAST event, so the test is exact: if it is
-    meaningfully smaller than the time since our own last keystroke, something
-    newer happened and it was not us. When the last event WAS ours, this reports
-    how long it has been since we started driving — which is the honest answer
-    to "how long since a person touched this", not zero.
+    Comparing the two clocks identifies a foreign event exactly: HIDIdleTime is
+    time since the last one, so if it is meaningfully SMALLER than the time
+    since our own last keystroke, something newer happened and it was not us.
+    What it CANNOT do is answer "how long since a person" on its own — right
+    after we type, both clocks read zero. So the foreign events are what gets
+    remembered, and the answer is measured from the most recent of those.
+
+    Before we have driven anything, the current HID event is somebody else's by
+    default: one cautious minute after a restart, then the gate opens.
     """
+    global _last_operator_input
+    now = time.monotonic()
     idle = system_idle_seconds()
     since_self = seconds_since_self_input()
-    # A second of slack: the event lands a moment after we asked for it.
-    if idle < since_self - 1.0:
-        return idle  # newer than ours — a person
-    return max(idle, since_self)
+
+    # A second of slack: the event lands a moment after the osascript asks.
+    if _last_operator_input is None or idle < since_self - 1.0:
+        _last_operator_input = now - idle
+
+    return now - _last_operator_input
 
 
 def _meta_from_preview(preview: dict) -> dict:
