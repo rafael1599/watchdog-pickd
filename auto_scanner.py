@@ -115,16 +115,25 @@ _kick = threading.Event()
 # A signal older than the max age (default 30 min — the scanner can legitimately
 # sit 20 min between not-found retries) degrades to "unknown" (gray).
 AS400_HEALTH_MAX_AGE_SEC = float(os.getenv("AS400_HEALTH_MAX_AGE_SEC", "1800"))
-_as400_health = {"at": 0.0, "ok": None}
+_as400_health = {"at": 0.0, "ok": None, "parked": None}
 
 
-def note_as400(ok: bool) -> None:
+def note_as400(ok: bool, parked: str | None = None) -> None:
     """Record the outcome of the latest AS400 interaction (thread-safe enough:
-    two atomic dict writes; readers tolerate either ordering)."""
+    two atomic dict writes; readers tolerate either ordering).
+
+    `parked` is the screen the terminal was left on when it went wrong, and it
+    is the difference between "the AS400 is unreachable" and "we left it on a
+    stock screen and cannot get off it" — two problems with different answers.
+    """
     import time
 
     _as400_health["ok"] = ok
     _as400_health["at"] = time.time()
+    if not ok:
+        _as400_health["parked"] = parked
+    else:
+        _as400_health["parked"] = None
 
 
 def as400_health() -> dict:
@@ -132,11 +141,15 @@ def as400_health() -> dict:
     import time
 
     if _as400_health["ok"] is None:
-        return {"state": "unknown", "age_sec": None}
+        return {"state": "unknown", "age_sec": None, "parked": None}
     age = time.time() - _as400_health["at"]
     if age > AS400_HEALTH_MAX_AGE_SEC:
-        return {"state": "unknown", "age_sec": age}
-    return {"state": "ok" if _as400_health["ok"] else "err", "age_sec": age}
+        return {"state": "unknown", "age_sec": age, "parked": _as400_health["parked"]}
+    return {
+        "state": "ok" if _as400_health["ok"] else "err",
+        "age_sec": age,
+        "parked": _as400_health["parked"],
+    }
 
 
 def system_idle_seconds() -> float:
@@ -595,6 +608,7 @@ def _loop() -> None:
                     parked = classify_screen(driver.copy_screen())
                 except Exception:  # noqa: BLE001 — can't read it, treat as stuck
                     parked = None
+                note_as400(False, parked)
                 if parked in OPERATOR_SCREENS:
                     if _operator_since is None:
                         _operator_since = time.monotonic()

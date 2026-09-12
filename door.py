@@ -502,6 +502,14 @@ def heartbeat(client, version: str) -> None:
         row["last_gap_reason"] = gap.get("reason")
         row["last_gap_at"] = gap.get("at")
         row["skus_read_total"] = gap.get("read")
+        # Whether the terminal answers at all, and where it got stuck if not.
+        # This lived only in the process that paints Bay 2's own dot, so from
+        # anywhere else a jammed scanner looked exactly like a quiet weekend
+        # (12 sep 2026, 00:20 NY).
+        h = auto_scanner.as400_health()
+        row["as400_state"] = (
+            h["state"] if h["state"] != "err" or not h.get("parked") else f"err: {h['parked']}"
+        )
     except Exception:  # noqa: BLE001 — the beat matters more than the detail
         pass
     client.table("as400_watcher_heartbeat").upsert(row).execute()
