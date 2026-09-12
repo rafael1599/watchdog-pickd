@@ -156,6 +156,35 @@ def test_a_sku_that_keeps_failing_steps_aside_instead_of_blocking_the_queue(tmp_
     assert len(select_sku_queue(rows, sku_enrichment.load_unknown())) == 2
 
 
+def test_any_mismatch_steps_the_sku_aside_not_just_a_verified_one(tmp_path, monkeypatch):
+    """La asimetria es el argumento entero.
+
+    Primero aplacé solo los fallos del camino verificado, con el razonamiento de
+    que un fallo del optimista es culpa nuestra y no del SKU. Cierto, y da
+    igual: apartar un SKU BUENO media hora no cuesta nada —hay 1.800 mas—
+    mientras que no apartar uno malo cuesta cada hueco al que se le entregue.
+    Medido el 12 sep con los siete SKUs de §2.12c volviendo a la cabeza: 77
+    lecturas por hora pasaron a 36, y luego a 2 en quince minutos.
+    """
+    import sku_enrichment
+
+    monkeypatch.setenv("SKU_UNKNOWN_PATH", str(tmp_path / "u.json"))
+    monkeypatch.setenv("SKU_ENRICH_WRITE", "0")
+
+    def _boom(*a, **k):
+        raise sku_enrichment.StockScreenMismatch("Landed on the NOTES form")
+
+    res = sku_enrichment.run_sku_step(
+        object(),
+        {"sku": "03-4983GY"},
+        capture_fn=_boom,
+        return_fn=lambda d: None,
+        on_search_screen=True,  # el camino OPTIMISTA
+    )
+    assert res["action"] == "mismatch"
+    assert "03-4983GY" in sku_enrichment.load_unknown()  # apartado igualmente
+
+
 def test_a_verdict_and_a_cooldown_are_not_the_same_thing(tmp_path, monkeypatch):
     import sku_enrichment
 

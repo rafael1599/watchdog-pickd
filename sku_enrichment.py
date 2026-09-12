@@ -490,8 +490,7 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
             log.warning(
                 "SKU %s: the screen shows %s — not ours, nothing written", sku, parsed.get("sku")
             )
-            if not on_search_screen:
-                defer_sku(sku, "the screen showed somebody else")
+            defer_sku(sku, "the screen showed somebody else")
             return {
                 "action": "mismatch",
                 "sku": sku,
@@ -545,11 +544,15 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
         log.info("SKU %s: %s — marked, won't be asked again", sku, e)
         return {"action": "unknown", "sku": sku, "why": str(e)}
     except StockScreenMismatch as e:
-        # Only the VERIFIED path's mismatches step the SKU aside. An optimistic
-        # miss means we guessed wrong about where the terminal was — our fault,
-        # not the SKU's — and the next attempt walks the verified way anyway.
-        if not on_search_screen:
-            defer_sku(sku, str(e))
+        # ANY mismatch steps the SKU aside, and the asymmetry is the whole
+        # argument. I first deferred only the verified path's failures, on the
+        # grounds that an optimistic miss is our fault and not the SKU's. True,
+        # and irrelevant: setting a GOOD sku aside for half an hour costs
+        # nothing — there are 1,800 others — while NOT setting a bad one aside
+        # costs every gap it is handed to. Measured on 12 sep, with the seven
+        # SKUs of §2.12c cycling back to the head of the queue: 77 reads an hour
+        # became 36, then 2 in fifteen minutes.
+        defer_sku(sku, str(e))
         log.warning("SKU %s: %s", sku, e)
         return {"action": "mismatch", "sku": sku, "why": str(e)}
     except (AS400Disconnected, AS400ManualLoginRequired) as e:
