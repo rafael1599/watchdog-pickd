@@ -191,3 +191,35 @@ def test_it_never_restarts_with_a_send_in_flight():
     # picking_lists insert and the row being marked sent.
     assert why_not_now(BEHIND, idle=IDLE, lock_free=True, door_busy=True) == "a send is in flight"
     assert why_not_now(BEHIND, idle=IDLE, lock_free=True, door_busy=False) is None
+
+
+def test_the_updater_asks_who_was_at_the_keyboard_not_the_raw_clock(monkeypatch):
+    """The gate means "don't take the UI away from a person", and the raw
+    HIDIdleTime counts the watchdog's own typing as a person.
+
+    11 sep 2026: the catalogue burst types constantly, so the clock never
+    reached sixty seconds, the updater kept saying "somebody is using the Mac",
+    and `update_pending` stayed set — which is exactly what the catalogue stands
+    down for. The two waited for each other and a deploy landed only by luck.
+    """
+    import auto_scanner
+    import auto_update
+
+    passed = []
+    monkeypatch.setattr(auto_update, "enabled", lambda: True)
+    monkeypatch.setattr(auto_update, "_thread", None)
+    monkeypatch.setattr(
+        auto_update.threading,
+        "Thread",
+        lambda **kw: type(
+            "T",
+            (),
+            {
+                "start": lambda self: passed.append(kw["args"][0]),
+                "is_alive": lambda self: False,
+            },
+        )(),
+    )
+    auto_update.start_auto_update()
+    assert passed == [auto_scanner.operator_idle_seconds]
+    assert passed[0] is not auto_scanner.system_idle_seconds

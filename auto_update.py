@@ -282,7 +282,19 @@ def start_auto_update() -> None:
     if _thread and _thread.is_alive():
         return
 
-    from auto_scanner import capture_lock, system_idle_seconds
+    # `operator_idle_seconds`, NOT the raw `system_idle_seconds`. The gate below
+    # means "never take the UI away from whoever is looking at it", and the raw
+    # HIDIdleTime counts the watchdog's OWN synthetic keystrokes as somebody
+    # looking. So the catalogue burst — which types constantly — kept the clock
+    # under sixty seconds, the updater kept answering "somebody is using the
+    # Mac", and `update_pending` stayed set; the catalogue stands down for a
+    # pending update, so the two sat waiting for each other and a deploy landed
+    # only by luck. Measured on 11 sep 2026: ~25 minutes per push, and the
+    # catalogue reading nothing the whole time.
+    #
+    # This is the same mistake, in its third home: `operator_idle_seconds` exists
+    # because the scanner made it twice.
+    from auto_scanner import capture_lock, operator_idle_seconds
 
     def lock_free() -> bool:
         if not capture_lock.acquire(blocking=False):
@@ -293,7 +305,7 @@ def start_auto_update() -> None:
     _stop.clear()
     _thread = threading.Thread(
         target=_loop,
-        args=(system_idle_seconds, lock_free),
+        args=(operator_idle_seconds, lock_free),
         daemon=True,
         name="auto-update",
     )
