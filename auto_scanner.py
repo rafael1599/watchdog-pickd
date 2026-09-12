@@ -161,6 +161,53 @@ def system_idle_seconds() -> float:
     return 1e9
 
 
+# ── staying awake for the catalogue ──────────────────────────────────────────
+#
+# The queue only runs while the Mac is awake, and there is nobody there at the
+# weekend to keep it so (Rafael, 11 sep 2026: "ya no estoy allá, tenemos que
+# hacer que se active solo").
+#
+# `caffeinate -s` asserts sleep prevention **only on AC power** — on battery the
+# Mac still sleeps, which is the whole reason the lid gets closed at night. And
+# `-w <our pid>` ties the assertion to this process: it dies when we do, so an
+# update restart or a crash cannot leave the machine pinned awake for ever.
+#
+# It is held only while there is catalogue work, and dropped the moment the
+# queue empties. A machine kept awake for nothing is a machine somebody has to
+# remember to fix.
+_awake_proc = None
+
+
+def hold_awake() -> None:
+    """Keep the Mac awake on AC while the queue has work. Idempotent."""
+    global _awake_proc
+    if os.getenv("SCAN_HOLD_AWAKE", "1") not in ("1", "true", "True", "yes"):
+        return
+    if _awake_proc is not None and _awake_proc.poll() is None:
+        return
+    try:
+        _awake_proc = subprocess.Popen(
+            ["caffeinate", "-s", "-w", str(os.getpid())],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        log.info("auto-scan: holding the Mac awake (on AC) while the catalogue has work")
+    except Exception as e:  # noqa: BLE001 — never worth taking the scanner down
+        log.warning("auto-scan: could not hold the Mac awake (%s)", e)
+
+
+def let_sleep() -> None:
+    """Release it. Called when the queue is empty or the step is switched off."""
+    global _awake_proc
+    if _awake_proc is not None and _awake_proc.poll() is None:
+        try:
+            _awake_proc.terminate()
+            log.info("auto-scan: nothing left in the queue — the Mac may sleep again")
+        except Exception:  # noqa: BLE001
+            pass
+    _awake_proc = None
+
+
 def operator_idle_seconds() -> float:
     """Seconds since the OPERATOR last touched the Mac — ours don't count.
 
@@ -356,6 +403,7 @@ def _run_sku_gap() -> float:
 
         if not sku_enrichment.enabled():
             _note_gap("switched off (SKU_ENRICH)")
+            let_sleep()
             return 0.0
 
         deadline = started + sku_enrichment.gap_budget_sec()
@@ -381,9 +429,11 @@ def _run_sku_gap() -> float:
                 _note_gap("an update is waiting")
                 log.info("auto-scan: an update is waiting — SKU queue yields after %d", done)
                 return time.monotonic() - started
+            hold_awake()
             row = sku_enrichment.next_sku()
             if not row:
                 _note_gap("the queue is empty")
+                let_sleep()
                 log.info("auto-scan: the SKU queue is empty — nothing to look up")
                 return time.monotonic() - started
             # home="menu": the next thing is another SKU, and the menu is a

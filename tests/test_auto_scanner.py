@@ -333,3 +333,74 @@ def test_the_slack_absorbs_the_lag_between_asking_and_the_event_landing(monkeypa
     monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 4.5)
     monkeypatch.setattr(auto_scanner, "seconds_since_self_input", lambda: 5.0)
     assert auto_scanner.operator_idle_seconds() >= 4.5
+
+
+# ── staying awake for the weekend ────────────────────────────────────────────
+
+
+def test_the_wake_assertion_dies_with_this_process(monkeypatch):
+    # `-w <pid>`: an update restart or a crash must never leave the Mac pinned
+    # awake with nobody there to notice.
+    seen = {}
+
+    class FakeProc:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            seen["terminated"] = True
+
+    monkeypatch.setattr(auto_scanner, "_awake_proc", None)
+    monkeypatch.setattr(
+        auto_scanner.subprocess,
+        "Popen",
+        lambda argv, **kw: seen.setdefault("argv", argv) or FakeProc(),
+    )
+    auto_scanner.hold_awake()
+    assert seen["argv"][0] == "caffeinate"
+    assert "-w" in seen["argv"] and str(os.getpid()) in seen["argv"]
+
+
+def test_it_only_prevents_sleep_on_ac_power(monkeypatch):
+    # `-s`, not `-i`: on battery the Mac still sleeps. That is what the lid gets
+    # closed for.
+    seen = {}
+
+    class FakeProc:
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(auto_scanner, "_awake_proc", None)
+    monkeypatch.setattr(
+        auto_scanner.subprocess,
+        "Popen",
+        lambda argv, **kw: seen.setdefault("argv", argv) or FakeProc(),
+    )
+    auto_scanner.hold_awake()
+    assert "-s" in seen["argv"]
+    assert "-u" not in seen["argv"]  # -u fakes user activity and would stop the run
+
+
+def test_holding_awake_twice_does_not_spawn_two(monkeypatch):
+    calls = []
+
+    class FakeProc:
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(auto_scanner, "_awake_proc", None)
+    monkeypatch.setattr(
+        auto_scanner.subprocess, "Popen", lambda argv, **kw: calls.append(argv) or FakeProc()
+    )
+    auto_scanner.hold_awake()
+    auto_scanner.hold_awake()
+    assert len(calls) == 1
+
+
+def test_it_can_be_switched_off_without_a_deploy(monkeypatch):
+    calls = []
+    monkeypatch.setenv("SCAN_HOLD_AWAKE", "0")
+    monkeypatch.setattr(auto_scanner, "_awake_proc", None)
+    monkeypatch.setattr(auto_scanner.subprocess, "Popen", lambda *a, **k: calls.append(1))
+    auto_scanner.hold_awake()
+    assert calls == []
