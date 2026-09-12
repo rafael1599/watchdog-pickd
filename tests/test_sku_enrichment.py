@@ -467,6 +467,40 @@ def test_the_burst_stops_the_moment_the_operator_touches_the_keyboard(monkeypatc
     assert len(seen) == 2  # the third never started
 
 
+def test_the_heartbeat_says_which_way_the_step_failed(monkeypatch):
+    # 11 sep 2026: the heartbeat said `working` for hours while the read counter
+    # sat at 17. A step was running and dying before it read anything, and the
+    # only place that said which of the four ways was a log file on a Mac in Bay
+    # 2 with nobody in front of it. A number that does not move is not a
+    # diagnosis.
+    import auto_scanner
+
+    monkeypatch.setenv("SKU_ENRICH_MAX_PER_GAP", "5")
+    _gap_harness(
+        monkeypatch,
+        results=[
+            {
+                "action": "unavailable",
+                "sku": "03-3492BL",
+                "why": "The AS400 isn't connected",
+                "returned": True,
+            }
+        ],
+    )
+    auto_scanner._run_sku_gap()
+    reason = auto_scanner.gap_state()["reason"]
+    assert "unavailable" in reason and "isn't connected" in reason
+
+
+def test_a_step_that_read_says_only_working(monkeypatch):
+    import auto_scanner
+
+    monkeypatch.setenv("SKU_ENRICH_MAX_PER_GAP", "1")
+    _gap_harness(monkeypatch)
+    auto_scanner._run_sku_gap()
+    assert auto_scanner.gap_state()["reason"] == "working"
+
+
 def test_a_manual_get_orders_now_wins_over_catalogue_work(monkeypatch):
     # They asked for orders, not for catalogue work.
     import auto_scanner

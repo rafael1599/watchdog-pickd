@@ -457,14 +457,23 @@ def _run_sku_gap() -> float:
             done += 1
             # "registered" is the discovery queue's own success: a SKU AS400
             # knows and the catalogue didn't, now a row at UNKNOWN.
+            good = res.get("action") in ("read", "written", "registered")
+            # The reason carries the STEP's own answer, not just "working", and
+            # that is the whole point of this field. On 11 sep the heartbeat said
+            # `working` for hours while the counter sat at 17: a step was running
+            # and failing before it read anything, and the only place that said
+            # which of the four ways it failed was a log file on a Mac in Bay 2
+            # with nobody in front of it. A number that does not move is not a
+            # diagnosis.
             _note_gap(
-                "working",
-                read=1 if res.get("action") in ("read", "written", "registered") else 0,
+                "working" if good else f"{res.get('action')}: {res.get('why') or res.get('sku')}",
+                read=1 if good else 0,
             )
             if not res.get("returned", True):
                 # The terminal isn't back on the order search. Stop touching it;
                 # the next cycle's bootstrap is what recovers.
                 log.warning("auto-scan: SKU step didn't get home — pausing the SKU queue")
+                _note_gap(f"didn't get home after {res.get('sku')}")
                 return time.monotonic() - started
             if res["action"] in ("unavailable", "error"):
                 return time.monotonic() - started

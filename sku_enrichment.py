@@ -429,7 +429,12 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
             log.warning(
                 "SKU %s: the screen shows %s — not ours, nothing written", sku, parsed.get("sku")
             )
-            return {"action": "mismatch", "sku": sku, "screen_sku": parsed.get("sku")}
+            return {
+                "action": "mismatch",
+                "sku": sku,
+                "screen_sku": parsed.get("sku"),
+                "why": f"the screen showed {parsed.get('sku')}",
+            }
 
         log.info(
             "SKU %s in %.2fs — description=%r weight=%s kind=%s on_hand=%s",
@@ -475,21 +480,21 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
         # AS400 has no record. Mark it so the queue doesn't jam on it (R7).
         mark_unknown(sku)
         log.info("SKU %s: %s — marked, won't be asked again", sku, e)
-        return {"action": "unknown", "sku": sku}
+        return {"action": "unknown", "sku": sku, "why": str(e)}
     except StockScreenMismatch as e:
         log.warning("SKU %s: %s", sku, e)
-        return {"action": "mismatch", "sku": sku}
+        return {"action": "mismatch", "sku": sku, "why": str(e)}
     except (AS400Disconnected, AS400ManualLoginRequired) as e:
         log.info("SKU %s: AS400 not available (%s)", sku, e)
-        return {"action": "unavailable", "sku": sku}
+        return {"action": "unavailable", "sku": sku, "why": str(e)}
     except MissingColumn as e:
         # Not this SKU's problem and not something a retry fixes: every write
         # would vanish the same way. Stop the queue, loudly.
         log.error("SKU %s: %s", sku, e)
-        return {"action": "unavailable", "sku": sku}
+        return {"action": "unavailable", "sku": sku, "why": str(e)}
     except CaptureError as e:
         log.warning("SKU %s: lookup failed (%s)", sku, e)
-        return {"action": "error", "sku": sku}
+        return {"action": "error", "sku": sku, "why": str(e)}
 
 
 # ── the queue, against the database ──────────────────────────────────────────
