@@ -634,11 +634,19 @@ QUEUE_FETCH_LIMIT = int(os.getenv("SKU_ENRICH_FETCH_LIMIT", "200"))
 _META_COLS = "sku, model, size, color, weight_lbs, weight_verified, is_bike, as400_description"
 
 
-def fetch_candidates(client=None) -> list:
+def fetch_candidates(client=None, tier: str = "auto") -> list:
     """Rows that could use a lookup, with their floor stock attached.
 
-    Three queues in order, one at a time: the SKUs AS400 named on a paper and
-    the catalogue does not have, then the bikes nobody has read, then the parts.
+    Three queues, worked one at a time and in order: the SKUs AS400 named on a
+    paper and the catalogue does not have, then the bikes nobody has read, then
+    the parts.
+
+    `tier` picks one explicitly. It exists because the fallthrough used to be
+    decided on the RAW rows, before the set-aside filter — so thirty bikes that
+    all land on the NOTES form (§2.12c) kept the bike tier "non-empty", the
+    parts were never asked for, and the sweep reported `the queue is empty` with
+    **1,221 parts unread** (12 sep 2026). Emptiness has to be judged after the
+    filter, which only `next_sku` can do.
 
     Two reads, not a join: PostgREST cannot join `inventory` onto `sku_metadata`
     here, and the set is small enough that asking twice is cheaper than teaching
@@ -649,37 +657,36 @@ def fetch_candidates(client=None) -> list:
 
         client = get_client()
 
+    rows: list = []
+
     # The SKUs AS400 printed on a paper and the catalogue does not have, FIRST
-    # (Rafael, 11 sep 2026). Three reasons it jumps the bike queue: it is tiny
-    # and finite (55 at the time of writing, ~6 minutes of terminal), every one
-    # of them is a line that says UNREG in Double Check *today*, and the alta
-    # cures those orders without anybody opening them
-    # (`zz_touch_open_orders_for_sku`). The other two queues are 1,800 SKUs of
-    # catalogue tidying: they can wait six minutes.
+    # (Rafael, 11 sep 2026): tiny, finite, and every one is a line that says
+    # UNREG in Double Check *today* — the alta cures those orders without
+    # anybody opening them (`zz_touch_open_orders_for_sku`).
     #
     # `looks_like` is the view's own filter: a variant sibling would split what
     # idea-154 merged, a Scratch & Dent number is one bike sold once, and a
     # billing line is not a box on a shelf. All three stay visible in the view;
     # only `merchandise` gets registered.
-    rows = [
-        {"sku": r["sku"], "last_name": r.get("last_name"), "unregistered": True}
-        for r in (
-            client.table("v_as400_skus_unregistered")
-            .select("sku, last_name, last_seen, looks_like")
-            .eq("looks_like", "merchandise")
-            .order("last_seen", desc=True)
-            .limit(QUEUE_FETCH_LIMIT)
-            .execute()
-        ).data
-        or []
-        if is_lookupable(r.get("sku") or "")
-    ]
+    if tier in ("auto", "unregistered"):
+        rows = [
+            {"sku": r["sku"], "last_name": r.get("last_name"), "unregistered": True}
+            for r in (
+                client.table("v_as400_skus_unregistered")
+                .select("sku, last_name, last_seen, looks_like")
+                .eq("looks_like", "merchandise")
+                .order("last_seen", desc=True)
+                .limit(QUEUE_FETCH_LIMIT)
+                .execute()
+            ).data
+            or []
+            if is_lookupable(r.get("sku") or "")
+        ]
 
-    # Then the bikes, and strictly: parts only come up once no bike is left to
-    # ask about. Same cadence the catalogue work already has with the customers
-    # (docs/customer-enrichment.md) — one finite queue at a time, in the order
-    # somebody would work them.
-    if not rows:
+    # Then the bikes. Same cadence the catalogue work already has with the
+    # customers (docs/customer-enrichment.md) — one finite queue at a time, in
+    # the order somebody would work them.
+    if not rows and tier in ("auto", "bikes"):
         rows = [
             r
             for r in (
@@ -694,14 +701,14 @@ def fetch_candidates(client=None) -> list:
             if is_lookupable(r.get("sku") or "")
         ]
 
-    if not rows:
-        # The parts. They were out of scope while this was about the bike
-        # CATALOGUE — a part has no model, size or colour to split. They are
-        # very much in scope now that the same screen answers "what does AS400
-        # think is on the shelf": parts are 1,351 of the 1,923 SKUs with stock
-        # and **95% of the units** (Rafael, 11 sep 2026 — "sea de sku, clientes,
-        # ordenes"). 440 of them have a shape AS400 cannot look up at all (UPCs,
-        # serials) and `is_lookupable` drops those without a list to maintain.
+    # And the parts. They were out of scope while this was about the bike
+    # CATALOGUE — a part has no model, size or colour to split. They are very
+    # much in scope now that the same screen answers "what does AS400 think is
+    # on the shelf": parts are 1,351 of the 1,923 SKUs with stock and **95% of
+    # the units** (Rafael, 11 sep 2026). 440 of them have a shape AS400 cannot
+    # look up at all (UPCs, serials) and `is_lookupable` drops those without a
+    # list to maintain.
+    if not rows and tier in ("auto", "parts"):
         rows = [
             r
             for r in (
@@ -737,9 +744,22 @@ def fetch_candidates(client=None) -> list:
 
 
 def next_sku(client=None) -> dict | None:
-    """The one SKU this gap should look up, or None when the queue is empty."""
-    queue = select_sku_queue(fetch_candidates(client), load_unknown())
-    return queue[0] if queue else None
+    """The one SKU this gap should look up, or None when there is truly nothing.
+
+    Walks the tiers in order and returns the first one that has something LEFT
+    AFTER the set-aside filter. That last part is the whole point: on 12 sep the
+    bike tier still had thirty rows in the database and every one of them was
+    stepped aside for landing on the NOTES form, so the old code took the bike
+    tier, filtered it down to nothing, and announced `the queue is empty` —
+    with 1,221 parts waiting behind it. A tier is empty when there is nothing in
+    it we can ASK FOR, not when the table has no rows.
+    """
+    unknown = load_unknown()
+    for tier in ("unregistered", "bikes", "parts"):
+        queue = select_sku_queue(fetch_candidates(client, tier=tier), unknown)
+        if queue:
+            return queue[0]
+    return None
 
 
 # The manual run lives on its own thread: an unbounded loop cannot sit inside a

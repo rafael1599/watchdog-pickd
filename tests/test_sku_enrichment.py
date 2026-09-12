@@ -1325,6 +1325,40 @@ def test_what_the_catalogue_does_not_have_at_all_goes_first():
     assert "bikes" not in c.calls and "parts" not in c.calls  # never even asked
 
 
+def test_a_tier_full_of_set_aside_skus_does_not_block_the_next_one(tmp_path, monkeypatch):
+    """12 sep 2026, en vivo: la barrida anuncio `the queue is empty` con **1.221
+    partes sin leer**.
+
+    Quedaban treinta bicis en la tabla y las treinta estaban apartadas por el
+    formulario NOTES (§2.12c). El paso a las partes se decidia sobre las filas
+    CRUDAS, asi que la fase de bicis contaba como «no vacia», se filtraba hasta
+    cero, y ahi se acababa todo. Una fase esta vacia cuando no queda nada que
+    PODAMOS pedir, no cuando la tabla no tiene filas.
+    """
+    import sku_enrichment
+
+    monkeypatch.setenv("SKU_UNKNOWN_PATH", str(tmp_path / "u.json"))
+    c = _FakeClient(bikes=[{"sku": "03-4983GY"}], parts=[{"sku": "98-6860"}])
+    monkeypatch.setattr(
+        sku_enrichment,
+        "fetch_candidates",
+        lambda client=None, tier="auto": (
+            []
+            if tier == "unregistered"
+            else [{"sku": "03-4983GY", "model": None, "qty": 0}]
+            if tier == "bikes"
+            else [{"sku": "98-6860", "model": None, "qty": 0}]
+        ),
+    )
+
+    # Con la bici disponible, manda la bici.
+    assert sku_enrichment.next_sku(c)["sku"] == "03-4983GY"
+
+    # Apartada, la cola NO se declara vacia: cae a las partes.
+    sku_enrichment.defer_sku("03-4983GY", "landed on the NOTES form")
+    assert sku_enrichment.next_sku(c)["sku"] == "98-6860"
+
+
 def test_a_bike_still_outranks_every_part():
     c = _FakeClient(bikes=[{"sku": "03-4039BR"}], parts=[{"sku": "98-6860"}])
     rows = sku_enrichment.fetch_candidates(c)
