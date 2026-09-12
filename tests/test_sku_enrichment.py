@@ -129,11 +129,18 @@ def test_a_sku_as400_already_refused_does_not_come_back():
 # ── §6 / R4: what a write would be ───────────────────────────────────────────
 
 
-def test_the_weight_gap_is_weight_verified_not_a_null():
-    # weight_lbs is NEVER null — the trigger writes 45 into every bike — so the
-    # hole to fill is "nobody weighed this", not "the column is empty".
+def test_the_weight_is_never_written_because_writing_it_would_seal_it():
+    # R4 says this path may improve a placeholder and may never claim somebody
+    # weighed it, and the database makes the two the same act: PickD's
+    # `set_dimensions_verified` sets `weight_verified = true` on ANY update that
+    # changes `weight_lbs`, and it is monotonic. So AS400's 36 would be filed as
+    # a scale reading for the bike PickD weighed at 33.6. It stays in the
+    # snapshot, where it says whose number it is.
     row = {"sku": "03-3933BK", "model": "CODA S2", "weight_lbs": 45, "weight_verified": False}
-    assert plan_write(row, {"weight_lbs": 36.0}) == {"weight_lbs": 36.0}
+    assert plan_write(row, {"weight_lbs": 36.0}) == {}
+    plan = plan_write(row, {"description": "CODA S2 L16 2026 GLOSS BLACK", "weight_lbs": 36.0})
+    assert "weight_lbs" not in plan
+    assert plan["as400_snapshot"]["weight_lbs"] == 36.0
 
 
 def test_a_scale_reading_is_never_touched():
@@ -165,15 +172,6 @@ def test_the_name_is_recorded_even_when_a_model_is_already_there():
     # and it still never touches the grouping key itself
     for never in ("model", "size", "color"):
         assert never not in plan_write(dirty, parsed)
-
-
-def test_the_weight_is_its_own_phase(monkeypatch):
-    # Now that every gap lands on a bike, the name phase and the weight phase
-    # would otherwise ship as one. §10 promised .env could separate them.
-    row = {"sku": "03-3933BK", "model": "CODA S2", "weight_lbs": 45, "weight_verified": False}
-    parsed = {"description": "CODA S2 L16 2026 GLOSS BLACK", "weight_lbs": 36.0}
-    assert "weight_lbs" not in plan_write(row, parsed, with_weight=False)
-    assert plan_write(row, parsed, with_weight=True)["weight_lbs"] == 36.0
 
 
 def test_the_watchdog_writes_the_name_raw_and_never_splits_it():
@@ -400,16 +398,23 @@ def _gap_harness(monkeypatch, *, idle=1e9, results=None):
 
     `operator_idle_seconds` remembers the last event it judged to be a PERSON's,
     and that memory is module state — so it has to be cleared here, or a gap
-    test inherits whoever the previous one pretended was at the keyboard. Same
-    for our own input stamp: left over, it makes a faked idle look newer than
-    our typing when it is not.
+    test inherits whoever the previous one pretended was at the keyboard.
+
+    Our own input stamp is cleared to **None = never typed**, not to 0.0. It was
+    0.0, and that is what made this file's burst test pass in the suite and fail
+    on its own: `time.monotonic()` counts from process start here, so 0.0 means
+    "the watchdog typed the moment the process began". Run alone, that was a few
+    milliseconds ago, every faked operator keystroke looked older than our own
+    typing, and the gate that should have fired never did. Run late in the
+    suite, the same 0.0 was thirteen seconds ago and the test passed. The
+    fixture was lying, not the gate.
     """
     import as400_capture
     import auto_scanner
     import sku_enrichment
 
     monkeypatch.setattr(auto_scanner, "_last_operator_input", None)
-    monkeypatch.setattr(as400_capture, "_last_self_input", 0.0)
+    monkeypatch.setattr(as400_capture, "_last_self_input", None)
     monkeypatch.setenv("SKU_ENRICH", "1")
     monkeypatch.setattr(auto_scanner, "_driver_for_sku_step", lambda: object())
     idles = iter(idle) if isinstance(idle, list) else None
@@ -589,14 +594,82 @@ def test_the_step_writes_only_once_f3_is_switched_on(monkeypatch):
     assert res["action"] == "written"
     assert written[0][0] == "03-3933BK"
     assert written[0][1]["as400_description"] == "CODA S2 L16 2026 GLOSS BLACK"
-    assert "weight_lbs" not in written[0][1]  # F4 is off
+    assert "weight_lbs" not in written[0][1]  # never: writing it would seal the flag
+    assert "weight_verified" not in written[0][1]
 
-    monkeypatch.setenv("SKU_ENRICH_WEIGHT", "1")
-    run_sku_step(
+
+def test_a_sku_with_no_catalogue_row_is_registered_not_updated(monkeypatch):
+    # The discovery queue. There is no row to fill in, so the step calls the
+    # alta instead of the update — behind the same F3 switch as every write.
+    import sku_enrichment
+
+    row = {"sku": "03-3933BK", "unregistered": True}
+    calls = []
+    monkeypatch.setattr(
+        sku_enrichment,
+        "register_from_as400",
+        lambda sku, parsed, client=None: (
+            calls.append((sku, parsed)),
+            {"action": "registered", "sku": sku},
+        )[1],
+    )
+    monkeypatch.setattr(
+        sku_enrichment,
+        "apply_write",
+        lambda *a, **k: pytest.fail("an unregistered SKU must never take the update path"),
+    )
+
+    monkeypatch.delenv("SKU_ENRICH_WRITE", raising=False)
+    res = run_sku_step(
         object(), dict(row), capture_fn=lambda s, d: STOCK_DETAIL, return_fn=lambda d: None
     )
-    assert written[1][1]["weight_lbs"] == 36.0
-    assert "weight_verified" not in written[1][1]
+    assert res["action"] == "read" and calls == []  # F2 logs the alta, never does it
+
+    monkeypatch.setenv("SKU_ENRICH_WRITE", "1")
+    res = run_sku_step(
+        object(), dict(row), capture_fn=lambda s, d: STOCK_DETAIL, return_fn=lambda d: None
+    )
+    assert res["action"] == "registered"
+    assert calls[0][0] == "03-3933BK"
+    assert calls[0][1]["description"] == "CODA S2 L16 2026 GLOSS BLACK"
+
+
+def test_the_alta_sends_as400s_own_bike_or_part_answer(monkeypatch):
+    # AS400's `B-Bike/P-Part` is the authoritative answer to what PickD guesses
+    # from a two-digit prefix. Registered blind, a part in department 03 would
+    # be born a bike — 45 lb and a bike carton, which is what the FedEx export
+    # reads.
+    import sku_enrichment
+
+    sent = {}
+
+    class _Rpc:
+        def execute(self):
+            return type("R", (), {"data": {"action": "registered"}})()
+
+    class _Client:
+        def rpc(self, name, args):
+            sent.update({"name": name, **args})
+            return _Rpc()
+
+    out = sku_enrichment.register_from_as400(
+        "03-9999ZZ",
+        {"description": "FRAME RENEGADE S1 61 2026 CHAR", "kind": "P", "on_hand": {"NJ": 3}},
+        client=_Client(),
+    )
+    assert out["action"] == "registered"
+    assert sent["name"] == "register_sku_from_as400"
+    assert sent["p_is_bike"] is False  # not the prefix's answer
+    assert sent["p_location"] == "UNKNOWN"
+    assert sent["p_as400_snapshot"]["on_hand"] == {"NJ": 3}
+
+
+def test_the_alta_refuses_a_screen_with_no_name():
+    # A row called nothing helps nobody find a box, and the RPC would reject it.
+    import sku_enrichment
+
+    out = sku_enrichment.register_from_as400("03-9999ZZ", {"description": "  "}, client=object())
+    assert out["action"] == "skipped"
 
 
 def test_a_write_that_vanished_into_a_missing_column_is_not_a_success():
@@ -920,8 +993,8 @@ def test_one_bad_lookup_drops_it_back_to_the_verified_way(monkeypatch):
 
 
 class _FakeTable:
-    def __init__(self, store, calls):
-        self.store, self.calls, self.f = store, calls, {}
+    def __init__(self, which, store, calls):
+        self.which, self.store, self.calls, self.f = which, store, calls, {}
 
     def select(self, *_a, **_k):
         return self
@@ -943,25 +1016,52 @@ class _FakeTable:
     def in_(self, *_a):
         return self
 
+    def order(self, *_a, **_k):
+        return self
+
     def limit(self, *_a):
         return self
 
     def execute(self):
-        want_bikes = self.f.get("is_bike") == ("eq", True)
-        self.calls.append("bikes" if want_bikes else "parts")
-        return type("R", (), {"data": self.store["bikes" if want_bikes else "parts"]})()
+        if self.which in ("unregistered", "inv"):
+            key = self.which
+        else:
+            key = "bikes" if self.f.get("is_bike") == ("eq", True) else "parts"
+        self.calls.append(key)
+        return type("R", (), {"data": self.store[key]})()
 
 
 class _FakeClient:
-    def __init__(self, bikes, parts):
-        self.store = {"bikes": bikes, "parts": parts, "inv": []}
+    def __init__(self, bikes, parts, unregistered=None):
+        self.store = {
+            "bikes": bikes,
+            "parts": parts,
+            "unregistered": unregistered or [],
+            "inv": [],
+        }
         self.calls = []
 
     def table(self, name):
         if name == "inventory":
-            t = _FakeTable({"bikes": [], "parts": []}, [])
-            return t
-        return _FakeTable(self.store, self.calls)
+            return _FakeTable("inv", {"inv": []}, [])
+        if name == "v_as400_skus_unregistered":
+            return _FakeTable("unregistered", self.store, self.calls)
+        return _FakeTable("meta", self.store, self.calls)
+
+
+def test_what_the_catalogue_does_not_have_at_all_goes_first():
+    # Rafael, 11 sep 2026. 55 SKUs, ~6 minutes of terminal, and every one is a
+    # line that says UNREG in Double Check today — the other two queues are
+    # 1,800 SKUs of tidying.
+    c = _FakeClient(
+        bikes=[{"sku": "03-4039BR"}],
+        parts=[{"sku": "98-6860"}],
+        unregistered=[{"sku": "86-0027", "last_name": "CHAINGUIDE EVO UPPER"}],
+    )
+    rows = sku_enrichment.fetch_candidates(c)
+    assert [r["sku"] for r in rows] == ["86-0027"]
+    assert rows[0]["unregistered"] is True
+    assert "bikes" not in c.calls and "parts" not in c.calls  # never even asked
 
 
 def test_a_bike_still_outranks_every_part():
@@ -979,7 +1079,12 @@ def test_the_parts_come_up_once_the_bikes_run_out():
 
 def test_a_shape_the_as400_cannot_look_up_never_enters():
     # UPCs and serials: 440 of them. The shape is the filter, so no hand-kept
-    # list of exceptions can go stale.
-    c = _FakeClient(bikes=[], parts=[{"sku": "792584991050"}, {"sku": "32-0419"}])
+    # list of exceptions can go stale — and it applies to the discovery queue
+    # too, where nothing has been vetted by a catalogue row.
+    c = _FakeClient(
+        bikes=[],
+        parts=[{"sku": "792584991050"}, {"sku": "32-0419"}],
+        unregistered=[{"sku": "Y22B010415"}],
+    )
     rows = sku_enrichment.fetch_candidates(c)
     assert [r["sku"] for r in rows] == ["32-0419"]

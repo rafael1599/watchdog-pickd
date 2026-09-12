@@ -455,7 +455,12 @@ def _run_sku_gap() -> float:
             # The full trip home is the `finally` below, once per gap.
             res = sku_enrichment.run_sku_step(_driver_for_sku_step(), row, home="menu")
             done += 1
-            _note_gap("working", read=1 if res.get("action") in ("read", "written") else 0)
+            # "registered" is the discovery queue's own success: a SKU AS400
+            # knows and the catalogue didn't, now a row at UNKNOWN.
+            _note_gap(
+                "working",
+                read=1 if res.get("action") in ("read", "written", "registered") else 0,
+            )
             if not res.get("returned", True):
                 # The terminal isn't back on the order search. Stop touching it;
                 # the next cycle's bootstrap is what recovers.

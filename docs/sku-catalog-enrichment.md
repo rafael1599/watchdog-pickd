@@ -286,7 +286,7 @@ deja retuneable **con editar `.env` y reiniciar el LaunchAgent**, sin desplegar 
 |---|---|---|
 | `SKU_ENRICH` | apagar el paso entero sin tocar el escáner | `1` |
 | `SKU_ENRICH_MAX_PER_GAP` | SKUs por hueco (la decisión es 1; la palanca existe por si el hueco resulta más barato de lo medido) | `1` |
-| `SKU_ENRICH_WEIGHT` | separar F4 de F3 sin desplegar | `0` hasta F4 |
+| ~~`SKU_ENRICH_WEIGHT`~~ | retirada el 11 sep 2026 — ver §26.1: escribir el peso lo sella como báscula | — |
 | `AS400_UNSTICK_TRIES` | los 3 intentos de `F6·F6·F7` de R3 | `3` |
 
 Se leen **en tiempo de llamada**, como los tunables de `as400_capture` — no en el import, o un
@@ -999,3 +999,66 @@ mismatch, la dirección y el transportista — y con él el guardia `uiBusy()`, 
 mientras alguien lee.
 
 Neto: `app.py` 1888 → ~1650 líneas; tres archivos de test fuera y uno reescrito. Suite: 505.
+
+---
+
+## 26) La tercera cola: lo que AS400 conoce y PickD no (11 sep 2026)
+
+Rafael: *«hay que preguntar incluso por sku que aun no existen en pickd y registrarlos en pickd con
+ubicación unknown, para que el usuario cuando lo encuentre solo mueva su ubicación a la real»*.
+
+Hasta aquí la cola salía de `sku_metadata`: sólo se preguntaba por filas que ya existían. Pero el
+AS400 imprime en los papeles **números que el catálogo no tiene** —109 distintos en los últimos
+meses— y cada uno sale `UNREG` en Double Check, con la orden abierta y alguien registrándolo a mano
+a media tarde. Si la fila ya existe con el nombre real del AS400, en el piso queda **un gesto**:
+mover la ubicación y contar.
+
+**El orden es: sin registrar → bicis → partes.** La primera salta a las otras dos porque es
+diminuta (55 SKUs, ~6 minutos de terminal), es finita, y es la única que desbloquea una orden que
+existe hoy; las otras son 1.800 SKUs de ordenar el catálogo. El alta además cura las órdenes
+abiertas sin que nadie las toque (`zz_touch_open_orders_for_sku`).
+
+**La cola es una vista de PickD, `v_as400_skus_unregistered`** (migración `20260912032748`), no una
+consulta armada aquí: el anti-join contra el catálogo lo hace SQL y el watchdog sólo lee. Trae una
+columna `looks_like`, porque **no todo lo que el AS400 imprime es una caja en un estante**:
+
+| `looks_like` | cuántos | por qué no se registra |
+|---|---|---|
+| `merchandise` | 55 | — se registra |
+| `scratch_dent` | 39 | una unidad concreta vendida una vez; buscarla es buscar una bici que salió en marzo |
+| `variant_sibling` | 8 | `03-3768BLT` **es** `03-3768BL`: la tercera letra es acabado (26 ago 2026). Registrarlo parte en dos lo que idea-154 unió |
+| `not_stock` | 7 | `BILLING FOR STATE SALES TAX`, `BICYCLE BUILD FEE`, `MISC EBAY SOLD PARTS` |
+
+Las cuatro clases **siguen en la vista**: se clasifica, no se descarta, y una query las enseña.
+
+**El alta es una RPC de PickD** (`register_sku_from_as400`), no un insert desde aquí. Las reglas de
+lo que una fila de catálogo puede afirmar viven junto a los triggers que si no las contradicen:
+cantidad **0** siempre, ubicación **`UNKNOWN`** (`counts_as_storage = false`, `picking_order` 9999),
+`is_bike` **del `B-Bike/P-Part` del AS400** —que es la respuesta autoritativa a lo que PickD adivina
+por prefijo: registrada a ciegas, una parte del departamento 03 nacería bici, con 45 lb y caja de
+bici, y esa caja acaba en el export de FedEx.
+
+### 26.1 F4 se retira: el peso no se puede escribir sin mentir
+
+`plan_write` ya no escribe `weight_lbs`, y `SKU_ENRICH_WEIGHT` desaparece. No es un cambio de
+prioridad, es que **la fase era imposible tal como estaba diseñada**: PickD marca
+`weight_verified = true` en **cualquier** UPDATE que cambie `weight_lbs`
+(`set_dimensions_verified`, 1 sep 2026 — *«el que mide lo dice, no el valor que cambió»*), y la
+bandera es monótona, no se puede bajar después. Encender F4 habría archivado el 36 del AS400 como
+lectura de báscula para la bici que PickD pesó en 33,6 — exactamente lo que R4 prohíbe — y en ~800
+filas.
+
+El número no se pierde: viaja en `as400_snapshot.weight_lbs`, donde dice de quién es. Ascenderlo a
+peso de envío para las partes que hoy llevan 1 lb de default es una decisión con nombre y persona, y
+la evidencia para tomarla se está recogiendo sola.
+
+### 26.2 El arnés de los huecos mentía sobre quién tecleó
+
+`tests/test_sku_enrichment.py::test_the_burst_stops_the_moment_the_operator_touches_the_keyboard`
+pasaba dentro de la suite y fallaba solo. La causa: `as400_capture._last_self_input` arrancaba en
+`0.0`, y en este Python `time.monotonic()` cuenta **desde que arranca el proceso**, no desde el
+arranque de la máquina. O sea que `0.0` no significa «el watchdog no ha tecleado en mucho» sino
+«acaba de teclear»: corriendo solo, eso eran milisegundos, cada pulsación falsa del operador parecía
+más vieja que nuestro propio tecleo y la compuerta nunca se abría. Corriendo tarde en la suite eran
+trece segundos y pasaba. Ahora el valor inicial es `None` = *nunca hemos tecleado*
+(`seconds_since_self_input()` devuelve infinito), que es lo que de verdad pasa al arrancar.

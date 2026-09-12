@@ -62,17 +62,6 @@ def enabled() -> bool:
     return os.getenv("SKU_ENRICH", "0") in ("1", "true", "True", "yes")
 
 
-def weight_enabled() -> bool:
-    """F4's switch, kept separate from F3 now that every read touches a weight.
-
-    The queue no longer filters on "no model" (Rafael, 2026-09-08), so every gap
-    lands on a bike whose weight is probably the trigger's 45. Without this the
-    name phase and the weight phase would ship as one, and §10 promised they
-    could be separated from .env.
-    """
-    return os.getenv("SKU_ENRICH_WEIGHT", "0") in ("1", "true", "True", "yes")
-
-
 def writes_enabled() -> bool:
     """F3's switch. While this is off the step logs its plan and writes nothing."""
     return os.getenv("SKU_ENRICH_WRITE", "0") in ("1", "true", "True", "yes")
@@ -213,7 +202,7 @@ def select_sku_queue(rows, unknown=None) -> list:
 # ── what a write WOULD be (§6) ───────────────────────────────────────────────
 
 
-def plan_write(row: dict, parsed: dict, with_weight: bool = True) -> dict:
+def plan_write(row: dict, parsed: dict) -> dict:
     """The columns this SKU would get, given the screen. Pure, and the whole of
     the write rule lives here so F3 has nothing left to decide.
 
@@ -239,22 +228,20 @@ def plan_write(row: dict, parsed: dict, with_weight: bool = True) -> dict:
                          asking again (Q7) — the model stays empty until Pickd
                          splits, so without this the same SKU would come back
                          every gap, forever.
-      weight_lbs         only when `weight_verified` is false. The gap for the
-                         weight is NOT a NULL: the trigger writes 45 into every
-                         bike, so that 45 is a placeholder, not anybody's data.
-                         A scale reading is never touched.
-      weight_verified    never set to true by this path (R4). AS400 says 36 where
-                         Pickd's scale says 33.6 for the same bike: it is better
-                         than a generic 45 and it is not a weighing.
+    **The weight is not written, and F4 is withdrawn** (11 sep 2026). R4 says
+    this path must never claim a weighing, and the database makes that
+    impossible: `set_dimensions_verified` sets `weight_verified = true` on ANY
+    update that changes `weight_lbs` (Pickd, 1 sep 2026 — "el que mide lo dice,
+    no el valor que cambió"), and it is monotonic, so it cannot be undone
+    afterwards. Writing AS400's 36 would therefore file it as a scale reading
+    for a bike Pickd weighed at 33.6. The number is not lost: it rides in
+    `as400_snapshot.weight_lbs`, where it says whose it is. Promoting it to
+    Pickd's shipping weight is a decision with a name and a person, and the
+    evidence to make it is already being collected.
 
     Returns {} when there is nothing safe to write.
     """
     plan: dict = {}
-
-    if with_weight and not (row.get("weight_verified")) and parsed.get("weight_lbs") is not None:
-        weight = parsed["weight_lbs"]
-        if weight > 0 and weight != row.get("weight_lbs"):
-            plan["weight_lbs"] = weight
 
     if not (row.get("as400_description") or "").strip():
         description = (parsed.get("description") or "").strip()
@@ -316,6 +303,58 @@ def apply_write(sku: str, plan: dict, client=None) -> dict:
             "Run migrations.py (or check SUPABASE_DB_URL) on this machine."
         )
     return {"written": n}
+
+
+def register_from_as400(sku: str, parsed: dict, client=None) -> dict:
+    """Give a SKU AS400 knows and PickD doesn't a row in the catalogue.
+
+    Rafael, 11 sep 2026: «hay que preguntar incluso por sku que aun no existen
+    en pickd y registrarlos en pickd con ubicación unknown, para que el usuario
+    cuando lo encuentre solo mueva su ubicación a la real».
+
+    An RPC, not an insert, and that is the point: the rules of what a catalogue
+    row may claim —qty 0, `UNKNOWN`, `weight_verified` untouched— live in one
+    place, next to the triggers that would otherwise contradict them, and PickD
+    owns them. From here it is one call with what the screen said.
+
+    `is_bike` comes from AS400's own `B-Bike/P-Part`, which is the authoritative
+    answer to a question PickD guesses from a two-digit prefix: registered
+    blind, a part in department 03 would be born a bike, with 45 lb and a bike
+    carton that ends up in the FedEx export.
+    """
+    if client is None:
+        from supabase_client import get_client
+
+        client = get_client()
+
+    description = (parsed.get("description") or "").strip()
+    if not description:
+        # Without a name there is nothing to register: the RPC would reject it,
+        # and rightly — a row called nothing helps nobody find a box.
+        return {"action": "skipped", "sku": sku, "why": "the screen carried no description"}
+
+    kind = parsed.get("kind")
+    res = client.rpc(
+        "register_sku_from_as400",
+        {
+            "p_sku": sku,
+            "p_item_name": description,
+            "p_is_bike": (kind == "B") if kind in ("B", "P") else None,
+            "p_location": "UNKNOWN",
+            "p_warehouse": "LUDLOW",
+            "p_as400_description": description,
+            "p_as400_snapshot": {
+                "description": description,
+                "kind": kind,
+                "model_year": parsed.get("model_year"),
+                "weight_lbs": parsed.get("weight_lbs"),
+                "on_hand": parsed.get("on_hand"),
+            },
+            "p_internal_note": None,
+        },
+    ).execute()
+    out = res.data if isinstance(res.data, dict) else {}
+    return {"action": out.get("action") or "registered", "sku": sku, "rpc": out}
 
 
 # ── the step ─────────────────────────────────────────────────────────────────
@@ -392,8 +431,6 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
             )
             return {"action": "mismatch", "sku": sku, "screen_sku": parsed.get("sku")}
 
-        plan = plan_write(row, parsed, with_weight=weight_enabled())
-
         log.info(
             "SKU %s in %.2fs — description=%r weight=%s kind=%s on_hand=%s",
             sku,
@@ -405,12 +442,25 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
         )
         # AS400 knows whether it is a bike; Pickd guesses it from a prefix. Log
         # the disagreements and change nothing — enough of them and it earns a
-        # PRD of its own (Q6).
+        # PRD of its own (Q6). For a SKU with no row yet there is no guess to
+        # disagree with: AS400's answer goes straight in.
         kind = parsed.get("kind")
+        description = (parsed.get("description") or "").strip()
         if kind and row.get("is_bike") is not None and (kind == "B") != bool(row.get("is_bike")):
             log.warning(
                 "SKU %s: AS400 says %s, Pickd has is_bike=%s", sku, kind, row.get("is_bike")
             )
+        # A SKU with no catalogue row at all is registered, not updated: there
+        # is no row to fill in. Same switch as every other write.
+        if row.get("unregistered"):
+            if writes_enabled():
+                out = register_from_as400(sku, parsed)
+                log.info("SKU %s: %s at UNKNOWN — %r", sku, out["action"], description)
+                return {"action": out["action"], "sku": sku, "parsed": parsed}
+            log.info("SKU %s WOULD register at UNKNOWN: %r (%s)", sku, description, kind)
+            return {"action": "read", "sku": sku, "parsed": parsed, "plan": {}}
+
+        plan = plan_write(row, parsed)
         if plan and writes_enabled():
             written = apply_write(sku, plan)
             log.info("SKU %s wrote %s (%d row)", sku, plan, written["written"])
@@ -453,7 +503,10 @@ _META_COLS = "sku, model, size, color, weight_lbs, weight_verified, is_bike, as4
 
 
 def fetch_candidates(client=None) -> list:
-    """Catalogue rows that could use a lookup, with their floor stock attached.
+    """Rows that could use a lookup, with their floor stock attached.
+
+    Three queues in order, one at a time: the SKUs AS400 named on a paper and
+    the catalogue does not have, then the bikes nobody has read, then the parts.
 
     Two reads, not a join: PostgREST cannot join `inventory` onto `sku_metadata`
     here, and the set is small enough that asking twice is cheaper than teaching
@@ -464,19 +517,50 @@ def fetch_candidates(client=None) -> list:
 
         client = get_client()
 
-    # Bikes first, and strictly: parts only come up once no bike is left to ask
-    # about. Same cadence the catalogue work already has with the customers
+    # The SKUs AS400 printed on a paper and the catalogue does not have, FIRST
+    # (Rafael, 11 sep 2026). Three reasons it jumps the bike queue: it is tiny
+    # and finite (55 at the time of writing, ~6 minutes of terminal), every one
+    # of them is a line that says UNREG in Double Check *today*, and the alta
+    # cures those orders without anybody opening them
+    # (`zz_touch_open_orders_for_sku`). The other two queues are 1,800 SKUs of
+    # catalogue tidying: they can wait six minutes.
+    #
+    # `looks_like` is the view's own filter: a variant sibling would split what
+    # idea-154 merged, a Scratch & Dent number is one bike sold once, and a
+    # billing line is not a box on a shelf. All three stay visible in the view;
+    # only `merchandise` gets registered.
+    rows = [
+        {"sku": r["sku"], "last_name": r.get("last_name"), "unregistered": True}
+        for r in (
+            client.table("v_as400_skus_unregistered")
+            .select("sku, last_name, last_seen, looks_like")
+            .eq("looks_like", "merchandise")
+            .order("last_seen", desc=True)
+            .limit(QUEUE_FETCH_LIMIT)
+            .execute()
+        ).data
+        or []
+        if is_lookupable(r.get("sku") or "")
+    ]
+
+    # Then the bikes, and strictly: parts only come up once no bike is left to
+    # ask about. Same cadence the catalogue work already has with the customers
     # (docs/customer-enrichment.md) — one finite queue at a time, in the order
     # somebody would work them.
-    rows = (
-        client.table("sku_metadata")
-        .select(_META_COLS)
-        .eq("is_bike", True)
-        .is_("as400_description", "null")  # every bike, once (Q7)
-        .limit(QUEUE_FETCH_LIMIT)
-        .execute()
-    ).data or []
-    rows = [r for r in rows if is_lookupable(r.get("sku") or "")]
+    if not rows:
+        rows = [
+            r
+            for r in (
+                client.table("sku_metadata")
+                .select(_META_COLS)
+                .eq("is_bike", True)
+                .is_("as400_description", "null")  # every bike, once (Q7)
+                .limit(QUEUE_FETCH_LIMIT)
+                .execute()
+            ).data
+            or []
+            if is_lookupable(r.get("sku") or "")
+        ]
 
     if not rows:
         # The parts. They were out of scope while this was about the bike
