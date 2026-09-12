@@ -493,7 +493,11 @@ def _run_sku_gap() -> float:
                 "working" if good else f"{res.get('action')}: {res.get('why') or res.get('sku')}",
                 read=1 if good else 0,
             )
-            if not res.get("returned", True):
+            # `is False` y no `not ...`: None significa «no se intentó el viaje
+            # porque el paso salió mal, y el camino verificado de aquí abajo ES
+            # el viaje». Tratarlo como fallo terminaría el hueco en cada
+            # tropiezo, que es justo lo que esto viene a evitar.
+            if res.get("returned") is False:
                 # The terminal isn't back on the order search. Stop touching it;
                 # the next cycle's bootstrap is what recovers.
                 log.warning("auto-scan: SKU step didn't get home — pausing the SKU queue")
@@ -507,11 +511,20 @@ def _run_sku_gap() -> float:
                 # An `unknown` or a `mismatch` leaves us unsure of the screen.
                 # One Cmd7 is not enough to trust it: walk the verified way home
                 # before the next lookup, and verify that one.
+                #
+                # Al MENÚ, no a la búsqueda de órdenes. Lo siguiente es otro SKU
+                # y `capture_stock_inquiry` entra desde el menú con un `2`;
+                # caminar hasta Order Inquiry obligaba a teclear 3 para entrar y
+                # F7 para salir otra vez — sale del menú para volver a entrar, y
+                # cada paso de esos es una lectura de pantalla por AppleScript,
+                # que es donde de verdad se va el tiempo (Rafael, 12 sep 2026:
+                # «por qué retrasa tanto»). El viaje completo a casa sigue
+                # siendo uno por hueco, en el `finally`.
                 on_search = False
                 try:
-                    from as400_capture import return_to_order_search
+                    from as400_capture import return_to_menu
 
-                    return_to_order_search(_driver_for_sku_step())
+                    return_to_menu(_driver_for_sku_step())
                 except Exception as e:  # noqa: BLE001
                     log.warning("auto-scan: could not recover after a %s (%s)", res["action"], e)
                     # The exception text carries the screens it saw; dropping it

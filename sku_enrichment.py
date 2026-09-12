@@ -483,13 +483,13 @@ def run_sku_step(
     # the next capture, so stopping there skips typing 3 to enter the order
     # search and F7 to leave it again. The full trip home runs once, when the
     # run ends — the caller owns that.
-    if return_fn is None:
-        return_fn = {
-            "search": return_to_search,
-            "menu": return_to_menu,
-        }.get(home, return_to_order_search)
+    chosen = return_fn or {
+        "search": return_to_search,
+        "menu": return_to_menu,
+    }.get(home, return_to_order_search)
     sku = (row.get("sku") or "").strip().upper()
     started = time.monotonic()
+    result = None
 
     try:
         result = _look_up(
@@ -499,12 +499,30 @@ def run_sku_step(
         # Part of the step, not a cleanup, and it runs whether the lookup worked
         # or blew up: a step that leaves the terminal on a stock screen costs the
         # scanner its next order, which is the whole budget this is spending.
-        try:
-            return_fn(driver)
-            returned = True
-        except Exception as e:
-            log.warning("SKU %s: could not get back to %s (%s)", sku, home, e)
-            returned = False
+        #
+        # …but a BLIND Cmd7 only makes sense after a clean read, where we know we
+        # are on the detail screen and Cmd7 lands on the search form. After a
+        # mismatch we do not know where we are, and pressing it anyway was worse
+        # than useless: it moved the terminal one more step before the caller's
+        # verified walk home, which then had to work out where that step left us.
+        # Two trips home for one stumble (Rafael, 12 sep 2026: «por qué retrasa
+        # tanto»). Now a bad lookup leaves the screen untouched and the caller
+        # walks once.
+        # `returned` tiene tres valores a propósito: True llegó, False lo
+        # intentó y no pudo (el que hace parar la cola), y **None = no se
+        # intentó**, que es este caso y no es un fallo. Meterlo en False haría
+        # que el bucle terminara el hueco en cada tropiezo, que es justo lo que
+        # esto viene a evitar.
+        clean = bool(result) and result.get("action") in ("read", "written", "registered")
+        if clean or chosen is not return_to_search:
+            try:
+                chosen(driver)
+                returned = True
+            except Exception as e:
+                log.warning("SKU %s: could not get back to %s (%s)", sku, home, e)
+                returned = False
+        else:
+            returned = None  # el caminar verificado del llamante es el viaje
 
     result["returned"] = returned
     return result

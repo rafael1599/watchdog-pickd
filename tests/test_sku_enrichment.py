@@ -611,14 +611,62 @@ def test_the_gap_types_the_next_sku_where_it_stands(monkeypatch):
             {"action": "read", "sku": "D", "returned": True},
         ],
     )
-    recovered = []
     import as400_capture
 
-    monkeypatch.setattr(as400_capture, "return_to_order_search", lambda d: recovered.append(1))
+    al_menu, a_casa = [], []
+    monkeypatch.setattr(as400_capture, "return_to_menu", lambda d: al_menu.append(1))
+    monkeypatch.setattr(as400_capture, "return_to_order_search", lambda d: a_casa.append(1))
     auto_scanner._run_sku_gap()
     # 1st verified, 2nd and 3rd optimistic, 4th verified again after the unknown.
     assert hops == [False, True, True, False]
-    assert len(recovered) == 2  # once to recover from the unknown, once at the end
+    # Tras el tropiezo se vuelve al MENÚ, que es de donde entra la siguiente
+    # consulta; el viaje completo a la búsqueda de órdenes es uno por hueco.
+    assert len(al_menu) == 1
+    assert len(a_casa) == 1
+
+
+def test_a_bad_lookup_does_not_get_a_blind_cmd7_on_top(tmp_path, monkeypatch):
+    """Dos viajes a casa para un solo tropiezo.
+
+    El `finally` daba un Cmd7 a ciegas pasara lo que pasara, y justo despues el
+    bucle hacia el camino verificado completo. Ese Cmd7 solo tiene sentido tras
+    una lectura limpia, donde sabemos que estamos en el detalle; despues de un
+    mismatch no sabemos donde estamos y el golpe movia el terminal un paso mas
+    que el camino verificado tenia luego que averiguar.
+
+    `returned` pasa a tener tres valores: True llego, False lo intento y no
+    pudo, None no se intento — y esta ultima NO puede leerse como fallo o el
+    hueco terminaria en cada tropiezo.
+    """
+    import sku_enrichment
+
+    viajes = []
+
+    def _boom(*a, **k):
+        raise sku_enrichment.StockScreenMismatch("Landed on the NOTES form")
+
+    monkeypatch.setenv("SKU_UNKNOWN_PATH", str(tmp_path / "u.json"))
+    res = sku_enrichment.run_sku_step(
+        object(),
+        {"sku": "03-4983GY"},
+        capture_fn=_boom,
+        home="search",
+        return_fn=None,
+    )
+    assert res["action"] == "mismatch"
+    assert res["returned"] is None  # no se intento, y eso no es un fallo
+    assert viajes == []
+
+    # Tras una lectura limpia si se da, porque ahi Cmd7 aterriza donde toca.
+    ok = sku_enrichment.run_sku_step(
+        object(),
+        {"sku": "03-3933BK"},
+        capture_fn=lambda s, d, **k: STOCK_DETAIL,
+        home="search",
+        return_fn=lambda d: viajes.append(1),
+    )
+    assert ok["action"] in ("read", "written")
+    assert ok["returned"] is True and viajes == [1]
 
 
 def test_the_heartbeat_says_which_way_the_step_failed(monkeypatch):
