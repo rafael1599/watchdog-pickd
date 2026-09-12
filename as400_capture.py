@@ -708,6 +708,13 @@ class MochaDriver:
         with nothing in the log to say why.
         """
         timeout = _env_float("AS400_OSASCRIPT_TIMEOUT", OSASCRIPT_TIMEOUT_DEFAULT)
+        # Anything that types is OUR input, and this is the one door every
+        # AppleScript goes through. Stamping in `key`/`type_text` alone missed
+        # the biggest source by far: `copy_screen` sends Cmd+A and Cmd+C from
+        # INSIDE its own script, several times a minute, so the watchdog kept
+        # resetting the idle clock it was about to read and standing down for
+        # itself (11 sep 2026).
+        types = "keystroke" in script or "key code" in script
         try:
             result = subprocess.run(
                 ["osascript", "-e", script],
@@ -716,6 +723,11 @@ class MochaDriver:
                 capture_output=capture,
                 text=capture,
             )
+            # AFTER the run, not before: the event lands while the script is
+            # still going, and a stamp taken first would read older than the
+            # event it stands for — which reads as somebody else having typed.
+            if types:
+                note_self_input()
             return result.stdout if capture else None
         except subprocess.TimeoutExpired as e:
             raise CaptureError(
@@ -840,7 +852,6 @@ class MochaDriver:
         # Escaped for the AppleScript string literal: a quote or a backslash in the
         # value used to break the script and surface as an unexplained 500.
         safe = str(text).replace("\\", "\\\\").replace('"', '\\"')
-        note_self_input()
         self._osascript(f'tell application "System Events" to keystroke "{safe}"')
 
     def key(self, name: str):
@@ -848,7 +859,6 @@ class MochaDriver:
         code = KEY_CODES.get(name.lower())
         if code is None:
             raise ValueError(f"Unknown key: {name}")
-        note_self_input()
         self._osascript(f'tell application "System Events" to key code {code}')
 
     def copy_screen(self, steps=()) -> str:

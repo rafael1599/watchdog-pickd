@@ -1207,3 +1207,32 @@ def test_void_header_skips_before_pressing_f5():
     # dead-end message screen.
     assert driver.keys == ["f6", "f6"]
     assert "f5" not in driver.keys
+
+
+# ── the watchdog's own typing must not read as the operator ──────────────────
+
+
+def test_a_script_that_types_stamps_our_own_input(monkeypatch):
+    # copy_screen sends Cmd+A and Cmd+C from inside its own AppleScript, several
+    # times a minute. Stamping only in key()/type_text() missed all of them, and
+    # the scanner kept reading its own reads as somebody at the keyboard.
+    import as400_capture as m
+
+    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": ""})())
+    m._last_self_input = 0.0
+    d = m.MochaDriver()
+    d._osascript('tell application "System Events" to keystroke "a" using command down')
+    assert m.seconds_since_self_input() < 1.0
+
+
+def test_a_script_that_only_reads_does_not_stamp(monkeypatch):
+    # Asking which window is frontmost posts no event, so it must not look like
+    # one — or the gate would never open.
+    import as400_capture as m
+
+    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": ""})())
+    m._last_self_input = 0.0
+    before = m.seconds_since_self_input()
+    d = m.MochaDriver()
+    d._osascript('tell application "System Events" to get name of first process')
+    assert m.seconds_since_self_input() >= before
