@@ -994,7 +994,7 @@ def _unstick_tries() -> int:
     return max(1, int(_env_float("AS400_UNSTICK_TRIES", 3)))
 
 
-def return_to_order_search(driver, step_wait: float = 0.6, read_fn=None) -> str:
+def return_to_order_search(driver, step_wait: float = 0.6, read_fn=None, page_wait=None) -> str:
     """Put the terminal back on the order-search screen, and PROVE it by reading.
 
     The return trip is part of the step, not a tidy-up: a step that ends anywhere
@@ -1003,9 +1003,19 @@ def return_to_order_search(driver, step_wait: float = 0.6, read_fn=None) -> str:
     AS400_UNSTICK_TRIES. Raises rather than leaving the terminal parked somewhere
     the next capture won't recognize.
 
+    **A key that loads a page waits `page_wait`, not `step_wait`** — the same
+    mistake, in its second home, cost the sweep of 12 sep twice: going from the
+    menu into Order Inquiry is a whole page repaint and it was given 0.6 s, so
+    the loop re-read the menu it had just left, spent its three tries and raised
+    with the terminal sitting exactly where it should have been. `step_wait` is
+    for the gap BETWEEN keys of one gesture (the F6·F6 of an unstick); the wait
+    for a screen to arrive is `page_wait`.
+
     Never touches the ADDITIONAL MESSAGE INFORMATION dead end, where no key works.
     """
     read = read_fn or driver.copy_screen
+    if page_wait is None:
+        page_wait = _env_float("AS400_PAGE_WAIT", PAGE_WAIT_DEFAULT)
     for _ in range(_unstick_tries()):
         screen = read()
         state = classify_screen(screen)
@@ -1024,7 +1034,7 @@ def return_to_order_search(driver, step_wait: float = 0.6, read_fn=None) -> str:
             driver.key("enter")
         else:
             unstick_to_menu(driver, step_wait=step_wait)
-        time.sleep(step_wait)
+        time.sleep(page_wait)
 
     raise AS400ManualLoginRequired(
         f"Couldn't get back to the order search after {_unstick_tries()} tries of F6·F6·F7."
@@ -1046,7 +1056,7 @@ def return_to_search(driver, step_wait: float = 0.6) -> None:
     time.sleep(step_wait)
 
 
-def return_to_menu(driver, step_wait: float = 0.6, read_fn=None) -> str:
+def return_to_menu(driver, step_wait: float = 0.6, read_fn=None, page_wait=None) -> str:
     """Put the terminal on the SALESN menu, and PROVE it by reading.
 
     The short way home, for when the next thing is another SKU. Going all the
@@ -1061,6 +1071,8 @@ def return_to_menu(driver, step_wait: float = 0.6, read_fn=None) -> str:
     a terminal left anywhere else costs the scanner its next order.
     """
     read = read_fn or driver.copy_screen
+    if page_wait is None:
+        page_wait = _env_float("AS400_PAGE_WAIT", PAGE_WAIT_DEFAULT)
     for _ in range(_unstick_tries()):
         screen = read()
         state = classify_screen(screen)
@@ -1074,7 +1086,7 @@ def return_to_menu(driver, step_wait: float = 0.6, read_fn=None) -> str:
                 "works. Close the session and log back in."
             )
         unstick_to_menu(driver, step_wait=step_wait)
-        time.sleep(step_wait)
+        time.sleep(page_wait)
 
     raise AS400ManualLoginRequired(
         f"Couldn't get back to the menu after {_unstick_tries()} tries of F6·F6·F7."

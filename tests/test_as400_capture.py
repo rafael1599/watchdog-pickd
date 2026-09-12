@@ -1278,3 +1278,44 @@ def test_when_one_f7_does_not_reach_the_menu_it_walks_the_operators_way_out():
     )
     assert "CODA S2" in out
     assert keys[:4] == ["f7", "f6", "f6", "f7"]
+
+
+def test_the_wait_for_a_page_is_not_the_wait_between_two_keys():
+    """El mismo error, en su segunda casa, y costó la barrida del 12 sep dos veces.
+
+    Ir del menú a Order Inquiry es un repintado de página entera y se le daban
+    0,6 s (`step_wait`), así que el bucle releía el menú que acababa de dejar,
+    gastaba sus tres intentos y se rendía con el terminal justo donde debía
+    estar. `step_wait` es el hueco ENTRE las teclas de un gesto (el F6·F6 de un
+    unstick); lo que se espera a que llegue una pantalla es `page_wait`.
+    """
+    import as400_capture
+
+    MENU = "SALESN OPTIONS\n READY FOR OPTION"
+    SEARCH = "Order Number:            Account Number:\nAlpha Search:"
+    waits = []
+    real_sleep = as400_capture.time.sleep
+
+    class D:
+        def key(self, k):
+            pass
+
+        def type_text(self, t):
+            pass
+
+        def copy_screen(self):
+            return MENU
+
+    # El menú primero, la búsqueda después de que el ENTER haya tenido su tiempo.
+    screens = iter([MENU, SEARCH])
+    try:
+        as400_capture.time.sleep = lambda s: waits.append(s)
+        out = as400_capture.return_to_order_search(
+            D(), step_wait=0.6, page_wait=9.0, read_fn=lambda: next(screens)
+        )
+    finally:
+        as400_capture.time.sleep = real_sleep
+
+    assert out == SEARCH
+    # 0.6 entre el "3" y el ENTER; 9.0 esperando a que la página llegue.
+    assert waits == [0.6, 9.0]
