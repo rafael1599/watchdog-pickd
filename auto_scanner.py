@@ -612,23 +612,31 @@ def _loop() -> None:
                 except Exception:  # noqa: BLE001 — can't read it, treat as stuck
                     parked = None
                 note_as400(False, parked)
-                if parked in OPERATOR_SCREENS:
+                # …pero sólo si hay alguien. El cronómetro contaba desde que
+                # NOSOTROS vimos la pantalla, y la ráfaga del catálogo termina
+                # justamente en una pantalla de stock — así que el watchdog se
+                # apartaba diez minutos por su propio trabajo. Medido el 12 sep:
+                # 33 SKUs en siete minutos (283/hora) y después 26 minutos de
+                # nada, una y otra vez.
+                #
+                # La pregunta no es «cuánto lleva ahí esa pantalla» sino «¿tocó
+                # alguien el teclado?», y esa ya tiene respuesta:
+                # `operator_idle_seconds` recuerda el último evento que NO fue
+                # nuestro. Es la cuarta casa de la misma lección.
+                idle_now = operator_idle_seconds()
+                if parked in OPERATOR_SCREENS and idle_now < OPERATOR_HOLD_SEC:
                     if _operator_since is None:
                         _operator_since = time.monotonic()
                         log.info(
-                            "auto-scan: the operator has the terminal (%s) — standing down",
+                            "auto-scan: somebody is on %s (idle %.0fs) — standing down",
                             parked,
+                            idle_now,
                         )
-                    held = time.monotonic() - _operator_since
-                    if held < OPERATOR_HOLD_SEC:
-                        _kick.clear()
-                        _interruptible_wait(IDLE_POLL_SEC)
-                        continue
-                    log.warning(
-                        "auto-scan: %s for %.0f min — taking the terminal back",
-                        parked,
-                        held / 60,
-                    )
+                    _kick.clear()
+                    _interruptible_wait(IDLE_POLL_SEC)
+                    continue
+                if _operator_since is not None:
+                    log.info("auto-scan: taking the terminal back (idle %.0fs)", idle_now)
                 _operator_since = None
                 # Try to (re)connect; if it works, retry promptly next iteration.
                 try:

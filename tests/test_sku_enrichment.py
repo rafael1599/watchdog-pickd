@@ -586,6 +586,31 @@ def test_a_step_that_read_says_only_working(monkeypatch):
     assert auto_scanner.gap_state()["reason"] == "working"
 
 
+def test_the_watchdog_does_not_stand_down_for_its_own_stock_screen(monkeypatch):
+    """El escaner trata una pantalla de stock como «el operario esta usando el
+    terminal» y se aparta diez minutos. Pero la rafaga del catalogo TERMINA en
+    una pantalla de stock, asi que el watchdog se apartaba por su propio
+    trabajo: medido el 12 sep, 33 SKUs en siete minutos y despues 26 de nada.
+
+    La pregunta no es cuanto lleva ahi esa pantalla, sino si alguien toco el
+    teclado — y eso ya lo sabe `operator_idle_seconds`.
+    """
+    import as400_capture
+    import auto_scanner
+
+    monkeypatch.setattr(auto_scanner, "_last_operator_input", None)
+    monkeypatch.setattr(as400_capture, "_last_self_input", None)
+
+    # Nadie ha tocado el Mac en horas: la pantalla de stock es NUESTRA.
+    monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 1e9)
+    assert auto_scanner.operator_idle_seconds() >= auto_scanner.OPERATOR_HOLD_SEC
+
+    # Alguien acaba de teclear: entonces si es suya y se respeta.
+    monkeypatch.setattr(auto_scanner, "_last_operator_input", None)
+    monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 3.0)
+    assert auto_scanner.operator_idle_seconds() < auto_scanner.OPERATOR_HOLD_SEC
+
+
 def test_a_manual_get_orders_now_wins_over_catalogue_work(monkeypatch):
     # They asked for orders, not for catalogue work.
     import auto_scanner
