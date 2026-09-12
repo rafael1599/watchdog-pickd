@@ -1341,3 +1341,33 @@ def test_giving_up_says_which_screens_it_saw():
         as400_capture.return_to_order_search(D(), step_wait=0, page_wait=0, read_fn=lambda: STOCK)
     assert "saw:" in str(e.value)
     assert as400_capture.STATE_STOCK_INQUIRY in str(e.value)
+
+
+def test_order_inquiry_is_already_home():
+    """`saw: menu → order_inquiry → menu`, dicho por el heartbeat el 12 sep.
+
+    Teclear 3 desde el menu aterriza en Order Inquiry. Exigir la pantalla de
+    busqueda trataba esa llegada como desconocida, hacia F6·F6·F7 de vuelta al
+    menu, tecleaba 3 otra vez, y quemaba sus tres intentos en un baile de dos
+    pasos con el terminal en casa las tres veces. Ready es lo que el escaner
+    puede trabajar, que es lo que dice `_READY_STATES`.
+    """
+    import as400_capture
+
+    MENU = "SALESN OPTIONS\n READY FOR OPTION"
+    INQUIRY = "Order Number: 881546   Account Number: 0010495 00\n Bill TO"
+    screens = iter([MENU, INQUIRY])
+    keys = []
+
+    class D:
+        def key(self, k):
+            keys.append(k)
+
+        def type_text(self, t):
+            keys.append(f"type:{t}")
+
+    out = as400_capture.return_to_order_search(
+        D(), step_wait=0, page_wait=0, read_fn=lambda: next(screens)
+    )
+    assert out == INQUIRY
+    assert keys == ["type:3", "enter"]  # ni un F6 de vuelta al menu

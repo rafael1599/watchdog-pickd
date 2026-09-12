@@ -1023,7 +1023,17 @@ def return_to_order_search(driver, step_wait: float = 0.6, read_fn=None, page_wa
         seen.append(state)
         if state == STATE_DISCONNECTED:
             raise AS400Disconnected("The AS400 dropped while returning to the order search.")
-        if state == STATE_ORDER_SEARCH:
+        # `_READY_STATES`, not `STATE_ORDER_SEARCH` alone — and this cost the
+        # sweep of 12 sep its throughput. Typing 3 from the menu lands on Order
+        # Inquiry, which classifies as STATE_ORDER_INQUIRY; insisting on the
+        # search screen treated home as an unknown screen, unstuck back to the
+        # menu, typed 3 again, and burnt its three tries on a two-step dance.
+        # The heartbeat named it: `saw: menu → order_inquiry → menu`.
+        #
+        # Ready is what the scanner itself can work from: `run_scan_step` and
+        # `capture_stock_inquiry` both accept either. This was the one function
+        # in the file that did not.
+        if state in _READY_STATES:
             return screen
         if _is_message_info_screen(screen):
             raise AS400ManualLoginRequired(
