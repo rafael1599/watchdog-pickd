@@ -1445,3 +1445,25 @@ def test_a_blank_search_form_means_as400_has_no_such_number():
             read_fn=lambda: NOTES,
             on_search_screen=True,
         )
+
+
+def test_cmd7_says_where_it_landed_instead_of_hoping():
+    """Medido en Bay 2 el 12 sep: una lectura optimista son 5 s y un tropiezo
+    28, y tropezaba una de cada tres — el 73 % del tiempo de una rafaga.
+
+    El razonamiento original del Cmd7 a ciegas era «una suposicion equivocada
+    cuesta esa consulta y nada mas». Ni era barata ni era rara. Comprobar cuesta
+    una lectura (~2 s); adivinar cuesta 28 un tercio de las veces, o sea 9 de
+    media.
+    """
+    import as400_capture
+
+    BUSQUEDA = "S T O C K   I N Q U I R Y\n  Stock Number:\n"
+    OTRA = "SALESN OPTIONS\n READY FOR OPTION"
+
+    class D:
+        def key(self, k):
+            pass
+
+    assert as400_capture.return_to_search(D(), page_wait=0, read_fn=lambda: BUSQUEDA) is True
+    assert as400_capture.return_to_search(D(), page_wait=0, read_fn=lambda: OTRA) is False

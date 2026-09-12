@@ -540,9 +540,10 @@ def run_sku_step(
         # que el bucle terminara el hueco en cada tropiezo, que es justo lo que
         # esto viene a evitar.
         clean = bool(result) and result.get("action") in ("read", "written", "registered")
+        landed = None
         if clean or chosen is not return_to_search:
             try:
-                chosen(driver)
+                landed = chosen(driver)
                 returned = True
             except Exception as e:
                 log.warning("SKU %s: could not get back to %s (%s)", sku, home, e)
@@ -551,6 +552,10 @@ def run_sku_step(
             returned = None  # el caminar verificado del llamante es el viaje
 
     result["returned"] = returned
+    # `return_to_search` ahora dice si de verdad aterrizó en el formulario de
+    # búsqueda, y eso es lo que decide si la siguiente consulta puede ser
+    # optimista. Antes se descubría fallando, y fallar cuesta 28 s.
+    result["on_search"] = landed is True
     return result
 
 

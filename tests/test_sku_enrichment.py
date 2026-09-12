@@ -548,7 +548,10 @@ def _gap_harness(monkeypatch, *, idle=1e9, results=None, hops=None):
         seen.append(row["sku"])
         if hops is not None:
             hops.append(kw.get("on_search_screen"))
-        return next(outcomes, {"action": "read", "sku": row["sku"], "returned": True})
+        return next(
+            outcomes,
+            {"action": "read", "sku": row["sku"], "returned": True, "on_search": True},
+        )
 
     monkeypatch.setattr(sku_enrichment, "run_sku_step", step)
     return seen
@@ -605,10 +608,12 @@ def test_the_gap_types_the_next_sku_where_it_stands(monkeypatch):
         monkeypatch,
         hops=hops,
         results=[
-            {"action": "read", "sku": "A", "returned": True},
-            {"action": "read", "sku": "B", "returned": True},
+            # `on_search` lo pone ahora `return_to_search` al COMPROBAR dónde
+            # aterrizó el Cmd7; antes se suponía, y suponerlo mal costaba 28 s.
+            {"action": "read", "sku": "A", "returned": True, "on_search": True},
+            {"action": "read", "sku": "B", "returned": True, "on_search": True},
             {"action": "unknown", "sku": "C", "returned": True},
-            {"action": "read", "sku": "D", "returned": True},
+            {"action": "read", "sku": "D", "returned": True, "on_search": True},
         ],
     )
     import as400_capture
