@@ -1236,3 +1236,45 @@ def test_a_script_that_only_reads_does_not_stamp(monkeypatch):
     d = m.MochaDriver()
     d._osascript('tell application "System Events" to get name of first process')
     assert m.seconds_since_self_input() >= before
+
+
+def test_when_one_f7_does_not_reach_the_menu_it_walks_the_operators_way_out():
+    """11 sep 2026, de noche: la barrida del fin de semana se paró en seco con
+    `mismatch: F7 didn't land on the SALESN menu`, una y otra vez, con el
+    terminal contestando perfectamente (`terminal=ok` en el heartbeat).
+
+    Un solo F7 y 0,6 s era una suposición optimista dentro del camino que existe
+    para ser cuidadoso. Ir de la búsqueda de órdenes al menú es un repintado de
+    página entera, y si aun así no llega, existe la salida del operador —
+    F6·F6·F7— que ya está probada desde cualquier pantalla.
+    """
+    import as400_capture
+
+    ORDER_SEARCH = "Order Number:            Account Number:\nAlpha Search:"
+    MENU = "SALESN OPTIONS\n READY FOR OPTION"
+    STOCK = (
+        "S T O C K   I N Q U I R Y\n"
+        "  Stock Number: 03 3933 BK   B-Bike/P-Part: B   Model Year: 2025\n"
+        "  Description:  CODA S2 L16 2026 GLOSS BLACK\n"
+        "  Weight:    36\n"
+    )
+    keys = []
+    # La primera lectura ve la búsqueda; el F7 suelto no mueve nada (sigue la
+    # búsqueda); tras el F6·F6·F7 aparece el menú, y de ahí el flujo normal.
+    screens = iter([ORDER_SEARCH, ORDER_SEARCH, MENU, STOCK, STOCK])
+
+    class D:
+        def key(self, k):
+            keys.append(k)
+
+        def type_text(self, t):
+            keys.append(f"type:{t}")
+
+        def copy_screen(self):
+            return next(screens)
+
+    out = as400_capture.capture_stock_inquiry(
+        "03-3933BK", D(), page_wait=0, step_wait=0, read_fn=lambda: next(screens)
+    )
+    assert "CODA S2" in out
+    assert keys[:4] == ["f7", "f6", "f6", "f7"]

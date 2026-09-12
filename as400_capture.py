@@ -1414,10 +1414,25 @@ def capture_stock_inquiry(
         )
 
     if state != STATE_MENU:
+        # One F7 and 0.6 s was an optimistic assumption inside the path that
+        # exists to be careful, and on the night of 11 sep it is what stopped
+        # the weekend sweep dead: `mismatch: F7 didn't land on the SALESN menu`,
+        # over and over, with the terminal answering fine (the heartbeat said
+        # `terminal=ok`). Going from the order search to the menu is a whole
+        # page repaint, so it gets `page_wait` like every other one — and if
+        # that still is not the menu, it falls back to the operator's own way
+        # out, which is already proven from anywhere: F6·F6·F7.
         driver.key("f7")  # EXIT → SALESN menu
-        time.sleep(step_wait)
+        time.sleep(page_wait)
         if classify_screen(read()) != STATE_MENU:
-            raise StockScreenMismatch("F7 didn't land on the SALESN menu — not typing further.")
+            for _ in range(_unstick_tries()):
+                unstick_to_menu(driver, step_wait=step_wait)
+                if classify_screen(read()) == STATE_MENU:
+                    break
+            else:
+                raise StockScreenMismatch(
+                    "Neither F7 nor F6·F6·F7 reached the SALESN menu — not typing further."
+                )
 
     # 02, never 03. Rafael, 2026-09-08: "el 2 es para stock inquiry, el 3 es
     # para órdenes". Option 3 is only ever typed on the way BACK, by
