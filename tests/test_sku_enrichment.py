@@ -397,10 +397,19 @@ def _gap_harness(monkeypatch, *, idle=1e9, results=None):
 
     `system_idle_seconds` is always faked: the real one shells out to ioreg and
     would make these tests depend on whether somebody is touching this Mac.
+
+    `operator_idle_seconds` remembers the last event it judged to be a PERSON's,
+    and that memory is module state — so it has to be cleared here, or a gap
+    test inherits whoever the previous one pretended was at the keyboard. Same
+    for our own input stamp: left over, it makes a faked idle look newer than
+    our typing when it is not.
     """
+    import as400_capture
     import auto_scanner
     import sku_enrichment
 
+    monkeypatch.setattr(auto_scanner, "_last_operator_input", None)
+    monkeypatch.setattr(as400_capture, "_last_self_input", 0.0)
     monkeypatch.setenv("SKU_ENRICH", "1")
     monkeypatch.setattr(auto_scanner, "_driver_for_sku_step", lambda: object())
     idles = iter(idle) if isinstance(idle, list) else None
