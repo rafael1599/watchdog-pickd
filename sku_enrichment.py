@@ -132,17 +132,78 @@ def load_unknown() -> dict:
     return {}
 
 
-def mark_unknown(sku: str, reason: str = "not_in_as400") -> None:
-    with _lock:
-        data = load_unknown()
-        data[sku] = {
-            "reason": reason,
+def _remember(sku: str, entry: dict, data: dict | None = None) -> None:
+    """Write one entry into the local set-aside list, atomically."""
+
+    def _write(d):
+        d[sku] = {
+            **entry,
             "at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         }
         p = _unknown_path()
         tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, p)
+
+    if data is not None:  # the caller already holds the lock
+        _write(data)
+        return
+    with _lock:
+        _write(load_unknown())
+
+
+def mark_unknown(sku: str, reason: str = "not_in_as400") -> None:
+    """AS400 has no such stock number. A verdict, so it carries no `until`."""
+    _remember(sku, {"reason": reason})
+
+
+# How long a SKU that keeps failing steps aside. Doubling, from half an hour.
+DEFER_BASE_SEC = float(os.getenv("SKU_ENRICH_DEFER_SEC", "1800"))
+DEFER_MAX_SEC = float(os.getenv("SKU_ENRICH_DEFER_MAX_SEC", "86400"))
+
+
+def defer_sku(sku: str, reason: str) -> float:
+    """Step this SKU aside for a while — it failed for a reason that is NOT
+    "AS400 doesn't have it", so marking it unknown would be a lie.
+
+    The hole this closes, found live on 12 sep 2026: `03-4605OR` kept landing on
+    the STOCK INQUIRY **NOTES** form (§2.12b — same title, no fields), the guard
+    correctly refused to read it, the gap ended, and the next gap asked
+    `next_sku()`, which returned **the same SKU** — nothing about a mismatch
+    changes the row or the unknown list. The whole catalogue sat behind one SKU:
+    `skus_read_total` stayed at 0 across every gap of that build.
+
+    A queue whose head cannot advance does not advance. So a failure that is not
+    the SKU's own answer buys a cooldown instead of a verdict: half an hour,
+    doubling per attempt, capped at a day. A one-off costs nothing; a chronic one
+    stops blocking the other 1,800.
+    """
+    with _lock:
+        data = load_unknown()
+        tries = int((data.get(sku) or {}).get("tries") or 0) + 1
+        wait = min(DEFER_BASE_SEC * (2 ** (tries - 1)), DEFER_MAX_SEC)
+        _remember(sku, {"reason": reason, "tries": tries, "until": time.time() + wait}, data=data)
+    log.info("SKU %s: %s — set aside for %.0f min (try %d)", sku, reason, wait / 60, tries)
+    return wait
+
+
+def is_set_aside(entry) -> bool:
+    """Whether an entry keeps its SKU out of the queue.
+
+    No `until` is a verdict: AS400 said it has no such number. An `until` in the
+    past has served its cooldown and the SKU comes back.
+    """
+    if entry is None:  # nunca ha fallado: no está apartado
+        return False
+    if not isinstance(entry, dict):
+        return True
+    until = entry.get("until")
+    if until is None:
+        return True
+    try:
+        return float(until) > time.time()
+    except (TypeError, ValueError):
+        return True
 
 
 # ── the queue (R5) ───────────────────────────────────────────────────────────
@@ -186,7 +247,7 @@ def select_sku_queue(rows, unknown=None) -> list:
         r
         for r in rows
         if (r.get("sku") or "").strip().upper()
-        and (r.get("sku") or "").strip().upper() not in unknown
+        and not is_set_aside(unknown.get((r.get("sku") or "").strip().upper()))
         and is_lookupable(r.get("sku") or "")
         # Already read: AS400 has nothing left to tell us about this SKU — the
         # weight came back on the same screen — and its model does not change
@@ -429,6 +490,8 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
             log.warning(
                 "SKU %s: the screen shows %s — not ours, nothing written", sku, parsed.get("sku")
             )
+            if not on_search_screen:
+                defer_sku(sku, "the screen showed somebody else")
             return {
                 "action": "mismatch",
                 "sku": sku,
@@ -482,6 +545,11 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
         log.info("SKU %s: %s — marked, won't be asked again", sku, e)
         return {"action": "unknown", "sku": sku, "why": str(e)}
     except StockScreenMismatch as e:
+        # Only the VERIFIED path's mismatches step the SKU aside. An optimistic
+        # miss means we guessed wrong about where the terminal was — our fault,
+        # not the SKU's — and the next attempt walks the verified way anyway.
+        if not on_search_screen:
+            defer_sku(sku, str(e))
         log.warning("SKU %s: %s", sku, e)
         return {"action": "mismatch", "sku": sku, "why": str(e)}
     except (AS400Disconnected, AS400ManualLoginRequired) as e:

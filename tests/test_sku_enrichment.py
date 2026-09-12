@@ -7,6 +7,8 @@ that matters most — it is the function F3 will point at a service_role
 connection with no RLS underneath, so its rules are pinned before it can write.
 """
 
+import json
+
 import pytest
 
 import sku_enrichment  # noqa: E402
@@ -124,6 +126,54 @@ def test_the_queue_keeps_the_order_it_was_handed_inside_a_band():
 def test_a_sku_as400_already_refused_does_not_come_back():
     rows = [{"sku": "03-3492BL", "model": None, "qty": 1}]
     assert select_sku_queue(rows, unknown={"03-3492BL": {"reason": "not_in_as400"}}) == []
+
+
+def test_a_sku_that_keeps_failing_steps_aside_instead_of_blocking_the_queue(tmp_path, monkeypatch):
+    """12 sep 2026, en vivo: `03-4605OR` aterrizaba una y otra vez en el
+    formulario NOTES del Stock Inquiry (§2.12b — mismo título, sin campos). La
+    guarda se negaba a leerlo (bien), el hueco terminaba, y el siguiente hueco
+    le pedía a `next_sku()` **el mismo SKU**: un mismatch no cambia la fila ni la
+    lista de desconocidos. Las 1.800 fichas del catálogo detrás de una.
+
+    Un veredicto sería mentira —AS400 sí lo tiene—, así que compra un enfriamiento.
+    """
+    import sku_enrichment
+
+    monkeypatch.setenv("SKU_UNKNOWN_PATH", str(tmp_path / "u.json"))
+    rows = [{"sku": "03-4605OR", "model": None}, {"sku": "03-3933BK", "model": None}]
+
+    # Antes de fallar, es la cabeza de la cola.
+    assert select_sku_queue(rows, sku_enrichment.load_unknown())[0]["sku"] == "03-4605OR"
+
+    sku_enrichment.defer_sku("03-4605OR", "landed on the NOTES form")
+    cola = select_sku_queue(rows, sku_enrichment.load_unknown())
+    assert [r["sku"] for r in cola] == ["03-3933BK"]  # la cola avanza
+
+    # Y vuelve sola cuando el enfriamiento se cumple — no es un veredicto.
+    data = sku_enrichment.load_unknown()
+    data["03-4605OR"]["until"] = 0
+    (tmp_path / "u.json").write_text(json.dumps(data), encoding="utf-8")
+    assert len(select_sku_queue(rows, sku_enrichment.load_unknown())) == 2
+
+
+def test_a_verdict_and_a_cooldown_are_not_the_same_thing(tmp_path, monkeypatch):
+    import sku_enrichment
+
+    monkeypatch.setenv("SKU_UNKNOWN_PATH", str(tmp_path / "u.json"))
+    sku_enrichment.mark_unknown("01-0001")  # AS400 no lo tiene: para siempre
+    sku_enrichment.defer_sku("01-0002", "mismatch")  # nosotros fallamos: un rato
+    u = sku_enrichment.load_unknown()
+    assert "until" not in u["01-0001"] and sku_enrichment.is_set_aside(u["01-0001"])
+    assert u["01-0002"]["until"] > 0 and u["01-0002"]["tries"] == 1
+    # y el segundo intento espera el doble
+    sku_enrichment.defer_sku("01-0002", "mismatch")
+    assert sku_enrichment.load_unknown()["01-0002"]["tries"] == 2
+
+
+def test_an_sku_that_never_failed_is_not_set_aside():
+    import sku_enrichment
+
+    assert sku_enrichment.is_set_aside(None) is False
 
 
 # ── §6 / R4: what a write would be ───────────────────────────────────────────
