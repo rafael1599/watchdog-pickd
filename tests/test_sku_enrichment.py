@@ -674,6 +674,42 @@ def test_a_bad_lookup_does_not_get_a_blind_cmd7_on_top(tmp_path, monkeypatch):
     assert ok["returned"] is True and viajes == [1]
 
 
+def test_a_dead_sku_leaves_us_exactly_where_the_next_one_starts(monkeypatch):
+    """Rafael, 12 sep 2026: «no estamos siendo eficientes».
+
+    AS400 contesta un numero que no tiene devolviendo el BUSCADOR EN BLANCO, y
+    esa pantalla la acabamos de leer para saberlo — asi que el terminal esta
+    justo donde la consulta siguiente quiere empezar. Caminabamos al menu y
+    volviamos a entrar por el camino largo: 29 s por numero muerto contra 5 de
+    una consulta buena, y en este tramo son un tercio. El 75 % del tiempo de la
+    rafaga se iba en volver a un sitio del que no nos habiamos movido.
+    """
+    import auto_scanner
+
+    monkeypatch.setenv("SKU_ENRICH_MAX_PER_GAP", "3")
+    hops, al_menu = [], []
+    _gap_harness(
+        monkeypatch,
+        hops=hops,
+        results=[
+            {"action": "read", "sku": "A", "returned": True, "on_search": True},
+            # AS400 no lo tiene: el paso mismo dice donde quedo.
+            {"action": "unknown", "sku": "B", "returned": True, "on_search": True},
+            {"action": "read", "sku": "C", "returned": True, "on_search": True},
+        ],
+    )
+    import as400_capture
+
+    monkeypatch.setattr(as400_capture, "return_to_menu", lambda d: al_menu.append(1))
+    monkeypatch.setattr(as400_capture, "return_to_order_search", lambda d: None)
+    auto_scanner._run_sku_gap()
+
+    # La tercera sigue siendo optimista pese al muerto en medio…
+    assert hops == [False, True, True]
+    # …y nadie camino al menu para nada.
+    assert al_menu == []
+
+
 def test_the_heartbeat_says_which_way_the_step_failed(monkeypatch):
     # 11 sep 2026: the heartbeat said `working` for hours while the read counter
     # sat at 17. A step was running and dying before it read anything, and the

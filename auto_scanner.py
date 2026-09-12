@@ -505,7 +505,11 @@ def _run_sku_gap() -> float:
                 return time.monotonic() - started
             if res["action"] in ("unavailable", "error"):
                 return time.monotonic() - started
-            if good:
+            # Un SKU que AS400 no tiene deja el terminal en el formulario de
+            # búsqueda —su propia respuesta es esa pantalla— así que la
+            # siguiente consulta sigue el camino rápido. Caminar al menú y
+            # volver costaba 29 s por número muerto, y son un tercio.
+            if good or res.get("on_search"):
                 on_search = True
             else:
                 # An `unknown` or a `mismatch` leaves us unsure of the screen.

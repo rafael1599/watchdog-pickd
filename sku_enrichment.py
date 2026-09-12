@@ -190,9 +190,28 @@ def _remember(sku: str, entry: dict, data: dict | None = None) -> None:
         _write(load_unknown())
 
 
-def mark_unknown(sku: str, reason: str = "not_in_as400") -> None:
-    """AS400 has no such stock number. A verdict, so it carries no `until`."""
+def mark_unknown(sku: str, reason: str = "not_in_as400", client=None) -> None:
+    """AS400 has no such stock number. A verdict, so it carries no `until`.
+
+    Se apunta en DOS sitios y el segundo es el que importa. El archivo local
+    (`.sku_unknown.json`) mantiene la cola rápida sin pegarle a la base en cada
+    consulta; la columna `sku_metadata.as400_absent_at` es donde el veredicto
+    sobrevive a este Mac (Rafael, 12 sep 2026: «esos los puedes poner en una
+    lista de excluidos»). Un JSON en el disco de Bay 2 no lo ve nadie desde
+    PickD, no tiene copia y se pierde con la máquina — y un veredicto del ERP
+    sobre el catálogo es un hecho del catálogo.
+    """
     _remember(sku, {"reason": reason})
+    if not writes_enabled():
+        return
+    try:
+        if client is None:
+            from supabase_client import get_client
+
+            client = get_client()
+        client.table("sku_metadata").update({"as400_absent_at": _now()}).eq("sku", sku).execute()
+    except Exception as e:  # noqa: BLE001 — el archivo local ya protege la cola
+        log.warning("SKU %s: no se pudo marcar as400_absent_at (%s)", sku, e)
 
 
 # How long a SKU that keeps failing steps aside. Doubling, from half an hour.
@@ -552,10 +571,10 @@ def run_sku_step(
             returned = None  # el caminar verificado del llamante es el viaje
 
     result["returned"] = returned
-    # `return_to_search` ahora dice si de verdad aterrizó en el formulario de
-    # búsqueda, y eso es lo que decide si la siguiente consulta puede ser
-    # optimista. Antes se descubría fallando, y fallar cuesta 28 s.
-    result["on_search"] = landed is True
+    # Un `unknown` ya sabe dónde quedó —en el buscador en blanco— y lo dice él
+    # mismo; para el resto manda el viaje de vuelta que se acaba de hacer.
+    if "on_search" not in result:
+        result["on_search"] = landed is True
     return result
 
 
@@ -629,7 +648,17 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
         # AS400 has no record. Mark it so the queue doesn't jam on it (R7).
         mark_unknown(sku)
         log.info("SKU %s: %s — marked, won't be asked again", sku, e)
-        return {"action": "unknown", "sku": sku, "why": str(e)}
+        # Y SEGUIMOS EN EL FORMULARIO DE BÚSQUEDA. Eso no es una suposición:
+        # AS400 contesta un número que no tiene devolviendo el buscador en
+        # blanco, y acabamos de LEER esa pantalla para saberlo. El terminal está
+        # justo donde la consulta siguiente quiere empezar.
+        #
+        # Sin esto, un número muerto costaba 29 s —vuelta al menú y entrada por
+        # el camino largo— contra los 5 de una consulta buena, y en este tramo
+        # son un tercio de todas: el 75 % del tiempo de la ráfaga se iba en
+        # caminar de vuelta a un sitio del que no nos habíamos movido
+        # (Rafael, 12 sep 2026: «no estamos siendo eficientes»).
+        return {"action": "unknown", "sku": sku, "why": str(e), "on_search": True}
     except StockScreenMismatch as e:
         # ANY mismatch steps the SKU aside, and the asymmetry is the whole
         # argument. I first deferred only the verified path's failures, on the
@@ -725,6 +754,7 @@ def fetch_candidates(client=None, tier: str = "auto") -> list:
                 .select(_META_COLS)
                 .eq("is_bike", True)
                 .is_("as400_description", "null")  # every bike, once (Q7)
+                .is_("as400_absent_at", "null")  # y no los que AS400 no tiene
                 .limit(QUEUE_FETCH_LIMIT)
                 .execute()
             ).data
@@ -747,6 +777,7 @@ def fetch_candidates(client=None, tier: str = "auto") -> list:
                 .select(_META_COLS)
                 .neq("is_bike", True)
                 .is_("as400_description", "null")
+                .is_("as400_absent_at", "null")  # los que AS400 no tiene
                 .limit(QUEUE_FETCH_LIMIT)
                 .execute()
             ).data
