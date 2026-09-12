@@ -1538,6 +1538,25 @@ def _type_stock_lookup(sku, driver, digits, colour, page_wait, read, *, optimist
     if not is_stock_detail_screen(screen):
         # R10: same title, no fields. Reading here would report `Weight` as
         # absent instead of as "I am not where I think I am".
+        #
+        # …pero «sin campos» son DOS pantallas distintas y durante un día las
+        # confundí en una sola. El formulario NOTES (§2.12b) trae el Stock
+        # Number en su cabecera; el formulario de BÚSQUEDA vuelve **en blanco**
+        # (Rafael, 11 sep 2026: «cmd7 regresa a la pantalla de busqueda, viene
+        # vacia»), y eso es lo que AS400 devuelve cuando el número no existe:
+        # se come la consulta y te deja donde estabas.
+        #
+        # Llamarlas igual costó la barrida de las partes. Las bicis tenían un
+        # puñado de números muertos; el catálogo de partes está lleno de ellos,
+        # así que cada uno se APARTABA media hora en vez de marcarse como
+        # inexistente, volvía, y la cola dejó de avanzar: 0 lecturas en veinte
+        # minutos (12 sep 2026).
+        from parser import parse_stock_number
+
+        if parse_stock_number(screen) is None:
+            raise StockSkuNotFound(
+                f"The search form came back blank for {sku} — AS400 has no such stock number."
+            )
         raise StockScreenMismatch(
             f"Landed on the STOCK INQUIRY NOTES form for {sku} — no fields to read."
         )

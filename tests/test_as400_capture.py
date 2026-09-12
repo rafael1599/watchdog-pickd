@@ -1394,3 +1394,54 @@ def test_the_blind_cmd7_between_two_lookups_also_waits_for_the_page():
         as400_capture.time.sleep = real_sleep
 
     assert waits == [7.0]
+
+
+def test_a_blank_search_form_means_as400_has_no_such_number():
+    """«Sin campos» son DOS pantallas y durante un dia las confundi en una.
+
+    El formulario NOTES (§2.12b) trae el Stock Number en su cabecera; el de
+    BUSQUEDA vuelve en blanco, y eso es lo que AS400 devuelve cuando el numero
+    no existe. Llamarlas igual costo la barrida de las partes: las bicis tenian
+    un puñado de numeros muertos, el catalogo de partes esta lleno, y cada uno
+    se apartaba media hora en vez de marcarse inexistente. Cero lecturas en
+    veinte minutos.
+    """
+    import as400_capture
+
+    BUSQUEDA_EN_BLANCO = (
+        "                      S T O C K   I N Q U I R Y\n  Stock Number:                \n"
+    )
+    NOTES = (
+        "                      S T O C K   I N Q U I R Y\n"
+        "                                             (Cmd7-Exit)\n"
+        "  Stock Number: 03 3933 BK      CODA S2 L16 2026 GLOSS BLACK\n"
+    )
+
+    class D:
+        def key(self, k):
+            pass
+
+        def type_text(self, t):
+            pass
+
+    # En blanco → el numero no existe, y se marca para no volver a pedirlo.
+    with pytest.raises(as400_capture.StockSkuNotFound):
+        as400_capture.capture_stock_inquiry(
+            "30-0323",
+            D(),
+            page_wait=0,
+            step_wait=0,
+            read_fn=lambda: BUSQUEDA_EN_BLANCO,
+            on_search_screen=True,
+        )
+
+    # Con numero pero sin campos → es NOTES, y eso sí es un tropiezo nuestro.
+    with pytest.raises(as400_capture.StockScreenMismatch):
+        as400_capture.capture_stock_inquiry(
+            "03-3933BK",
+            D(),
+            page_wait=0,
+            step_wait=0,
+            read_fn=lambda: NOTES,
+            on_search_screen=True,
+        )
