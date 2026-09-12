@@ -205,6 +205,46 @@ def test_an_sku_that_never_failed_is_not_set_aside():
     assert sku_enrichment.is_set_aside(None) is False
 
 
+def test_the_catalogue_weekend_expires_by_itself(monkeypatch):
+    """Rafael, 12 sep 2026: «dejemoslo en solo escanear info hoy hasta que se
+    acabe la lista… y el domingo por la noche lo regresamos a la normalidad».
+
+    Con fecha de caducidad y no con interruptor, que es lo importante: un modo
+    excepcional que depende de que alguien se acuerde de apagarlo sigue
+    encendido el martes.
+    """
+    import sku_enrichment
+
+    monkeypatch.setenv("SKU_ENRICH_EXCLUSIVE_UNTIL", "2099-01-01T00:00:00Z")
+    monkeypatch.delenv("SKU_ENRICH_GAP_BUDGET_SEC", raising=False)
+    monkeypatch.delenv("SKU_ENRICH_MAX_PER_GAP", raising=False)
+    assert sku_enrichment.catalogue_first() is True
+    assert sku_enrichment.gap_budget_sec() == 3600
+    assert sku_enrichment.max_per_gap() == 1000
+
+    # Pasada la fecha vuelve solo, sin desplegar y sin que nadie toque el Mac.
+    monkeypatch.setenv("SKU_ENRICH_EXCLUSIVE_UNTIL", "2000-01-01T00:00:00Z")
+    assert sku_enrichment.catalogue_first() is False
+    assert sku_enrichment.gap_budget_sec() == 300
+    assert sku_enrichment.max_per_gap() == 40
+
+
+def test_a_broken_date_falls_back_to_normal_not_to_forever(monkeypatch):
+    # Un valor ilegible no puede significar «catalogo para siempre».
+    import sku_enrichment
+
+    monkeypatch.setenv("SKU_ENRICH_EXCLUSIVE_UNTIL", "el domingo")
+    assert sku_enrichment.catalogue_first() is False
+
+
+def test_the_env_still_wins_over_the_weekend_default(monkeypatch):
+    import sku_enrichment
+
+    monkeypatch.setenv("SKU_ENRICH_EXCLUSIVE_UNTIL", "2099-01-01T00:00:00Z")
+    monkeypatch.setenv("SKU_ENRICH_GAP_BUDGET_SEC", "120")
+    assert sku_enrichment.gap_budget_sec() == 120
+
+
 # ── §6 / R4: what a write would be ───────────────────────────────────────────
 
 

@@ -67,6 +67,42 @@ def writes_enabled() -> bool:
     return os.getenv("SKU_ENRICH_WRITE", "0") in ("1", "true", "True", "yes")
 
 
+# ── El fin de semana del catálogo (Rafael, 12 sep 2026) ──────────────────────
+#
+# «Dejémoslo en solo escanear info hoy hasta que se acabe la lista y después
+# recién escanear órdenes, y el domingo por la noche lo regresamos a la
+# normalidad».
+#
+# Va con FECHA DE CADUCIDAD en lugar de un interruptor, y eso es lo importante:
+# un modo excepcional que depende de que alguien se acuerde de apagarlo es un
+# modo que sigue encendido el martes. Pasada la fecha, todo vuelve solo — sin
+# desplegar, sin que nadie toque el Mac, sin acordarse.
+#
+# Lo que NO cambia mientras está activo: sigue cediendo el teclado al operario,
+# al botón de «get orders now» y a un deploy pendiente. Eso no es pacing, es
+# respeto por quien tiene mejor derecho, y no tiene fecha.
+EXCLUSIVE_UNTIL_DEFAULT = "2026-09-14T02:00:00Z"  # domingo 13, 22:00 en NY
+
+
+def exclusive_until() -> datetime:
+    raw = os.getenv("SKU_ENRICH_EXCLUSIVE_UNTIL", EXCLUSIVE_UNTIL_DEFAULT).strip()
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        # El epoch, no "ahora": `catalogue_first` compara `now() < esto` y
+        # evalúa el lado izquierdo primero, así que devolver "ahora" daba un
+        # instante POSTERIOR y una fecha ilegible habría significado «catálogo
+        # para siempre». Un valor que no se entiende tiene que caer del lado
+        # seguro, y el seguro es el modo normal.
+        log.warning("SKU_ENRICH_EXCLUSIVE_UNTIL no es una fecha (%r) — modo normal", raw)
+        return datetime.fromtimestamp(0, timezone.utc)
+
+
+def catalogue_first() -> bool:
+    """Mientras dure: el catálogo se queda el hueco entero."""
+    return datetime.now(timezone.utc) < exclusive_until()
+
+
 def gap_budget_sec() -> float:
     """How long one gap may spend on catalogue lookups.
 
@@ -78,7 +114,8 @@ def gap_budget_sec() -> float:
     A WALL-CLOCK budget rather than a count, because what matters is how long the
     keyboard is held: a slow lookup should end the burst earlier, not later.
     """
-    return max(0.0, float(os.getenv("SKU_ENRICH_GAP_BUDGET_SEC", "300")))
+    default = "3600" if catalogue_first() else "300"
+    return max(0.0, float(os.getenv("SKU_ENRICH_GAP_BUDGET_SEC", default)))
 
 
 def max_per_gap() -> int:
@@ -89,7 +126,8 @@ def max_per_gap() -> int:
     that needs no driving, a bug — the clock alone would spin. Set it to 1 to get
     the old one-per-gap cadence back with a .env edit instead of a deploy.
     """
-    return max(1, int(os.getenv("SKU_ENRICH_MAX_PER_GAP", "40")))
+    default = "1000" if catalogue_first() else "40"
+    return max(1, int(os.getenv("SKU_ENRICH_MAX_PER_GAP", default)))
 
 
 # Only an AS400 stock number can be looked up: two digits, four digits, and 0-3
