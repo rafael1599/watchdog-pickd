@@ -667,7 +667,12 @@ def build_copy_screen_script(
 # `HIDIdleTime` is time since the LAST event, so the test is exact: if it is
 # meaningfully SMALLER than the time since our own last keystroke, a newer event
 # happened and it was not ours.
-_last_self_input = 0.0
+# None = we have never typed. It used to start at 0.0, which on this Python
+# means "we typed the instant the process started" — `time.monotonic()` counts
+# from process start here, not from boot. So a fresh watchdog spent its first
+# seconds believing its own typing was newer than anything the operator could
+# have done, and `operator_idle_seconds` reads exactly that comparison.
+_last_self_input = None  # float | None — Python 3.9 on the Bay 2 Mac
 
 
 def note_self_input() -> None:
@@ -677,6 +682,9 @@ def note_self_input() -> None:
 
 
 def seconds_since_self_input() -> float:
+    """Seconds since WE last typed; infinite if we never have."""
+    if _last_self_input is None:
+        return float("inf")
     return time.monotonic() - _last_self_input
 
 
