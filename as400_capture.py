@@ -651,6 +651,35 @@ def build_copy_screen_script(
     )
 
 
+# ── whose hands were those? ──────────────────────────────────────────────────
+#
+# The driver types with `System Events keystroke`, which posts REAL HID events —
+# so every key the watchdog sends resets macOS's `HIDIdleTime`, the same clock
+# the scanner reads to decide whether a person is at the keyboard. The watchdog
+# was impersonating the operator, and then standing down for him.
+#
+# It showed up as the catalogue queue never chaining two lookups: one lookup
+# types, idle drops to zero, the next check says "the operator is back". On
+# 11 sep 2026 the manual run read exactly the seven SKUs that fitted inside its
+# two-minute grace window and then stopped — at a quarter past three in the
+# afternoon, with nobody near the Mac, and again at eleven at night.
+#
+# `HIDIdleTime` is time since the LAST event, so the test is exact: if it is
+# meaningfully SMALLER than the time since our own last keystroke, a newer event
+# happened and it was not ours.
+_last_self_input = 0.0
+
+
+def note_self_input() -> None:
+    """Stamp that WE just posted an input event."""
+    global _last_self_input
+    _last_self_input = time.monotonic()
+
+
+def seconds_since_self_input() -> float:
+    return time.monotonic() - _last_self_input
+
+
 class MochaDriver:
     # Can take the keystrokes that precede a read inside the same script.
     supports_steps = True
@@ -811,6 +840,7 @@ class MochaDriver:
         # Escaped for the AppleScript string literal: a quote or a backslash in the
         # value used to break the script and surface as an unexplained 500.
         safe = str(text).replace("\\", "\\\\").replace('"', '\\"')
+        note_self_input()
         self._osascript(f'tell application "System Events" to keystroke "{safe}"')
 
     def key(self, name: str):
@@ -818,6 +848,7 @@ class MochaDriver:
         code = KEY_CODES.get(name.lower())
         if code is None:
             raise ValueError(f"Unknown key: {name}")
+        note_self_input()
         self._osascript(f'tell application "System Events" to key code {code}')
 
     def copy_screen(self, steps=()) -> str:

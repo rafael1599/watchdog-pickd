@@ -605,8 +605,13 @@ def run_until_disturbed(
     The idle gate cannot be the usual "idle < 60": the operator just clicked a
     button, so idle is ZERO at the start and the run would stop before its first
     lookup. What matters is whether anybody touched the Mac after the grace
-    window ran out — and if nobody has, `system_idle_seconds()` grows at least
+    window ran out — and if nobody has, `operator_idle_seconds()` grows at least
     as fast as our own clock. Anything smaller is a hand. See `grace_sec`.
+
+    It has to be `operator_idle_seconds` and not the raw HID reading: the driver
+    types with real input events, so a run that measured raw idle would read its
+    own keystrokes as the operator returning and stop after the grace — which is
+    exactly what happened on 11 sep 2026, seven SKUs in, with nobody there.
 
     It stops for three other things, and each is somebody with a better claim:
       - "get orders now": they asked for orders, not for the catalogue.
@@ -616,9 +621,9 @@ def run_until_disturbed(
       - the AS400 going away: hammering a terminal that is not there is how a
         session gets stuck.
     """
-    from auto_scanner import _kick, system_idle_seconds
+    from auto_scanner import _kick, operator_idle_seconds
 
-    idle_fn = idle_fn or system_idle_seconds
+    idle_fn = idle_fn or operator_idle_seconds
     kick_fn = kick_fn or _kick.is_set
     stop_fn = stop_fn or (lambda: False)
     step_fn = step_fn or run_sku_step

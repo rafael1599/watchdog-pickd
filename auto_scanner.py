@@ -51,6 +51,7 @@ from as400_capture import (
     bootstrap_session,
     capture_order,
     classify_screen,
+    seconds_since_self_input,
 )
 
 log = logging.getLogger("pickd-auto-scanner")
@@ -158,6 +159,32 @@ def system_idle_seconds() -> float:
     except Exception as e:
         log.debug("could not read HIDIdleTime: %s", e)
     return 1e9
+
+
+def operator_idle_seconds() -> float:
+    """Seconds since the OPERATOR last touched the Mac — ours don't count.
+
+    `system_idle_seconds` reads macOS's HIDIdleTime, which is time since the last
+    input event of any kind. The driver types with `System Events keystroke`, and
+    those are real events: every key the watchdog sends resets that clock, so the
+    watchdog reads its own typing as "somebody is at the keyboard" and stands
+    down for itself. That is why the catalogue queue could never chain two
+    lookups, and why the manual run on 11 sep 2026 read exactly the seven SKUs
+    that fitted inside its grace window before stopping — at 3pm, with nobody
+    there.
+
+    HIDIdleTime is time since the LAST event, so the test is exact: if it is
+    meaningfully smaller than the time since our own last keystroke, something
+    newer happened and it was not us. When the last event WAS ours, this reports
+    how long it has been since we started driving — which is the honest answer
+    to "how long since a person touched this", not zero.
+    """
+    idle = system_idle_seconds()
+    since_self = seconds_since_self_input()
+    # A second of slack: the event lands a moment after we asked for it.
+    if idle < since_self - 1.0:
+        return idle  # newer than ours — a person
+    return max(idle, since_self)
 
 
 def _meta_from_preview(preview: dict) -> dict:
@@ -340,7 +367,7 @@ def _run_sku_gap() -> float:
             # The operator's keyboard wins, always — checked before every single
             # lookup, not once per gap. A manual "get orders now" wins too: they
             # asked for orders, not for catalogue work.
-            if system_idle_seconds() < IDLE_THRESHOLD_SEC or _kick.is_set():
+            if operator_idle_seconds() < IDLE_THRESHOLD_SEC or _kick.is_set():
                 _note_gap("the operator is back")
                 log.info("auto-scan: the operator is back — SKU queue yields after %d", done)
                 return time.monotonic() - started
@@ -420,7 +447,7 @@ def _loop() -> None:
         # Pause while the operator is actively using the computer, or while a manual
         # capture holds the lock — never fight the human for the keyboard. A manual
         # kick skips the activity gate: the operator asked for this pass explicitly.
-        if system_idle_seconds() < IDLE_THRESHOLD_SEC and not _kick.is_set():
+        if operator_idle_seconds() < IDLE_THRESHOLD_SEC and not _kick.is_set():
             if paused_since is None:
                 paused_since = time.monotonic()
             _interruptible_wait(IDLE_POLL_SEC)
