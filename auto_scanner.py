@@ -506,10 +506,7 @@ def _run_sku_gap() -> float:
             if res["action"] in ("unavailable", "error"):
                 return time.monotonic() - started
             if good:
-                # Optimista sólo si el Cmd7 CONFIRMÓ el formulario de búsqueda.
-                # Suponerlo costaba 28 s una de cada tres veces; comprobarlo
-                # cuesta una lectura (12 sep 2026).
-                on_search = bool(res.get("on_search"))
+                on_search = True
             else:
                 # An `unknown` or a `mismatch` leaves us unsure of the screen.
                 # One Cmd7 is not enough to trust it: walk the verified way home

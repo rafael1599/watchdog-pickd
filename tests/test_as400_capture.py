@@ -1447,14 +1447,16 @@ def test_a_blank_search_form_means_as400_has_no_such_number():
         )
 
 
-def test_cmd7_says_where_it_landed_instead_of_hoping():
-    """Medido en Bay 2 el 12 sep: una lectura optimista son 5 s y un tropiezo
-    28, y tropezaba una de cada tres — el 73 % del tiempo de una rafaga.
+def test_cmd7_can_be_checked_when_somebody_is_looking():
+    """El Cmd7 va a ciegas en produccion. Esta comprobacion existe para los
+    tests y para el dia que alguien quiera verificarlo a mano.
 
-    El razonamiento original del Cmd7 a ciegas era «una suposicion equivocada
-    cuesta esa consulta y nada mas». Ni era barata ni era rara. Comprobar cuesta
-    una lectura (~2 s); adivinar cuesta 28 un tercio de las veces, o sea 9 de
-    media.
+    Historia, porque la medicion importa: el 12 sep atribui a este Cmd7 unos
+    intervalos de 29 s que veia una de cada tres veces, y añadi una lectura de
+    confirmacion en produccion. El ritmo EMPEORO (12,2 s de media a 13,4) y la
+    distribucion lo desmintio — 24 intervalos rapidos, 13 de 29 s y NINGUNO en
+    medio. Si la suposicion fallara habria intermedios. Los 29 s eran descubrir
+    un SKU que AS400 no tiene. Revertido.
     """
     import as400_capture
 

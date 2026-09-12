@@ -1065,10 +1065,17 @@ def return_to_search(driver, step_wait: float = 0.6, page_wait=None, read_fn=Non
     Blank is what makes this safe to do blind — nothing to clear, so the next
     SKU cannot concatenate onto the last one.
 
-    Devuelve **True si aterrizó de verdad** en el formulario de búsqueda. Durante
-    un día esto fue una tecla y ninguna lectura, a propósito, con el argumento de
-    que el resultado de la consulta siguiente ya era la comprobación. Lo era, y
-    salía carísima: ver arriba.
+    Una tecla y ninguna lectura, a propósito: el resultado de la consulta
+    siguiente es la comprobación, y una suposición equivocada cuesta esa
+    consulta y nada más.
+
+    **Probado y medido el 12 sep 2026, porque lo puse en duda.** Vi ráfagas con
+    un tercio de intervalos de 29 s, se los atribuí a este Cmd7 y añadí una
+    lectura de confirmación. El ritmo EMPEORÓ —12,2 s de media a 13,4— y la
+    distribución lo explicó: 24 intervalos rápidos, 13 de 29 s y **ninguno en
+    medio**. Si la suposición fallara, una consulta verificada dejaría un
+    intervalo intermedio, y no hay ni uno. Los 29 s son descubrir un SKU que
+    AS400 no tiene, que es un coste de una sola vez y ajeno a esto.
 
     **It waits `page_wait`, and that is the third time the same mistake shows
     up.** Cmd7 repaints a whole page, and this slept 0.6 s. On Bay 2 the night
@@ -1083,22 +1090,11 @@ def return_to_search(driver, step_wait: float = 0.6, page_wait=None, read_fn=Non
         page_wait = _env_float("AS400_PAGE_WAIT", PAGE_WAIT_DEFAULT)
     driver.key("f7")
     time.sleep(page_wait)
-    # Y COMPROBAR, que sale más barato que adivinar. El razonamiento original
-    # era «una suposición equivocada cuesta esa consulta y nada más»; medido en
-    # Bay 2 el 12 sep, cuesta 28 s y falla una de cada tres — el 73 % del tiempo
-    # de una ráfaga se iba en eso. Una lectura son ~2 s. Comprobar siempre
-    # cuesta 2; adivinar cuesta 28 un tercio de las veces, que son 9 de media.
-    #
-    # Devuelve si de verdad estamos en el formulario de búsqueda, para que el
-    # llamante sepa si puede seguir siendo optimista en vez de descubrirlo
-    # fallando.
-    try:
-        return classify_screen(read_fn() if read_fn else driver.copy_screen()) == (
-            STATE_STOCK_INQUIRY
-        )
-    except Exception as e:  # noqa: BLE001 — no poder mirar no es estar perdido
-        log.debug("return_to_search: no se pudo comprobar la pantalla (%s)", e)
-        return False
+    # `read_fn` sigue aceptándose para que los tests puedan mirar sin conducir
+    # el terminal; en producción nadie lee aquí.
+    if read_fn is not None:
+        return classify_screen(read_fn()) == STATE_STOCK_INQUIRY
+    return True
 
 
 def return_to_menu(driver, step_wait: float = 0.6, read_fn=None, page_wait=None) -> str:
