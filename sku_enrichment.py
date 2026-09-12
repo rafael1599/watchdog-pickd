@@ -354,13 +354,39 @@ def plan_write(row: dict, parsed: dict) -> dict:
             # 2026-09-08). A jsonb blob because which field matters is the
             # question, not the answer; the one that earns a column gets it
             # later, with the evidence already collected.
+            # La pantalla ENTERA, no cinco campos. Rafael, 12 sep 2026: «hay
+            # precio y otros datos útiles que podemos adquirir». Los estábamos
+            # leyendo y tirando en cada consulta: el precio por escalón,
+            # `Available` (que no es `On Hand`: contesta «¿puedo prometer
+            # esto?»), `On Order` y `Open PO` (que contestan «¿cuándo lo
+            # tendré?», lo que le falta a una orden esperando inventario), la
+            # unidad de medida y el código de estado.
+            #
+            # Siguen en el blob y no en columnas propias, por el mismo motivo
+            # que el 8 sep: cuál merece columna es la pregunta, no la respuesta.
+            # El precio en particular tiene TRES escalones y cuál es «el precio»
+            # es una decisión de negocio que no me toca.
             plan["as400_snapshot"] = {
-                "description": description,
-                "kind": parsed.get("kind"),
-                "model_year": parsed.get("model_year"),
-                "weight_lbs": parsed.get("weight_lbs"),
-                "on_hand": parsed.get("on_hand"),
+                k: parsed.get(k)
+                for k in (
+                    "description",
+                    "kind",
+                    "model_year",
+                    "weight_lbs",
+                    "on_hand",
+                    "on_order",
+                    "available",
+                    "open_po",
+                    "price_breaks",
+                    "unit_meas",
+                    "status_code",
+                    "bin_location",
+                    "stock_location",
+                    "commission_pct",
+                    "vendor_no",
+                )
             }
+            plan["as400_snapshot"]["description"] = description
 
     return plan
 

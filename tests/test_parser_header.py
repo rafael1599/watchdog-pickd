@@ -199,3 +199,63 @@ def test_real_capture_880036():
         "state": "FL",
         "zip_code": "32205",
     }
+
+
+# ── la pantalla de stock, entera (12 sep 2026) ───────────────────────────────
+
+STOCK_FULL = """                            S T O C K   I N Q U I R Y
+
+  Stock Number: 03 3933 BK      B-Bike/P-Part: B    Model Year: 2025
+  Description:  CODA S2 L16 2026 GLOSS BLACK
+
+     Inventory  NJ       FL       CA                 Price  Quantity
+  On Hand       56        0        0       Each    380.95         49
+  On Order       0        0        0    Level 1    358.95         99
+  Available     56        0        0          2    347.95        199
+  Open PO        0        0        0          3       .00          0
+  Unit Meas:   EA
+  First Cost                Bin Location:  1        Status Code:
+  Freight                 Stock Location:
+  Duty %                          Weight:    36
+  Broker                  Commission Pct:  3"""
+
+
+def test_the_screen_carries_more_than_on_hand():
+    """Rafael, 12 sep 2026: «hay precio y otros datos utiles que podemos
+    adquirir». Los leiamos y los tirabamos en cada consulta."""
+    from parser import parse_stock_inquiry
+
+    r = parse_stock_inquiry(STOCK_FULL)
+    assert r["on_hand"] == {"NJ": 56, "FL": 0, "CA": 0}
+    # `available` no es `on_hand`: uno dice lo que hay, el otro lo que se puede
+    # prometer. Y `on_order` es lo que le falta a una orden en espera.
+    assert r["available"] == {"NJ": 56, "FL": 0, "CA": 0}
+    assert r["on_order"] == {"NJ": 0, "FL": 0, "CA": 0}
+    assert r["open_po"] == {"NJ": 0, "FL": 0, "CA": 0}
+    assert r["unit_meas"] == "EA"
+
+
+def test_the_price_tiers_are_read_from_the_ends_of_the_line():
+    """Los tres primeros numeros de la fila son almacenes y los dos ultimos
+    precio y corte. Se toma por los extremos porque EN MEDIO puede haber un
+    numero que es la etiqueta del escalon («Level 1», o un «2» pelado), y
+    contarlos de izquierda a derecha lo metia como si fuera un dato."""
+    from parser import parse_stock_inquiry
+
+    breaks = parse_stock_inquiry(STOCK_FULL)["price_breaks"]
+    assert [b["label"] for b in breaks] == ["Each", "Level 1", "Level 2", "Level 3"]
+    assert breaks[0] == {"label": "Each", "price": 380.95, "qty": 49}
+    assert breaks[2] == {"label": "Level 2", "price": 347.95, "qty": 199}
+
+
+def test_an_empty_field_does_not_borrow_the_next_line():
+    """`Status Code:` y `Stock Location:` vienen vacios a menudo, y con `\\s*`
+    el regex cruzaba el salto de linea y se traia la primera palabra de la
+    siguiente («Freight», «Duty») como si fuera su valor."""
+    from parser import parse_stock_inquiry
+
+    r = parse_stock_inquiry(STOCK_FULL)
+    assert r["status_code"] is None
+    assert r["stock_location"] is None
+    assert r["bin_location"] == "1"
+    assert r["commission_pct"] == 3.0

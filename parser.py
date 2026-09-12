@@ -86,6 +86,15 @@ def parse_stock_number(text: str) -> Optional[str]:
     return f"{m.group(1)}-{m.group(2).zfill(4)}{(m.group(3) or '').upper()}"
 
 
+def _num(v):
+    """Un número, o None si no lo era. Los campos de esta pantalla vienen
+    vacíos con frecuencia y un `""` en un jsonb es peor que un hueco."""
+    try:
+        return float(v) if v is not None and str(v).strip() != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_stock_inquiry(text: str) -> Dict:
     """Everything the STOCK INQUIRY detail screen carries that we care about.
 
@@ -108,11 +117,44 @@ def parse_stock_inquiry(text: str) -> Dict:
     weight = one(r"Weight:\s*([\d.]+)")
     year = one(r"Model\s*Year:\s*(\d{4})")
 
-    on_hand = None
     heads = re.search(r"Inventory\s+([A-Z]{2})\s+([A-Z]{2})\s+([A-Z]{2})", t, re.IGNORECASE)
-    counts = re.search(r"On\s*Hand\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)", t, re.IGNORECASE)
-    if heads and counts:
-        on_hand = {heads.group(i).upper(): int(counts.group(i)) for i in (1, 2, 3)}
+    warehouses = [heads.group(i).upper() for i in (1, 2, 3)] if heads else None
+
+    # Las cuatro filas de inventario comparten línea con los escalones de precio:
+    #
+    #      Inventory  NJ       FL       CA                 Price  Quantity
+    #   On Hand       56        0        0       Each    380.95         49
+    #   On Order       0        0        0    Level 1    358.95         99
+    #   Available     56        0        0          2    347.95        199
+    #
+    # Los tres PRIMEROS números de la fila son los almacenes y los DOS ÚLTIMOS
+    # son precio y corte de cantidad. Se toma así, por los extremos, porque en
+    # medio puede haber un número que es la ETIQUETA del escalón («Level 1», o
+    # un «2» pelado) y no un dato — contarlos de izquierda a derecha lo metería
+    # como si lo fuera.
+    rows: Dict[str, Dict] = {}
+    for label, key in (
+        ("On Hand", "on_hand"),
+        ("On Order", "on_order"),
+        ("Available", "available"),
+        ("Open PO", "open_po"),
+    ):
+        m = re.search(rf"^\s*{label}\s+(.+)$", t, re.IGNORECASE | re.MULTILINE)
+        if not m:
+            continue
+        rest = m.group(1)
+        tier = re.search(r"(Each|Level\s*\d)", rest, re.IGNORECASE)
+        nums = re.findall(r"-?\d+(?:\.\d+)?", re.sub(r"Level\s*\d|Each", " ", rest, flags=re.I))
+        if warehouses and len(nums) >= 3:
+            rows[key] = {w: int(float(n)) for w, n in zip(warehouses, nums[:3])}
+        if len(nums) >= 5:
+            rows.setdefault("price_breaks", []).append(
+                {
+                    "label": (tier.group(1).strip() if tier else f"Level {nums[3]}"),
+                    "price": float(nums[-2]),
+                    "qty": int(float(nums[-1])),
+                }
+            )
 
     return {
         "sku": parse_stock_number(t),
@@ -122,7 +164,26 @@ def parse_stock_inquiry(text: str) -> Dict:
         "kind": one(r"B-Bike/P-Part:\s*([BP])\b"),
         "model_year": year,
         "weight_lbs": float(weight) if weight else None,
-        "on_hand": on_hand,
+        "on_hand": rows.get("on_hand"),
+        # Todo lo demás que la pantalla enseñaba y tirábamos (Rafael, 12 sep
+        # 2026: «hay precio y otros datos útiles que podemos adquirir»).
+        # `available` no es `on_hand`: contesta «¿puedo prometer esto?», y
+        # `on_order` contesta «¿cuándo lo tendré?», que es lo que le falta a una
+        # orden esperando inventario.
+        "on_order": rows.get("on_order"),
+        "available": rows.get("available"),
+        "open_po": rows.get("open_po"),
+        "price_breaks": rows.get("price_breaks") or None,
+        # `[ \t]*` y no `\s*`: estos campos vienen VACÍOS a menudo, y `\s`
+        # cruza el salto de línea — así que un `Status Code:` en blanco se
+        # llevaba la primera palabra de la línea siguiente («Freight») como si
+        # fuera su valor.
+        "unit_meas": one(r"Unit\s*Meas:[ \t]*([A-Z]{1,4})\b"),
+        "status_code": one(r"Status\s*Code:[ \t]*(\S+)"),
+        "bin_location": one(r"Bin\s*Location:[ \t]*(\S+)"),
+        "stock_location": one(r"Stock\s*Location:[ \t]*(\S+)"),
+        "commission_pct": _num(one(r"Commission\s*Pct:[ \t]*([\d.]+)")),
+        "vendor_no": one(r"Vendor\s*No\.?:?[ \t]*(\S+)"),
     }
 
 
