@@ -514,7 +514,10 @@ def _run_sku_gap() -> float:
                     return_to_order_search(_driver_for_sku_step())
                 except Exception as e:  # noqa: BLE001
                     log.warning("auto-scan: could not recover after a %s (%s)", res["action"], e)
-                    _note_gap(f"lost the terminal after a {res['action']}")
+                    # The exception text carries the screens it saw; dropping it
+                    # left the heartbeat saying the same sentence for three
+                    # different jams.
+                    _note_gap(f"lost the terminal after a {res['action']}: {e}")
                     return time.monotonic() - started
         log.info("auto-scan: SKU count cap reached after %d lookup(s)", done)
     except Exception:

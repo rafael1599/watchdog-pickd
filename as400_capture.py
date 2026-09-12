@@ -1016,9 +1016,11 @@ def return_to_order_search(driver, step_wait: float = 0.6, read_fn=None, page_wa
     read = read_fn or driver.copy_screen
     if page_wait is None:
         page_wait = _env_float("AS400_PAGE_WAIT", PAGE_WAIT_DEFAULT)
+    seen = []
     for _ in range(_unstick_tries()):
         screen = read()
         state = classify_screen(screen)
+        seen.append(state)
         if state == STATE_DISCONNECTED:
             raise AS400Disconnected("The AS400 dropped while returning to the order search.")
         if state == STATE_ORDER_SEARCH:
@@ -1036,8 +1038,13 @@ def return_to_order_search(driver, step_wait: float = 0.6, read_fn=None, page_wa
             unstick_to_menu(driver, step_wait=step_wait)
         time.sleep(page_wait)
 
+    # Naming the screens is the whole point: "couldn't get back" is the same
+    # sentence for a terminal on the menu, on a stock detail and on somebody
+    # else's order, and the fix is different for each. It rides out in the
+    # exception text, which the gap puts in the heartbeat.
     raise AS400ManualLoginRequired(
-        f"Couldn't get back to the order search after {_unstick_tries()} tries of F6·F6·F7."
+        f"Couldn't get back to the order search after {_unstick_tries()} tries of F6·F6·F7 "
+        f"(saw: {' → '.join(seen)})"
     )
 
 
@@ -1073,9 +1080,11 @@ def return_to_menu(driver, step_wait: float = 0.6, read_fn=None, page_wait=None)
     read = read_fn or driver.copy_screen
     if page_wait is None:
         page_wait = _env_float("AS400_PAGE_WAIT", PAGE_WAIT_DEFAULT)
+    seen = []
     for _ in range(_unstick_tries()):
         screen = read()
         state = classify_screen(screen)
+        seen.append(state)
         if state == STATE_DISCONNECTED:
             raise AS400Disconnected("The AS400 dropped while returning to the menu.")
         if state == STATE_MENU:
@@ -1089,7 +1098,8 @@ def return_to_menu(driver, step_wait: float = 0.6, read_fn=None, page_wait=None)
         time.sleep(page_wait)
 
     raise AS400ManualLoginRequired(
-        f"Couldn't get back to the menu after {_unstick_tries()} tries of F6·F6·F7."
+        f"Couldn't get back to the menu after {_unstick_tries()} tries of F6·F6·F7 "
+        f"(saw: {' → '.join(seen)})"
     )
 
 

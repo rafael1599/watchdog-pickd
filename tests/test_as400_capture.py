@@ -1319,3 +1319,25 @@ def test_the_wait_for_a_page_is_not_the_wait_between_two_keys():
     assert out == SEARCH
     # 0.6 entre el "3" y el ENTER; 9.0 esperando a que la página llegue.
     assert waits == [0.6, 9.0]
+
+
+def test_giving_up_says_which_screens_it_saw():
+    """«No pude volver» es la misma frase para un terminal en el menu, en un
+    detalle de stock y en la orden de otro — y el arreglo es distinto en cada
+    caso. Nombrar las pantallas es lo que convierte el heartbeat en un
+    diagnostico (12 sep 2026, tras adivinar tres veces)."""
+    import as400_capture
+
+    STOCK = "S T O C K   I N Q U I R Y\n  Stock Number: 03 3933 BK\n  Weight:  36\n"
+
+    class D:
+        def key(self, k):
+            pass
+
+        def type_text(self, t):
+            pass
+
+    with pytest.raises(as400_capture.AS400ManualLoginRequired) as e:
+        as400_capture.return_to_order_search(D(), step_wait=0, page_wait=0, read_fn=lambda: STOCK)
+    assert "saw:" in str(e.value)
+    assert as400_capture.STATE_STOCK_INQUIRY in str(e.value)
