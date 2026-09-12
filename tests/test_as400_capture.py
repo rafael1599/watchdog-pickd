@@ -1371,3 +1371,26 @@ def test_order_inquiry_is_already_home():
     )
     assert out == INQUIRY
     assert keys == ["type:3", "enter"]  # ni un F6 de vuelta al menu
+
+
+def test_the_blind_cmd7_between_two_lookups_also_waits_for_the_page():
+    """La tercera casa del mismo error. Cmd7 repinta una pagina entera y dormia
+    0,6 s, asi que el siguiente SKU se tecleaba sobre un detalle que aun no se
+    habia ido — y aterrizaba en el formulario NOTES. Medido el 12 sep: rafagas
+    de tres a 4 s y un tropiezo de 45-180 s, 89 SKUs/hora en vez de ~900."""
+    import as400_capture
+
+    waits = []
+    real_sleep = as400_capture.time.sleep
+
+    class D:
+        def key(self, k):
+            pass
+
+    try:
+        as400_capture.time.sleep = lambda s: waits.append(s)
+        as400_capture.return_to_search(D(), step_wait=0.6, page_wait=7.0)
+    finally:
+        as400_capture.time.sleep = real_sleep
+
+    assert waits == [7.0]

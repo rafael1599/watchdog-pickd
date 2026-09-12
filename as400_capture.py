@@ -1058,7 +1058,7 @@ def return_to_order_search(driver, step_wait: float = 0.6, read_fn=None, page_wa
     )
 
 
-def return_to_search(driver, step_wait: float = 0.6) -> None:
+def return_to_search(driver, step_wait: float = 0.6, page_wait=None) -> None:
     """Cmd7 from a stock detail lands back on the Stock Inquiry SEARCH form.
 
     Rafael, 11 sep 2026: "cmd7 regresa a la pantalla de busqueda, viene vacia".
@@ -1068,9 +1068,20 @@ def return_to_search(driver, step_wait: float = 0.6) -> None:
     One key and no read on purpose. The next lookup's own result is the check,
     and a wrong guess costs that lookup and nothing else: `capture_stock_inquiry`
     refuses to mark a SKU unknown while it is navigating optimistically.
+
+    **It waits `page_wait`, and that is the third time the same mistake shows
+    up.** Cmd7 repaints a whole page, and this slept 0.6 s. On Bay 2 the night
+    of 12 sep the sweep ran in threes: three lookups at 4 s and then a stumble —
+    the next SKU typed onto a detail screen that had not gone yet, landing on
+    the NOTES form and costing 45 to 180 s of recovery. 89 SKUs an hour instead
+    of the ~900 the burst does when nothing is typed too early. `step_wait` is
+    the gap BETWEEN the keys of one gesture; waiting for a screen is
+    `page_wait`, and it is retunable from .env without a deploy.
     """
+    if page_wait is None:
+        page_wait = _env_float("AS400_PAGE_WAIT", PAGE_WAIT_DEFAULT)
     driver.key("f7")
-    time.sleep(step_wait)
+    time.sleep(page_wait)
 
 
 def return_to_menu(driver, step_wait: float = 0.6, read_fn=None, page_wait=None) -> str:
