@@ -501,6 +501,45 @@ def register_from_as400(sku: str, parsed: dict, client=None) -> dict:
     return {"action": out.get("action") or "registered", "sku": sku, "rpc": out}
 
 
+# ── las pantallas crudas, para poder mirarlas (Rafael, 12 sep 2026) ──────────
+#
+# «Si nos enfocamos en un análisis de las pantallas primero, podemos definir el
+# modo más rápido… una persona que sabe usar el sistema saca un SKU cada cinco o
+# seis segundos incluyendo copiar, porque se mantiene en la misma página».
+#
+# Tiene razón, y es la crítica correcta a tres intentos de acelerar revertidos
+# en una noche: ajusté esperas y supuse en qué pantalla quedaba el terminal, sin
+# un modelo de las pantallas. Esto lee la pantalla dos mil veces y la tira
+# entera; guardar una muestra convierte «creo que el buscador queda vacío» en
+# algo que se mira.
+#
+# Acotado a propósito: unas pocas por clase y por proceso. No es un log.
+SCREENS_PER_KIND = int(os.getenv("SKU_ENRICH_SCREENS_PER_KIND", "12"))
+_screens_kept: dict = {}
+
+
+def keep_screen(sku: str, classified: str, after: str, raw: str, client=None) -> bool:
+    """Guarda esta pantalla si aún faltan ejemplares de su clase. Devuelve si la guardó."""
+    if not raw or SCREENS_PER_KIND <= 0:
+        return False
+    n = _screens_kept.get(classified, 0)
+    if n >= SCREENS_PER_KIND:
+        return False
+    _screens_kept[classified] = n + 1
+    try:
+        if client is None:
+            from supabase_client import get_client
+
+            client = get_client()
+        client.table("as400_screens").insert(
+            {"sku": sku, "classified": classified, "after": after, "raw": raw}
+        ).execute()
+        return True
+    except Exception as e:  # noqa: BLE001 — mirar no puede tumbar la barrida
+        log.warning("no se pudo guardar la pantalla de %s (%s)", sku, e)
+        return False
+
+
 # ── the step ─────────────────────────────────────────────────────────────────
 
 
@@ -570,6 +609,21 @@ def run_sku_step(
         else:
             returned = None  # el caminar verificado del llamante es el viaje
 
+        # La pregunta de Rafael, hecha dato: ¿qué queda en pantalla DESPUÉS del
+        # Cmd7? Si la de detalle conserva los campos de entrada, ese Cmd7 sobra
+        # y con él la mitad del tiempo por consulta. Cuesta 12 lecturas en toda
+        # la barrida: `keep_screen` deja de guardar en cuanto tiene ejemplares.
+        #
+        # En su PROPIO try, y no es ceremonia: mirar no puede cambiar el
+        # resultado de lo que se mira. Colgado del try de arriba, un driver que
+        # no supiera copiar la pantalla convertía un viaje que SÍ salió bien en
+        # un «no llegó a casa», que es lo que para la cola.
+        if clean and _screens_kept.get("after_cmd7", 0) < SCREENS_PER_KIND:
+            try:
+                keep_screen(sku, "after_cmd7", "Cmd7", driver.copy_screen())
+            except Exception as e:  # noqa: BLE001
+                log.debug("no se pudo mirar la pantalla tras el Cmd7 (%s)", e)
+
     result["returned"] = returned
     # Un `unknown` ya sabe dónde quedó —en el buscador en blanco— y lo dice él
     # mismo; para el resto manda el viaje de vuelta que se acaba de hacer.
@@ -588,6 +642,7 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
             else capture_fn(sku, driver)
         )
         parsed = parse_fn(screen)
+        keep_screen(sku, "detail", "X", screen)
 
         # The identity guard. If the screen is not showing the SKU we asked for,
         # we are on somebody else's record: nothing is read from it and nothing
@@ -645,6 +700,7 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
         return {"action": "read", "sku": sku, "parsed": parsed, "plan": plan}
 
     except StockSkuNotFound as e:
+        keep_screen(sku, "blank_or_not_found", "X", getattr(e, "screen", ""))
         # AS400 has no record. Mark it so the queue doesn't jam on it (R7).
         mark_unknown(sku)
         log.info("SKU %s: %s — marked, won't be asked again", sku, e)
@@ -660,6 +716,7 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
         # pantalla en vez de mirarla.
         return {"action": "unknown", "sku": sku, "why": str(e)}
     except StockScreenMismatch as e:
+        keep_screen(sku, "mismatch", "X", getattr(e, "screen", ""))
         # ANY mismatch steps the SKU aside, and the asymmetry is the whole
         # argument. I first deferred only the verified path's failures, on the
         # grounds that an optimistic miss is our fault and not the SKU's. True,

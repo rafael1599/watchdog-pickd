@@ -1541,13 +1541,17 @@ def _type_stock_lookup(sku, driver, digits, colour, page_wait, read, *, optimist
             # all, and reporting it as "AS400 doesn't have this" would poison
             # the queue one good SKU at a time, silently. So: a navigation
             # problem, which costs this lookup and nothing else.
-            raise StockScreenMismatch(
+            err = StockScreenMismatch(
                 f"Assumed the search form for {sku} and landed elsewhere — not marking it."
             )
+            err.screen = screen
+            raise err
         # We were on the stock program a moment ago, so this is the SKU's own
         # answer: whatever AS400 shows for a stock number it doesn't have. Nobody
         # has seen that screen — F2 logs it so it can be mapped.
-        raise StockSkuNotFound(f"The lookup for {sku} didn't land on a stock screen.")
+        err = StockSkuNotFound(f"The lookup for {sku} didn't land on a stock screen.")
+        err.screen = screen
+        raise err
     if not is_stock_detail_screen(screen):
         # R10: same title, no fields. Reading here would report `Weight` as
         # absent instead of as "I am not where I think I am".
@@ -1567,12 +1571,16 @@ def _type_stock_lookup(sku, driver, digits, colour, page_wait, read, *, optimist
         from parser import parse_stock_number
 
         if parse_stock_number(screen) is None:
-            raise StockSkuNotFound(
+            err = StockSkuNotFound(
                 f"The search form came back blank for {sku} — AS400 has no such stock number."
             )
-        raise StockScreenMismatch(
+            err.screen = screen
+            raise err
+        err = StockScreenMismatch(
             f"Landed on the STOCK INQUIRY NOTES form for {sku} — no fields to read."
         )
+        err.screen = screen
+        raise err
     return screen
 
 

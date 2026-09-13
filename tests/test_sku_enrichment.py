@@ -674,6 +674,33 @@ def test_a_bad_lookup_does_not_get_a_blind_cmd7_on_top(tmp_path, monkeypatch):
     assert ok["returned"] is True and viajes == [1]
 
 
+def test_looking_at_the_screen_cannot_change_the_result(monkeypatch, tmp_path):
+    """La captura de pantallas va en su propio try, y no es ceremonia.
+
+    Colgada del try del viaje de vuelta, un driver que no supiera copiar la
+    pantalla convertia un viaje que SI salio bien en un «no llego a casa» — y
+    eso es lo que para la cola. El instrumento no puede alterar la medida.
+    """
+    import sku_enrichment
+
+    monkeypatch.setenv("SKU_UNKNOWN_PATH", str(tmp_path / "u.json"))
+    monkeypatch.setattr(sku_enrichment, "_screens_kept", {})
+
+    class SinCopiar:
+        def copy_screen(self):
+            raise RuntimeError("este driver no sabe copiar")
+
+    res = sku_enrichment.run_sku_step(
+        SinCopiar(),
+        {"sku": "03-3933BK"},
+        capture_fn=lambda s, d, **k: STOCK_DETAIL,
+        home="search",
+        return_fn=lambda d: True,
+    )
+    assert res["action"] in ("read", "written")
+    assert res["returned"] is True  # el viaje salio bien y sigue diciendolo
+
+
 def test_the_heartbeat_says_which_way_the_step_failed(monkeypatch):
     # 11 sep 2026: the heartbeat said `working` for hours while the read counter
     # sat at 17. A step was running and dying before it read anything, and the
