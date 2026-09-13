@@ -534,6 +534,10 @@ def _gap_harness(monkeypatch, *, idle=1e9, results=None, hops=None):
 
     monkeypatch.setattr(auto_scanner, "_last_operator_input", None)
     monkeypatch.setattr(as400_capture, "_last_self_input", None)
+    # El permiso de «hoy no hay nadie» caduca por fecha, y mientras esté puesto
+    # el gate del operario no salta. Los tests miden el comportamiento NORMAL,
+    # así que lo apagan; el permiso tiene su propio test.
+    monkeypatch.setenv("SCAN_IGNORE_OPERATOR_UNTIL", "2000-01-01T00:00:00Z")
     monkeypatch.setenv("SKU_ENRICH", "1")
     monkeypatch.setattr(auto_scanner, "_driver_for_sku_step", lambda: object())
     idles = iter(idle) if isinstance(idle, list) else None
@@ -758,6 +762,39 @@ def test_the_watchdog_does_not_stand_down_for_its_own_stock_screen(monkeypatch):
     monkeypatch.setattr(auto_scanner, "_last_operator_input", None)
     monkeypatch.setattr(auto_scanner, "system_idle_seconds", lambda: 3.0)
     assert auto_scanner.operator_idle_seconds() < auto_scanner.OPERATOR_HOLD_SEC
+
+
+def test_the_no_one_is_here_permit_expires_by_itself(monkeypatch):
+    """Rafael, 12 sep 2026: «no hay nadie hoy, quita ese tipo de paradas con un
+    contador para que se vuelva a activar en 24 horas».
+
+    Con fecha y no con interruptor: un permiso para ignorar al operario que
+    dependa de que alguien se acuerde de apagarlo le quita el teclado a quien
+    llegue el lunes.
+    """
+    import auto_scanner
+
+    monkeypatch.setenv("SCAN_IGNORE_OPERATOR_UNTIL", "2099-01-01T00:00:00Z")
+    assert auto_scanner.ignoring_operator() is True
+
+    monkeypatch.setenv("SCAN_IGNORE_OPERATOR_UNTIL", "2000-01-01T00:00:00Z")
+    assert auto_scanner.ignoring_operator() is False
+
+    # Y una fecha ilegible NO puede significar «ignóralo para siempre».
+    monkeypatch.setenv("SCAN_IGNORE_OPERATOR_UNTIL", "mañana")
+    assert auto_scanner.ignoring_operator() is False
+
+
+def test_while_the_permit_lasts_the_burst_does_not_yield_to_a_ghost(monkeypatch):
+    """Nadie en el Mac: la rafaga sigue aunque el reloj de inactividad diga que
+    alguien acaba de teclear."""
+    import auto_scanner
+
+    monkeypatch.setenv("SKU_ENRICH_MAX_PER_GAP", "3")
+    seen = _gap_harness(monkeypatch, idle=[1e9, 3.0, 3.0])
+    monkeypatch.setenv("SCAN_IGNORE_OPERATOR_UNTIL", "2099-01-01T00:00:00Z")
+    auto_scanner._run_sku_gap()
+    assert len(seen) == 3  # las tres, pese al idle de 3 s
 
 
 def test_a_manual_get_orders_now_wins_over_catalogue_work(monkeypatch):

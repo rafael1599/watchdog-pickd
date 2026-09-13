@@ -37,6 +37,7 @@ import re
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 
 import scanned_store
 from as400_capture import (
@@ -68,6 +69,35 @@ INCOMPLETE_RETRY_SEC = float(os.getenv("SCAN_INCOMPLETE_RETRY_SEC", "300"))  # 5
 UNAVAILABLE_WAIT_SEC = float(os.getenv("SCAN_UNAVAILABLE_WAIT_SEC", "300"))  # 5 min
 # Operator is "using the computer" if there was input within this many seconds.
 IDLE_THRESHOLD_SEC = float(os.getenv("SCAN_IDLE_THRESHOLD_SEC", "60"))
+
+# ── El día que no hay nadie (Rafael, 12 sep 2026) ────────────────────────────
+#
+# «No hay nadie hoy, quita ese tipo de paradas con un contador para que se
+# vuelva a activar en 24 horas».
+#
+# Mientras dura, el catálogo NO se aparta por creer que alguien está en el
+# teclado. Todo lo demás sigue mandando: el botón de «get orders now» —que es
+# una persona pidiendo algo, no una suposición sobre ella—, un deploy
+# pendiente, y la negativa a teclear en una pantalla desconocida.
+#
+# Con FECHA y no con interruptor, por el mismo motivo que el modo catálogo: un
+# permiso excepcional que depende de que alguien lo apague sigue puesto el
+# martes, y este en concreto le quita el teclado a quien llegue el lunes.
+IGNORE_OPERATOR_UNTIL_DEFAULT = "2026-09-14T03:00:00Z"  # 24 h desde que se pidió
+
+
+def ignoring_operator() -> bool:
+    raw = os.getenv("SCAN_IGNORE_OPERATOR_UNTIL", IGNORE_OPERATOR_UNTIL_DEFAULT).strip()
+    try:
+        until = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        # Una fecha ilegible no puede significar «ignora al operario para
+        # siempre». El valor que no se entiende cae del lado seguro.
+        log.warning("SCAN_IGNORE_OPERATOR_UNTIL no es una fecha (%r) — modo normal", raw)
+        return False
+    return datetime.now(timezone.utc) < until
+
+
 # How often to re-check while paused (operator active / manual capture running).
 IDLE_POLL_SEC = float(os.getenv("SCAN_IDLE_POLL_SEC", "15"))
 # Most already-cached numbers a single scan step will skip past (without driving
@@ -393,8 +423,6 @@ def gap_state() -> dict:
 
 
 def _note_gap(reason: str, read: int = 0) -> None:
-    from datetime import datetime, timezone
-
     _gap_state["reason"] = reason
     _gap_state["at"] = datetime.now(timezone.utc).isoformat()
     _gap_state["read"] += read
@@ -439,10 +467,15 @@ def _run_sku_gap() -> float:
                 _note_gap("budget spent")
                 log.info("auto-scan: SKU budget spent after %d lookup(s)", done)
                 return time.monotonic() - started
-            # The operator's keyboard wins, always — checked before every single
-            # lookup, not once per gap. A manual "get orders now" wins too: they
-            # asked for orders, not for catalogue work.
-            if operator_idle_seconds() < IDLE_THRESHOLD_SEC or _kick.is_set():
+            # A manual "get orders now" siempre gana: eso es una persona
+            # PIDIENDO algo, no una suposición sobre ella, y por eso no caduca.
+            if _kick.is_set():
+                _note_gap("orders requested")
+                log.info("auto-scan: orders requested — SKU queue yields after %d", done)
+                return time.monotonic() - started
+            # El teclado del operario gana también, comprobado antes de CADA
+            # consulta… salvo mientras dure el permiso de «hoy no hay nadie».
+            if not ignoring_operator() and operator_idle_seconds() < IDLE_THRESHOLD_SEC:
                 _note_gap("the operator is back")
                 log.info("auto-scan: the operator is back — SKU queue yields after %d", done)
                 return time.monotonic() - started
@@ -641,7 +674,11 @@ def _loop() -> None:
                 # `operator_idle_seconds` recuerda el último evento que NO fue
                 # nuestro. Es la cuarta casa de la misma lección.
                 idle_now = operator_idle_seconds()
-                if parked in OPERATOR_SCREENS and idle_now < OPERATOR_HOLD_SEC:
+                if (
+                    parked in OPERATOR_SCREENS
+                    and idle_now < OPERATOR_HOLD_SEC
+                    and not ignoring_operator()
+                ):
                     if _operator_since is None:
                         _operator_since = time.monotonic()
                         log.info(
