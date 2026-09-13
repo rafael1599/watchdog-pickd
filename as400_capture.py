@@ -1411,6 +1411,20 @@ def bootstrap_session(
     )
 
 
+def enter_stock_inquiry(driver, page_wait=None, step_wait: float = 0.6, read_fn=None) -> None:
+    """Deja el terminal DENTRO de la opción 02, por el camino verificado.
+
+    Extraído de `capture_stock_inquiry` sin cambiarle nada: la expedición que
+    mapea las pantallas necesita entrar igual, y duplicar esta secuencia era
+    garantizar que las dos copias se separaran. Una casa, un camino.
+    """
+    if page_wait is None:
+        page_wait = _env_float("AS400_PAGE_WAIT", PAGE_WAIT_DEFAULT)
+    read = read_fn or driver.copy_screen
+
+    enter_stock_inquiry(driver, page_wait=page_wait, step_wait=step_wait, read_fn=read)
+
+
 def capture_stock_inquiry(
     sku: str,
     driver,

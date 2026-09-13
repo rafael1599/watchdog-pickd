@@ -705,6 +705,25 @@ def test_looking_at_the_screen_cannot_change_the_result(monkeypatch, tmp_path):
     assert res["returned"] is True  # el viaje salio bien y sigue diciendolo
 
 
+def test_the_expedition_runs_once_and_cannot_take_the_scanner_down(monkeypatch):
+    """Mapear las pantallas es un experimento, y un experimento no puede costarle
+    al escaner las ordenes del lunes."""
+    import sku_enrichment
+
+    monkeypatch.setattr(sku_enrichment, "_explored", False)
+    veces = []
+
+    def _boom(*a, **k):
+        veces.append(1)
+        raise RuntimeError("el terminal dijo que no")
+
+    monkeypatch.setattr(sku_enrichment, "keep_screen", _boom)
+    # Aunque todo dentro falle, devuelve 0 y no propaga.
+    assert sku_enrichment.explore_once(object()) == 0
+    # Y no se repite: una vez por proceso.
+    assert sku_enrichment.explore_once(object()) == 0
+
+
 def test_the_heartbeat_says_which_way_the_step_failed(monkeypatch):
     # 11 sep 2026: the heartbeat said `working` for hours while the read counter
     # sat at 17. A step was running and dying before it read anything, and the

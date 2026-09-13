@@ -540,6 +540,42 @@ def keep_screen(sku: str, classified: str, after: str, raw: str, client=None) ->
         return False
 
 
+# ── la expedición, una vez por proceso ───────────────────────────────────────
+_explored = False
+
+
+def explore_once(driver) -> int:
+    """Mapea las pantallas de STOCK INQUIRY, una sola vez, antes de barrer.
+
+    Rafael, 12 sep 2026: «lo vas a tener que automatizar y capturar tú mismo,
+    no estaré ahí hasta el lunes». Tres intentos de acelerar revertidos hoy
+    salieron de suponer en qué pantalla quedaba el terminal; esto lo mira.
+
+    Envuelto entero: una expedición no puede costarle al escáner las órdenes del
+    lunes. Si algo sale mal, se anota y la barrida sigue como siempre.
+    """
+    global _explored
+    if _explored or os.getenv("SKU_ENRICH_EXPLORE", "1") not in ("1", "true", "True", "yes"):
+        return 0
+    _explored = True
+    try:
+        import as400_explore
+        from as400_capture import capture_stock_inquiry, enter_stock_inquiry, return_to_order_search
+
+        def keep(classified, after, raw):
+            keep_screen(None, classified, after, raw)
+
+        n = as400_explore.run_expedition(driver, keep, enter_stock_inquiry, return_to_order_search)
+        n += as400_explore.probe_retype_on_detail(
+            driver, keep, capture_stock_inquiry, return_to_order_search, "03-3933BK", "03-4054BL"
+        )
+        log.info("expedición terminada: %d pantallas", n)
+        return n
+    except Exception:
+        log.exception("la expedición falló — la barrida sigue igual")
+        return 0
+
+
 # ── the step ─────────────────────────────────────────────────────────────────
 
 

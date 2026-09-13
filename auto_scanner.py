@@ -461,6 +461,12 @@ def _run_sku_gap() -> float:
             let_sleep()
             return 0.0
 
+        # Una sola vez por proceso, antes de barrer: mapear las pantallas. Sale
+        # de que tres intentos de acelerar hoy se revirtieron por suponer dónde
+        # quedaba el terminal, y de que nadie va a estar en Bay 2 hasta el lunes
+        # (Rafael, 12 sep 2026). Va envuelta: no puede costarle las órdenes.
+        sku_enrichment.explore_once(_driver_for_sku_step())
+
         deadline = started + sku_enrichment.gap_budget_sec()
         for _ in range(sku_enrichment.max_per_gap()):
             if time.monotonic() >= deadline:
