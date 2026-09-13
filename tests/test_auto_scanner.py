@@ -431,3 +431,38 @@ def test_it_can_be_switched_off_without_a_deploy(monkeypatch):
     monkeypatch.setattr(auto_scanner.subprocess, "Popen", lambda *a, **k: calls.append(1))
     auto_scanner.hold_awake()
     assert calls == []
+
+
+def test_the_orders_pacing_does_not_apply_when_the_catalogue_is_the_job(monkeypatch):
+    """Las esperas de este bucle existen para las órdenes. En modo catálogo no
+    hay órdenes que esperar, y esa pausa es el terminal parado: el 13 sep fueron
+    tres cuartos del reloj — ráfagas de 2-3 min separadas por paradas de 25."""
+    import auto_scanner
+    import sku_enrichment
+
+    monkeypatch.setenv("SKU_ENRICH_EXCLUSIVE_UNTIL", "2099-01-01T00:00:00Z")
+    assert sku_enrichment.catalogue_first() is True
+    assert auto_scanner._paced("not_found", 1200.0) == auto_scanner.CATALOGUE_MAX_WAIT_SEC
+    assert auto_scanner._paced("unavailable", 300.0) == auto_scanner.CATALOGUE_MAX_WAIT_SEC
+    # Nunca la alarga: cinco segundos siguen siendo cinco segundos.
+    assert auto_scanner._paced("captured", 5.0) == 5.0
+
+    # Y fuera del fin de semana del catálogo, la pauta de siempre.
+    monkeypatch.setenv("SKU_ENRICH_EXCLUSIVE_UNTIL", "2000-01-01T00:00:00Z")
+    assert auto_scanner._paced("not_found", 1200.0) == 1200.0
+
+
+def test_a_wait_is_a_reason_too(monkeypatch):
+    """`_note_gap` sólo se llamaba desde dentro de la ráfaga, así que una parada
+    fuera de ella dejaba el latido diciendo «working» veinticinco minutos."""
+    import auto_scanner
+
+    monkeypatch.setenv("SKU_ENRICH_EXCLUSIVE_UNTIL", "2000-01-01T00:00:00Z")
+    auto_scanner._note_gap("working")
+    auto_scanner._paced("unavailable", 300.0)
+    assert "unavailable" in auto_scanner._gap_state["reason"]
+    assert "300" in auto_scanner._gap_state["reason"]
+    # Una espera corta es el ritmo normal de las órdenes, no una parada.
+    auto_scanner._note_gap("working")
+    auto_scanner._paced("captured", auto_scanner.FOUND_NEXT_DELAY_SEC)
+    assert auto_scanner._gap_state["reason"] == "working"

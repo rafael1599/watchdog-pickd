@@ -123,6 +123,17 @@ OPERATOR_HOLD_SEC = float(os.getenv("SCAN_OPERATOR_HOLD_SEC", "600"))
 # keyboard — and asking the AS400 for the same missing order every few seconds
 # would be worse than sleeping.
 MIN_WORK_TO_SKIP_WAIT_SEC = float(os.getenv("SCAN_MIN_WORK_TO_SKIP_WAIT_SEC", "20"))
+# El techo de la espera mientras el catálogo es el único trabajo. Las esperas de
+# este bucle existen para las ÓRDENES: veinte minutos para no preguntarle al
+# AS400 por el mismo número inexistente, cinco para no insistir sobre un
+# terminal caído. En modo catálogo no hay órdenes que esperar y sí 1.400 SKUs en
+# cola, así que esa misma pausa es el terminal parado. Medido el 13 sep entre
+# las 04:00 y las 08:30: ráfagas de dos a tres minutos separadas por paradas de
+# 25, o sea tres cuartos del reloj sin tocar el AS400 (Rafael: «otras
+# estrategias de pisar el acelerador, porque no estamos siendo eficientes»).
+#
+# Caduca sola: va atada a `catalogue_first()`, que ya tiene fecha de final.
+CATALOGUE_MAX_WAIT_SEC = float(os.getenv("SCAN_CATALOGUE_MAX_WAIT_SEC", "30"))
 
 # Serializes all AS400/Mocha access between the auto-scanner and manual captures.
 capture_lock = threading.Lock()
@@ -466,6 +477,9 @@ def _run_sku_gap() -> float:
         # quedaba el terminal, y de que nadie va a estar en Bay 2 hasta el lunes
         # (Rafael, 12 sep 2026). Va envuelta: no puede costarle las órdenes.
         sku_enrichment.explore_once(_driver_for_sku_step())
+        # Y el volcado de la lista de excluidos, también una vez por proceso:
+        # no toca el terminal, así que va antes de pedir la primera pantalla.
+        sku_enrichment.backfill_absent_once()
 
         deadline = started + sku_enrichment.gap_budget_sec()
         for _ in range(sku_enrichment.max_per_gap()):
@@ -766,7 +780,36 @@ def _loop() -> None:
         finally:
             capture_lock.release()
 
+        wait = _paced(action, wait)
         _interruptible_wait(wait)
+
+
+def _paced(action: str, wait: float) -> float:
+    """Recorta la espera del bucle de órdenes mientras el catálogo es el trabajo,
+    y —pase lo que pase— deja dicho en el latido por qué no se está leyendo.
+
+    Lo segundo es la mitad importante. `_note_gap` sólo se llamaba desde dentro
+    de la ráfaga, así que una parada FUERA de ella dejaba el latido diciendo
+    «working» durante veinticinco minutos: el 13 sep tuve que deducir de las
+    marcas de tiempo de `sku_metadata` lo que este campo existe para decir. Una
+    espera es un motivo tan válido como un fallo.
+    """
+    try:
+        import sku_enrichment
+
+        if sku_enrichment.catalogue_first() and wait > CATALOGUE_MAX_WAIT_SEC:
+            log.info(
+                "auto-scan: %s — %.0fs recortados a %.0fs (modo catálogo)",
+                action,
+                wait,
+                CATALOGUE_MAX_WAIT_SEC,
+            )
+            wait = CATALOGUE_MAX_WAIT_SEC
+    except Exception:  # noqa: BLE001 — el recorte es un lujo, la espera no
+        log.exception("auto-scan: no se pudo recortar la espera")
+    if wait > FOUND_NEXT_DELAY_SEC:
+        _note_gap(f"{action}: esperando {wait:.0f}s")
+    return wait
 
 
 def trigger_scan_now() -> bool:

@@ -214,6 +214,61 @@ def mark_unknown(sku: str, reason: str = "not_in_as400", client=None) -> None:
         log.warning("SKU %s: no se pudo marcar as400_absent_at (%s)", sku, e)
 
 
+_backfilled = False
+
+
+def backfill_absent_once(client=None) -> int:
+    """Sube a la base los «AS400 no lo tiene» que sólo viven en el disco de Bay 2.
+
+    `as400_absent_at` se añadió el 12 sep, cuando el archivo local ya llevaba
+    cientos de veredictos de la primera pasada. Esos se quedaron aquí: la
+    columna sólo recoge los que salen de ahora en adelante, así que la lista de
+    excluidos que Rafael pidió («ya sabes cuáles no tiene, esos los puedes poner
+    en una lista de excluidos») está completa en un Mac y a medias en PickD.
+
+    Una vez por proceso y sólo hacia adelante: `is null` en el filtro, de modo
+    que jamás pisa una fecha que ya esté puesta. Envuelto entero — un volcado que
+    falle no puede costarle la barrida al escáner.
+    """
+    global _backfilled
+    if _backfilled:
+        return 0
+    _backfilled = True
+    if not writes_enabled():
+        return 0
+    skus = [
+        sku
+        for sku, entry in load_unknown().items()
+        if isinstance(entry, dict) and entry.get("reason") == "not_in_as400"
+    ]
+    if not skus:
+        return 0
+    try:
+        if client is None:
+            from supabase_client import get_client
+
+            client = get_client()
+        done = 0
+        # En trozos: un `in_` con mil SKUs es una URL que PostgREST rechaza.
+        for i in range(0, len(skus), 100):
+            chunk = skus[i : i + 100]
+            res = (
+                client.table("sku_metadata")
+                .update({"as400_absent_at": _now()})
+                .in_("sku", chunk)
+                .is_("as400_absent_at", "null")
+                .execute()
+            )
+            done += len(res.data or [])
+        log.info(
+            "volcado de ausentes: %d SKUs marcados en sku_metadata (de %d locales)", done, len(skus)
+        )
+        return done
+    except Exception as e:  # noqa: BLE001 — el archivo local sigue filtrando la cola
+        log.warning("no se pudo volcar la lista de ausentes (%s)", e)
+        return 0
+
+
 # How long a SKU that keeps failing steps aside. Doubling, from half an hour.
 DEFER_BASE_SEC = float(os.getenv("SKU_ENRICH_DEFER_SEC", "1800"))
 DEFER_MAX_SEC = float(os.getenv("SKU_ENRICH_DEFER_MAX_SEC", "86400"))

@@ -1520,3 +1520,70 @@ def test_a_shape_the_as400_cannot_look_up_never_enters():
     )
     rows = sku_enrichment.fetch_candidates(c)
     assert [r["sku"] for r in rows] == ["32-0419"]
+
+
+def test_the_exclusion_list_reaches_the_catalogue_not_just_this_mac(tmp_path, monkeypatch):
+    """`as400_absent_at` llegó después de la primera pasada: los cientos de
+    veredictos de entonces sólo viven en el JSON de Bay 2. El volcado los sube
+    una vez, y sólo los que AS400 dijo que no existen — un aplazamiento nuestro
+    no es un veredicto del ERP."""
+    import sku_enrichment
+
+    monkeypatch.setenv("SKU_UNKNOWN_PATH", str(tmp_path / "u.json"))
+    monkeypatch.setenv("SKU_ENRICH_WRITE", "1")
+    sku_enrichment.mark_unknown("01-0001", client=_NoWrites())
+    sku_enrichment.mark_unknown("01-0002", client=_NoWrites())
+    sku_enrichment.defer_sku("01-0003", "mismatch")
+
+    client = _RecordingClient()
+    sku_enrichment._backfilled = False
+    n = sku_enrichment.backfill_absent_once(client=client)
+
+    assert n == 2
+    assert client.chunks == [["01-0001", "01-0002"]]
+    assert client.only_nulls is True
+    # Una vez por proceso: la segunda llamada no vuelve a pegarle a la base.
+    assert sku_enrichment.backfill_absent_once(client=client) == 0
+    assert len(client.chunks) == 1
+
+
+class _NoWrites:
+    """mark_unknown escribe el archivo local y luego intenta la base; en este
+    test sólo interesa el archivo."""
+
+    def table(self, _name):
+        return self
+
+    def update(self, _values):
+        return self
+
+    def eq(self, *_a):
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": []})()
+
+
+class _RecordingClient:
+    def __init__(self):
+        self.chunks = []
+        self.only_nulls = False
+        self._pending = None
+
+    def table(self, _name):
+        return self
+
+    def update(self, _values):
+        return self
+
+    def in_(self, _col, values):
+        self._pending = sorted(values)
+        return self
+
+    def is_(self, col, value):
+        self.only_nulls = col == "as400_absent_at" and value == "null"
+        return self
+
+    def execute(self):
+        self.chunks.append(self._pending)
+        return type("R", (), {"data": [{"sku": s} for s in self._pending]})()
