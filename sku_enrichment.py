@@ -648,17 +648,17 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
         # AS400 has no record. Mark it so the queue doesn't jam on it (R7).
         mark_unknown(sku)
         log.info("SKU %s: %s — marked, won't be asked again", sku, e)
-        # Y SEGUIMOS EN EL FORMULARIO DE BÚSQUEDA. Eso no es una suposición:
-        # AS400 contesta un número que no tiene devolviendo el buscador en
-        # blanco, y acabamos de LEER esa pantalla para saberlo. El terminal está
-        # justo donde la consulta siguiente quiere empezar.
+        # Probado y REVERTIDO el 12 sep 2026. Creí que tras un número muerto el
+        # terminal quedaba en el buscador en blanco —listo para el siguiente— y
+        # me salté la vuelta al menú. El ritmo empeoró: 13,5 s de media a 15,3.
         #
-        # Sin esto, un número muerto costaba 29 s —vuelta al menú y entrada por
-        # el camino largo— contra los 5 de una consulta buena, y en este tramo
-        # son un tercio de todas: el 75 % del tiempo de la ráfaga se iba en
-        # caminar de vuelta a un sitio del que no nos habíamos movido
-        # (Rafael, 12 sep 2026: «no estamos siendo eficientes»).
-        return {"action": "unknown", "sku": sku, "why": str(e), "on_search": True}
+        # El error: «el buscador vuelve en blanco» es lo que pasa tras un
+        # **Cmd7**, no tras un envío que AS400 rechaza. Ahí los campos
+        # conservan lo tecleado, el SKU siguiente se concatena encima y falla —
+        # así que ahorrarse una vuelta de 29 s costaba una consulta rota que
+        # valía lo mismo. Cuarta vez esta noche que supongo el estado de una
+        # pantalla en vez de mirarla.
+        return {"action": "unknown", "sku": sku, "why": str(e)}
     except StockScreenMismatch as e:
         # ANY mismatch steps the SKU aside, and the asymmetry is the whole
         # argument. I first deferred only the verified path's failures, on the
