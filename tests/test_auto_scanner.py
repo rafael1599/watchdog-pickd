@@ -443,14 +443,49 @@ def test_the_orders_pacing_does_not_apply_when_the_catalogue_is_the_job(monkeypa
 
     monkeypatch.setenv("SKU_ENRICH_EXCLUSIVE_UNTIL", "2099-01-01T00:00:00Z")
     assert sku_enrichment.catalogue_first() is True
-    assert auto_scanner._paced("not_found", 1200.0) == auto_scanner.CATALOGUE_MAX_WAIT_SEC
-    assert auto_scanner._paced("unavailable", 300.0) == auto_scanner.CATALOGUE_MAX_WAIT_SEC
+    trabajo = auto_scanner.MIN_WORK_TO_SKIP_WAIT_SEC + 1
+    assert auto_scanner._paced("not_found", 1200.0, trabajo) == auto_scanner.CATALOGUE_MAX_WAIT_SEC
+    assert auto_scanner._paced("unavailable", 300.0, trabajo) == auto_scanner.CATALOGUE_MAX_WAIT_SEC
     # Nunca la alarga: cinco segundos siguen siendo cinco segundos.
-    assert auto_scanner._paced("captured", 5.0) == 5.0
+    assert auto_scanner._paced("captured", 5.0, trabajo) == 5.0
 
     # Y fuera del fin de semana del catálogo, la pauta de siempre.
     monkeypatch.setenv("SKU_ENRICH_EXCLUSIVE_UNTIL", "2000-01-01T00:00:00Z")
-    assert auto_scanner._paced("not_found", 1200.0) == 1200.0
+    assert auto_scanner._paced("not_found", 1200.0, trabajo) == 1200.0
+
+
+def test_an_empty_queue_takes_the_shortcut_away(monkeypatch):
+    """El recorte se ganó porque había 1.400 SKUs en cola. Vaciada la cola, lo
+    único que queda es preguntarle al AS400 por el mismo número inexistente cada
+    treinta segundos — cuarenta veces más a menudo que antes, para nada."""
+    import auto_scanner
+    import sku_enrichment
+
+    monkeypatch.setenv("SKU_ENRICH_EXCLUSIVE_UNTIL", "2099-01-01T00:00:00Z")
+    assert sku_enrichment.catalogue_first() is True
+    # El hueco no hizo nada: la cola estaba vacía.
+    assert auto_scanner._paced("not_found", 1200.0, 0.0) == 1200.0
+    # Y con trabajo de verdad, el recorte sigue.
+    assert (
+        auto_scanner._paced("not_found", 1200.0, auto_scanner.MIN_WORK_TO_SKIP_WAIT_SEC)
+        == auto_scanner.CATALOGUE_MAX_WAIT_SEC
+    )
+
+
+def test_the_wait_does_not_erase_what_the_burst_said(monkeypatch):
+    """La primera versión escribía sólo la espera, y a las tres horas el latido
+    repetía «not_found: esperando 30s» mientras la cola llevaba media hora vacía
+    y el campo no lo decía: el mismo agujero, movido un metro."""
+    import auto_scanner
+
+    monkeypatch.setenv("SKU_ENRICH_EXCLUSIVE_UNTIL", "2000-01-01T00:00:00Z")
+    auto_scanner._note_gap("the queue is empty")
+    auto_scanner._paced("not_found", 1200.0, 0.0)
+    assert "the queue is empty" in auto_scanner._gap_state["reason"]
+    assert "1200" in auto_scanner._gap_state["reason"]
+    # Y no se acumula vuelta tras vuelta.
+    auto_scanner._paced("not_found", 1200.0, 0.0)
+    assert auto_scanner._gap_state["reason"].count("esperando") == 1
 
 
 def test_a_wait_is_a_reason_too(monkeypatch):

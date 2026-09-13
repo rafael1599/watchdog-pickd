@@ -662,6 +662,7 @@ def _loop() -> None:
         # `run_scan_step` revienta en la primera vuelta un NameError ahi
         # no seria una espera larga sino el hilo del escaner muerto.
         action = "error"
+        gap_spent = 0.0
         try:
             if driver is None:
                 driver = MochaDriver()
@@ -760,7 +761,7 @@ def _loop() -> None:
                 # A side effect worth having: orders are found four times sooner,
                 # because the terminal is asked every budget instead of every
                 # twenty minutes.
-                spent = _run_sku_gap()
+                spent = gap_spent = _run_sku_gap()
                 if spent >= MIN_WORK_TO_SKIP_WAIT_SEC:
                     wait = FOUND_NEXT_DELAY_SEC  # the waiting already happened, usefully
                     log.info(
@@ -784,11 +785,11 @@ def _loop() -> None:
         finally:
             capture_lock.release()
 
-        wait = _paced(action, wait)
+        wait = _paced(action, wait, gap_spent)
         _interruptible_wait(wait)
 
 
-def _paced(action: str, wait: float) -> float:
+def _paced(action: str, wait: float, gap_spent: float = 0.0) -> float:
     """Recorta la espera del bucle de órdenes mientras el catálogo es el trabajo,
     y —pase lo que pase— deja dicho en el latido por qué no se está leyendo.
 
@@ -801,7 +802,13 @@ def _paced(action: str, wait: float) -> float:
     try:
         import sku_enrichment
 
-        if sku_enrichment.catalogue_first() and wait > CATALOGUE_MAX_WAIT_SEC:
+        # `gap_spent`: el recorte se gano porque habia 1.400 SKUs en cola. Cuando
+        # la cola se vacia esa razon desaparece y lo unico que queda es
+        # preguntarle al AS400 por el mismo numero inexistente cada treinta
+        # segundos — cuarenta veces mas a menudo que antes, para nada. El mismo
+        # umbral que ya usa el bucle para decidir si «la espera ya ocurrio».
+        worked = gap_spent >= MIN_WORK_TO_SKIP_WAIT_SEC
+        if worked and sku_enrichment.catalogue_first() and wait > CATALOGUE_MAX_WAIT_SEC:
             log.info(
                 "auto-scan: %s — %.0fs recortados a %.0fs (modo catálogo)",
                 action,
@@ -812,7 +819,16 @@ def _paced(action: str, wait: float) -> float:
     except Exception:  # noqa: BLE001 — el recorte es un lujo, la espera no
         log.exception("auto-scan: no se pudo recortar la espera")
     if wait > FOUND_NEXT_DELAY_SEC:
-        _note_gap(f"{action}: esperando {wait:.0f}s")
+        # Sin pisar lo que dijo la rafaga. La primera version escribia solo la
+        # espera, y a las tres horas el latido repetia «not_found: esperando 30s»
+        # mientras la cola llevaba media hora vacia y el campo no lo decia: el
+        # mismo agujero que este cambio venia a tapar, movido un metro.
+        base = (_gap_state.get("reason") or "").split(" · ")[0]
+        _note_gap(
+            f"{base} · {action}: esperando {wait:.0f}s"
+            if base
+            else f"{action}: esperando {wait:.0f}s"
+        )
     return wait
 
 
