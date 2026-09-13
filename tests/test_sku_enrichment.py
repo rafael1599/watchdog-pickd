@@ -1344,6 +1344,7 @@ def test_one_bad_lookup_drops_it_back_to_the_verified_way(monkeypatch):
 class _FakeTable:
     def __init__(self, which, store, calls):
         self.which, self.store, self.calls, self.f = which, store, calls, {}
+        self.offset = 0
 
     def select(self, *_a, **_k):
         return self
@@ -1371,13 +1372,20 @@ class _FakeTable:
     def limit(self, *_a):
         return self
 
+    def range(self, start, _end):
+        self.offset = start
+        return self
+
     def execute(self):
         if self.which in ("unregistered", "inv"):
             key = self.which
         else:
             key = "bikes" if self.f.get("is_bike") == ("eq", True) else "parts"
         self.calls.append(key)
-        return type("R", (), {"data": self.store[key]})()
+        # Paginado: la segunda pagina viene vacia, que es como la tabla dice
+        # «hasta aqui». Sin esto, `next_sku` pagina para siempre sobre la misma.
+        data = self.store[key] if self.offset == 0 else []
+        return type("R", (), {"data": data})()
 
 
 class _FakeClient:
@@ -1430,9 +1438,11 @@ def test_a_tier_full_of_set_aside_skus_does_not_block_the_next_one(tmp_path, mon
     monkeypatch.setattr(
         sku_enrichment,
         "fetch_candidates",
-        lambda client=None, tier="auto": (
+        # `offset` cuenta: la segunda página de cada fase viene vacía, que es
+        # como la tabla dice «hasta aquí». Sin eso, paginar no terminaría.
+        lambda client=None, tier="auto", offset=0: (
             []
-            if tier == "unregistered"
+            if offset or tier == "unregistered"
             else [{"sku": "03-4983GY", "model": None, "qty": 0}]
             if tier == "bikes"
             else [{"sku": "98-6860", "model": None, "qty": 0}]
@@ -1445,6 +1455,45 @@ def test_a_tier_full_of_set_aside_skus_does_not_block_the_next_one(tmp_path, mon
     # Apartada, la cola NO se declara vacia: cae a las partes.
     sku_enrichment.defer_sku("03-4983GY", "landed on the NOTES form")
     assert sku_enrichment.next_sku(c)["sku"] == "98-6860"
+
+
+def test_a_full_page_of_set_aside_skus_does_not_end_the_queue(tmp_path, monkeypatch):
+    """El mismo error que el de arriba, una capa mas abajo, y costo 1.209 partes.
+
+    La cola pide 200 filas y filtra DESPUES con la lista local de apartados. Si
+    esas 200 primeras vienen todas apartadas —y venian: la primera pasada marco
+    cientos— la fase sale vacia y el sistema anuncia `the queue is empty` con
+    mil doscientas esperando detras. Vacio es que no quede nada que PODAMOS
+    pedir EN TODA LA TABLA, no en la primera pagina.
+    """
+    import sku_enrichment
+
+    monkeypatch.setenv("SKU_UNKNOWN_PATH", str(tmp_path / "u.json"))
+    monkeypatch.setattr(sku_enrichment, "QUEUE_FETCH_LIMIT", 2)
+
+    paginas = {
+        0: [
+            {"sku": "98-0001", "model": None, "qty": 0},
+            {"sku": "98-0002", "model": None, "qty": 0},
+        ],
+        2: [{"sku": "98-0003", "model": None, "qty": 0}],
+    }
+    monkeypatch.setattr(
+        sku_enrichment,
+        "fetch_candidates",
+        lambda client=None, tier="auto", offset=0: (
+            paginas.get(offset, []) if tier == "parts" else []
+        ),
+    )
+
+    # La primera pagina, entera apartada: la cola NO se acaba ahi.
+    sku_enrichment.defer_sku("98-0001", "mismatch")
+    sku_enrichment.defer_sku("98-0002", "mismatch")
+    assert sku_enrichment.next_sku(None)["sku"] == "98-0003"
+
+    # Y cuando de verdad no queda nada, dice que no queda nada.
+    sku_enrichment.defer_sku("98-0003", "mismatch")
+    assert sku_enrichment.next_sku(None) is None
 
 
 def test_a_bike_still_outranks_every_part():

@@ -783,23 +783,30 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
 # run out the ones nobody has weighed. Pulling the whole catalogue every gap
 # would be a lot of rows to decide one lookup.
 QUEUE_FETCH_LIMIT = int(os.getenv("SKU_ENRICH_FETCH_LIMIT", "200"))
+# Hasta dónde paginar antes de rendirse. Un tope, no una expectativa: el
+# catálogo son ~2.400 filas y esto existe para que un bug futuro no convierta la
+# paginación en un bucle que se coma el hueco entero.
+QUEUE_MAX_SCAN = int(os.getenv("SKU_ENRICH_MAX_SCAN", "6000"))
 
 _META_COLS = "sku, model, size, color, weight_lbs, weight_verified, is_bike, as400_description"
 
 
-def fetch_candidates(client=None, tier: str = "auto") -> list:
+def fetch_candidates(client=None, tier: str = "auto", offset: int = 0) -> list:
     """Rows that could use a lookup, with their floor stock attached.
 
     Three queues, worked one at a time and in order: the SKUs AS400 named on a
     paper and the catalogue does not have, then the bikes nobody has read, then
     the parts.
 
-    `tier` picks one explicitly. It exists because the fallthrough used to be
-    decided on the RAW rows, before the set-aside filter — so thirty bikes that
-    all land on the NOTES form (§2.12c) kept the bike tier "non-empty", the
-    parts were never asked for, and the sweep reported `the queue is empty` with
-    **1,221 parts unread** (12 sep 2026). Emptiness has to be judged after the
-    filter, which only `next_sku` can do.
+    `tier` y `offset` existen por el mismo error, visto dos veces a distinta
+    profundidad. Primero el paso de una fase a la siguiente se decidía sobre las
+    filas CRUDAS, antes del filtro de apartados. Arreglado eso, quedaba la
+    ventana: se piden 200 filas y se filtran después, así que si esas 200
+    primeras están todas apartadas —y lo estaban, la primera pasada marcó
+    cientos— la fase sale vacía con **1.209 partes detrás**. Las dos veces el
+    sistema dijo `the queue is empty` y las dos veces era mentira.
+    «Vacío» es que no quede nada que PODAMOS pedir, y eso sólo se sabe después
+    de filtrar y hasta el final de la tabla, no de la primera página.
 
     Two reads, not a join: PostgREST cannot join `inventory` onto `sku_metadata`
     here, and the set is small enough that asking twice is cheaper than teaching
@@ -829,7 +836,7 @@ def fetch_candidates(client=None, tier: str = "auto") -> list:
                 .select("sku, last_name, last_seen, looks_like")
                 .eq("looks_like", "merchandise")
                 .order("last_seen", desc=True)
-                .limit(QUEUE_FETCH_LIMIT)
+                .range(offset, offset + QUEUE_FETCH_LIMIT - 1)
                 .execute()
             ).data
             or []
@@ -848,7 +855,10 @@ def fetch_candidates(client=None, tier: str = "auto") -> list:
                 .eq("is_bike", True)
                 .is_("as400_description", "null")  # every bike, once (Q7)
                 .is_("as400_absent_at", "null")  # y no los que AS400 no tiene
-                .limit(QUEUE_FETCH_LIMIT)
+                # Orden estable: sin él, paginar con `range` puede repetir y
+                # saltarse filas, que es como se pierde media cola en silencio.
+                .order("sku")
+                .range(offset, offset + QUEUE_FETCH_LIMIT - 1)
                 .execute()
             ).data
             or []
@@ -871,7 +881,8 @@ def fetch_candidates(client=None, tier: str = "auto") -> list:
                 .neq("is_bike", True)
                 .is_("as400_description", "null")
                 .is_("as400_absent_at", "null")  # los que AS400 no tiene
-                .limit(QUEUE_FETCH_LIMIT)
+                .order("sku")
+                .range(offset, offset + QUEUE_FETCH_LIMIT - 1)
                 .execute()
             ).data
             or []
@@ -899,21 +910,29 @@ def fetch_candidates(client=None, tier: str = "auto") -> list:
 
 
 def next_sku(client=None) -> dict | None:
-    """The one SKU this gap should look up, or None when there is truly nothing.
+    """El SKU que toca, o None cuando de verdad no queda nada.
 
-    Walks the tiers in order and returns the first one that has something LEFT
-    AFTER the set-aside filter. That last part is the whole point: on 12 sep the
-    bike tier still had thirty rows in the database and every one of them was
-    stepped aside for landing on the NOTES form, so the old code took the bike
-    tier, filtered it down to nothing, and announced `the queue is empty` —
-    with 1,221 parts waiting behind it. A tier is empty when there is nothing in
-    it we can ASK FOR, not when the table has no rows.
+    Recorre las fases en orden y, dentro de cada una, PAGINA hasta encontrar
+    algo que se pueda pedir. Las dos partes salen del mismo error visto dos
+    veces: el 12 sep la barrida anunció `the queue is empty` con 1.221 partes
+    sin leer porque el salto de fase se decidía antes del filtro, y horas
+    después lo volvió a anunciar con 1.209 detrás porque la ventana de 200 filas
+    venía entera apartada.
+
+    Una fase está vacía cuando no queda nada que PODAMOS pedir **en toda la
+    tabla**, no en la primera página.
     """
     unknown = load_unknown()
     for tier in ("unregistered", "bikes", "parts"):
-        queue = select_sku_queue(fetch_candidates(client, tier=tier), unknown)
-        if queue:
-            return queue[0]
+        offset = 0
+        while offset < QUEUE_MAX_SCAN:
+            rows = fetch_candidates(client, tier=tier, offset=offset)
+            if not rows:
+                break  # esta fase se acabó de verdad
+            queue = select_sku_queue(rows, unknown)
+            if queue:
+                return queue[0]
+            offset += QUEUE_FETCH_LIMIT
     return None
 
 
