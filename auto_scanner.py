@@ -658,6 +658,10 @@ def _loop() -> None:
         _kick.clear()  # this pass consumes the manual trigger
 
         wait = NOT_FOUND_WAIT_SEC
+        # Ligada ANTES del try: `_paced` la lee fuera de el, y si
+        # `run_scan_step` revienta en la primera vuelta un NameError ahi
+        # no seria una espera larga sino el hilo del escaner muerto.
+        action = "error"
         try:
             if driver is None:
                 driver = MochaDriver()

@@ -4,6 +4,7 @@ Pure logic only: a fake capture_fn decides which order numbers "exist" / how the
 fail, and a stub preview_fn avoids the Supabase/pipeline import. No Mocha, no DB.
 """
 
+import inspect
 import os
 import sys
 
@@ -466,3 +467,15 @@ def test_a_wait_is_a_reason_too(monkeypatch):
     auto_scanner._note_gap("working")
     auto_scanner._paced("captured", auto_scanner.FOUND_NEXT_DELAY_SEC)
     assert auto_scanner._gap_state["reason"] == "working"
+
+
+def test_a_step_that_crashes_before_naming_its_action_does_not_kill_the_loop(monkeypatch):
+    """`_paced` se lee FUERA del try, asi que `action` tiene que existir aunque
+    `run_scan_step` reviente antes de asignarla. Un NameError ahi no es una
+    espera larga: es el hilo del escaner muerto y nadie leyendo nada."""
+    import auto_scanner
+
+    src = inspect.getsource(auto_scanner._loop)
+    antes, despues = src.split("        try:", 1)
+    assert 'action = "error"' in antes, "action tiene que estar ligada antes del try"
+    assert "_paced(action" in despues
