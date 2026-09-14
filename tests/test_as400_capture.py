@@ -1469,3 +1469,17 @@ def test_cmd7_can_be_checked_when_somebody_is_looking():
 
     assert as400_capture.return_to_search(D(), page_wait=0, read_fn=lambda: BUSQUEDA) is True
     assert as400_capture.return_to_search(D(), page_wait=0, read_fn=lambda: OTRA) is False
+
+
+def test_a_screen_without_fields_is_not_automatically_the_notes_form():
+    """El mensaje afirmaba «es la pantalla de NOTES» sobre una deducción que este
+    código no puede hacer: sabe que hay número de stock y que no hay campos, y
+    eso admite más de una causa. Además enseña el número que ve, que es lo que
+    distingue un color de 3 letras recortado de una pantalla de notas."""
+    import inspect
+
+    import as400_capture
+
+    src = inspect.getsource(as400_capture)
+    assert "Landed on the STOCK INQUIRY NOTES form" not in src
+    assert "with no readable fields; the screen shows" in src

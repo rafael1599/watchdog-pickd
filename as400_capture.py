@@ -1590,8 +1590,15 @@ def _type_stock_lookup(sku, driver, digits, colour, page_wait, read, *, optimist
             )
             err.screen = screen
             raise err
+        # Lo que sabemos aqui es que HAY numero de stock y no hay campos que
+        # leer. Decir «es la pantalla de NOTES» es una afirmacion que este
+        # codigo no puede hacer: es una de las formas posibles, no la unica. Y
+        # el numero que la pantalla muestra es el dato que falta — si pedimos
+        # 01-8791SPT y ensenia 01-8791SP, el campo de color se come la tercera
+        # letra y eso se ve de un vistazo en vez de deducirse.
+        visto = parse_stock_number(screen)
         err = StockScreenMismatch(
-            f"Landed on the STOCK INQUIRY NOTES form for {sku} — no fields to read."
+            f"Stock screen for {sku} with no readable fields; the screen shows {visto!r}."
         )
         err.screen = screen
         raise err
