@@ -483,7 +483,14 @@ def test_an_unknown_sku_is_marked_so_the_queue_does_not_jam(tmp_path, monkeypatc
     def missing(sku, driver):
         raise StockSkuNotFound("no record")
 
-    res = run_sku_step(object(), {"sku": "03-3492BL"}, capture_fn=missing, return_fn=lambda d: None)
+    # AS400 has it neither with the colour nor without it: only then is it marked.
+    res = run_sku_step(
+        object(),
+        {"sku": "03-3492BL"},
+        capture_fn=missing,
+        return_fn=lambda d: None,
+        walk_out_fn=lambda d: None,
+    )
     assert res["action"] == "unknown"
 
     from sku_enrichment import load_unknown
@@ -1587,3 +1594,88 @@ class _RecordingClient:
     def execute(self):
         self.chunks.append(self._pending)
         return type("R", (), {"data": [{"sku": s} for s in self._pending]})()
+
+
+# ── a colour code AS400 does not know (Rafael, 24 sep 2026) ──────────────────
+# «si no encuentra con el código de color debe intentar buscar sin el código…
+# para que no simplemente diga no hay a la primera». The STARLINER was registered
+# as `05-3849BK` — BK is its colour — while AS400 and the carton say `05 3849`.
+
+STOCK_DETAIL_NO_COLOUR = STOCK_DETAIL.replace("03 3933 BK   ", "03 3933      ")
+
+
+def test_a_colour_code_as400_lacks_is_asked_again_without_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKU_UNKNOWN_PATH", str(tmp_path / "unknown.json"))
+    asked, walks = [], []
+
+    def as400(sku, driver):
+        asked.append(sku)
+        if sku == "03-3933BK":
+            raise StockSkuNotFound("no record")
+        return STOCK_DETAIL_NO_COLOUR
+
+    res = run_sku_step(
+        object(),
+        {"sku": "03-3933BK", "model": None, "weight_verified": True},
+        capture_fn=as400,
+        return_fn=lambda d: None,
+        walk_out_fn=walks.append,
+    )
+    # Asked with the colour, walked out of the rejected form, asked without it.
+    assert asked == ["03-3933BK", "03-3933"]
+    assert len(walks) == 1
+    assert res["action"] == "read"
+    assert res["sku"] == "03-3933BK"
+    assert res["found_without_colour"] == "03-3933"
+
+    from sku_enrichment import load_unknown
+
+    assert "03-3933BK" not in load_unknown()
+
+
+def test_a_failed_walk_out_sets_the_sku_aside_and_never_marks_it(tmp_path, monkeypatch):
+    # A navigation failure must not decide, for ever, that AS400 lacks the item.
+    monkeypatch.setenv("SKU_UNKNOWN_PATH", str(tmp_path / "unknown.json"))
+
+    def missing(sku, driver):
+        raise StockSkuNotFound("no record")
+
+    def stuck(driver):
+        raise RuntimeError("F7 did not land on the menu")
+
+    res = run_sku_step(
+        object(),
+        {"sku": "03-3933BK"},
+        capture_fn=missing,
+        return_fn=lambda d: None,
+        walk_out_fn=stuck,
+    )
+    assert res["action"] == "mismatch"
+
+    from sku_enrichment import load_unknown
+
+    # Set aside for a while (it carries `until`), not the verdict «AS400 lacks it».
+    assert "until" in load_unknown()["03-3933BK"]
+
+
+def test_a_sku_with_no_colour_is_marked_on_the_first_no(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKU_UNKNOWN_PATH", str(tmp_path / "unknown.json"))
+    asked = []
+
+    def missing(sku, driver):
+        asked.append(sku)
+        raise StockSkuNotFound("no record")
+
+    res = run_sku_step(object(), {"sku": "01-0169"}, capture_fn=missing, return_fn=lambda d: None)
+    assert asked == ["01-0169"]
+    assert res["action"] == "unknown"
+
+
+def test_colourless_only_trims_an_as400_stock_number():
+    from sku_enrichment import colourless
+
+    assert colourless("05-3849BK") == "05-3849"
+    assert colourless("01-8791SPT") == "01-8791"
+    assert colourless("01-0169") is None
+    assert colourless("TM-993") is None
+    assert colourless("792584991050") is None

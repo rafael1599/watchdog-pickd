@@ -634,6 +634,17 @@ def explore_once(driver) -> int:
 # ── the step ─────────────────────────────────────────────────────────────────
 
 
+def colourless(sku: str):
+    """`05-3849BK` → `05-3849`: the stock number without its colour code.
+
+    None when the SKU has no colour code to drop (`01-0169`) or is not an AS400
+    stock number at all. Only the DD-NNNN shape qualifies: a supplier's number
+    (`TM-993`) or a tracking number is never trimmed into something else.
+    """
+    m = re.fullmatch(r"(\d{2}-\d{4})[A-Z]{1,3}", (sku or "").strip().upper())
+    return m.group(1) if m else None
+
+
 def run_sku_step(
     driver,
     row: dict,
@@ -643,6 +654,7 @@ def run_sku_step(
     return_fn=None,
     home: str = "order_search",
     on_search_screen: bool = False,
+    walk_out_fn=return_to_menu,
 ) -> dict:
     """Look one SKU up on AS400 and report what it found. ONE SKU, no burst.
 
@@ -667,9 +679,28 @@ def run_sku_step(
     result = None
 
     try:
+        # Rafael, 24 sep 2026: «si no encuentra con el código de color debe
+        # intentar buscar sin el código… para que no simplemente diga no hay a
+        # la primera». A colour code can be PickD's own annotation — he put the
+        # BK on the STARLINER's `05-3849BK` because it is the colour, while
+        # AS400 and the carton say `05 3849`. So a SKU that carries a colour is
+        # not marked unknown on the first «no such number»: it is asked again
+        # without the colour, and only a second «no» marks it.
+        base = colourless(sku)
         result = _look_up(
-            driver, row, sku, started, capture_fn, parse_fn, on_search_screen=on_search_screen
+            driver,
+            row,
+            sku,
+            started,
+            capture_fn,
+            parse_fn,
+            on_search_screen=on_search_screen,
+            mark_missing=base is None,
         )
+        if result.get("action") == "unknown" and base:
+            result = _look_up_without_colour(
+                driver, row, sku, base, started, capture_fn, parse_fn, walk_out_fn
+            )
     finally:
         # Part of the step, not a cleanup, and it runs whether the lookup worked
         # or blew up: a step that leaves the terminal on a stock screen costs the
@@ -723,14 +754,54 @@ def run_sku_step(
     return result
 
 
-def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_screen=False) -> dict:
+def _look_up_without_colour(driver, row, sku, base, started, capture_fn, parse_fn, walk_out_fn):
+    """The second question for a SKU AS400 did not know with its colour code.
+
+    The search form AS400 rejects keeps what was typed — typing the next number
+    over it concatenates the two (tried and reverted on 12 sep) — so the terminal
+    walks back to the menu first and the lookup starts clean, verified. What the
+    colourless record says is written to PickD's own row (`sku`): the colour is
+    PickD's annotation of the same item. If the walk out fails the SKU is only set
+    aside, never marked unknown — that would be a navigation failure deciding,
+    for ever, that AS400 lacks the item.
+    """
+    try:
+        walk_out_fn(driver)
+    except Exception as e:  # noqa: BLE001
+        defer_sku(sku, f"could not leave the search form to try {base} ({e})")
+        log.warning("SKU %s: could not walk out to try %s without colour (%s)", sku, base, e)
+        return {"action": "mismatch", "sku": sku, "why": f"could not try {base}: {e}"}
+    log.info("SKU %s: AS400 has no such number — trying %s, without the colour", sku, base)
+    result = _look_up(driver, row, sku, started, capture_fn, parse_fn, screen_sku=base)
+    if result.get("action") not in ("unknown", "mismatch", "unavailable", "error"):
+        result["found_without_colour"] = base
+    return result
+
+
+def _look_up(
+    driver,
+    row,
+    sku,
+    started,
+    capture_fn,
+    parse_fn,
+    *,
+    on_search_screen=False,
+    screen_sku=None,
+    mark_missing=True,
+) -> dict:
     """The lookup itself. Split out so the return trip above owns the `finally`
-    and every path reports through one dict."""
+    and every path reports through one dict.
+
+    `screen_sku` is the stock number typed and expected on the screen when it is
+    not PickD's own spelling (the colourless retry); `mark_missing=False` leaves a
+    «no such number» unmarked so the caller can ask again first."""
+    asked = screen_sku or sku
     try:
         screen = (
-            capture_fn(sku, driver, on_search_screen=True)
+            capture_fn(asked, driver, on_search_screen=True)
             if on_search_screen
-            else capture_fn(sku, driver)
+            else capture_fn(asked, driver)
         )
         parsed = parse_fn(screen)
         keep_screen(sku, "detail", "X", screen)
@@ -738,7 +809,7 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
         # The identity guard. If the screen is not showing the SKU we asked for,
         # we are on somebody else's record: nothing is read from it and nothing
         # is planned. It is the only defence against a mistyped lookup.
-        if parsed.get("sku") != sku:
+        if parsed.get("sku") != asked:
             log.warning(
                 "SKU %s: the screen shows %s — not ours, nothing written", sku, parsed.get("sku")
             )
@@ -792,7 +863,11 @@ def _look_up(driver, row, sku, started, capture_fn, parse_fn, *, on_search_scree
 
     except StockSkuNotFound as e:
         keep_screen(sku, "blank_or_not_found", "X", getattr(e, "screen", ""))
-        # AS400 has no record. Mark it so the queue doesn't jam on it (R7).
+        # AS400 has no record. Mark it so the queue doesn't jam on it (R7) —
+        # unless the caller is about to ask again without the colour code.
+        if not mark_missing:
+            log.info("SKU %s: %s — asking again without the colour before marking", sku, e)
+            return {"action": "unknown", "sku": sku, "why": str(e)}
         mark_unknown(sku)
         log.info("SKU %s: %s — marked, won't be asked again", sku, e)
         # Probado y REVERTIDO el 12 sep 2026. Creí que tras un número muerto el
