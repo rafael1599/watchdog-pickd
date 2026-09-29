@@ -45,7 +45,7 @@ from as400_capture import (
     enter_menu_option,
     return_to_order_search,
 )
-from parser import parse_customer_display
+from parser import mask_bank_numbers, parse_customer_display
 
 log = logging.getLogger("pickd-customer-enrichment")
 
@@ -176,7 +176,11 @@ def remember(key: str, entry: dict) -> None:
         data[key] = {**entry, "tries": tries, "at": _now()}
         p = _seen_path()
         tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Masked as a whole: entries written before the masking existed (the
+        # first reads of 29 sep) are cleaned by the next write, not kept for ever.
+        tmp.write_text(
+            mask_bank_numbers(json.dumps(data, ensure_ascii=False, indent=2)), encoding="utf-8"
+        )
         os.replace(tmp, p)
 
 
@@ -264,8 +268,10 @@ def plan_write(row: dict, parsed: dict) -> dict:
 
     - the screen's account must be the one asked for, or nothing at all;
     - only an empty column is filled — a phone a person typed is never replaced;
-    - `contact_name` is not here: no screen has shown a person yet (❓3 of
-      docs/customer-enrichment.md). The expedition is how that gets decided.
+    - `contact_name` is the Bike Buyer when it is a person (the CONTACT of the
+      pack slip — 881753 ⇄ WYCKOFF, 29 sep 2026). It lives on the customer's
+      addresses (`customer_addresses.contact_name`, the column FedEx reads), so
+      it is planned apart, under `_addresses`, and filled only where empty.
     """
     asked = str(row.get("as400_account") or "").strip()
     got = str(parsed.get("account") or "").strip()
@@ -276,6 +282,8 @@ def plan_write(row: dict, parsed: dict) -> dict:
         plan["phone"] = parsed["phone"]
     if parsed.get("email") and not (row.get("email") or "").strip():
         plan["email"] = parsed["email"]
+    if parsed.get("contact"):
+        plan["_addresses"] = {"contact_name": parsed["contact"]}
     return plan
 
 
@@ -285,7 +293,19 @@ def apply_write(customer_id: str, plan: dict, client=None) -> int:
     and the write is not overwritten either)."""
     written = 0
     cl = _client(client)
+    addresses = plan.get("_addresses") or {}
+    for col, value in addresses.items():
+        res = (
+            cl.table("customer_addresses")
+            .update({col: value})
+            .eq("customer_id", customer_id)
+            .is_(col, "null")
+            .execute()
+        )
+        written += len(res.data or [])
     for col, value in plan.items():
+        if col == "_addresses":
+            continue
         res = (
             cl.table("customers")
             .update({col: value})
@@ -304,7 +324,7 @@ def keep_screen(label: str, classified: str, after: str, raw: str, client=None) 
         return False
     try:
         _client(client).table("as400_screens").insert(
-            {"sku": label, "classified": classified, "after": after, "raw": raw}
+            {"sku": label, "classified": classified, "after": after, "raw": mask_bank_numbers(raw)}
         ).execute()
         return True
     except Exception as e:  # noqa: BLE001 — looking cannot take the step down
@@ -345,11 +365,12 @@ def run_customer_step(driver, row: dict, *, capture_fn=capture_customer_display,
         return {"action": "mismatch", "account": acct, "why": f"screen {parsed.get('account')}"}
 
     log.info(
-        "customer %s in %.1fs — phone=%r email=%r bike_buyer=%r parts_buyer=%r other_buyer=%r",
+        "customer %s in %.1fs — phone=%r email=%r contact=%r bike_buyer=%r parts_buyer=%r other_buyer=%r",
         acct,
         time.monotonic() - started,
         parsed.get("phone"),
         parsed.get("email"),
+        parsed.get("contact"),
         parsed.get("bike_buyer"),
         parsed.get("parts_buyer"),
         parsed.get("other_buyer"),
@@ -429,11 +450,19 @@ def run_expedition(
             home_fn(driver)
             return True
         except Exception as e:  # noqa: BLE001
-            log.warning("customer explore: could not get home (%s) — aborting", e)
+            # The walk counts its tries, and the extra screens of a sub-page can
+            # spend them with the terminal already home — Bay 2, 29 sep 2026, gave
+            # up «after 3 tries» sitting on the order search. Look before quitting.
             try:
-                keep(label, "explore:lost", str(e), driver.copy_screen())
+                screen = driver.copy_screen()
             except Exception:  # noqa: BLE001
-                pass
+                screen = ""
+            from as400_capture import _READY_STATES, classify_screen
+
+            if classify_screen(screen) in _READY_STATES:
+                return True
+            log.warning("customer explore: could not get home (%s) — aborting", e)
+            keep(label, "explore:lost", str(e), screen)
             return False
 
     def keep_failure(what, e):

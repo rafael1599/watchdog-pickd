@@ -164,3 +164,20 @@ Todo queda en `as400_screens` con `classified = explore:customer:f<n>` / `explor
   viven las impresiones — el pack slip con el CONTACT sale de ahí (`6. Copy or display entries`) —,
   así que es la pista más fuerte, y **no se automatiza sin que Rafael lo decida**.
 - **`10`** = `PICK SLIP UPDATE` (`Order:`). Un «update»: **fuera de la lista**.
+
+### El CONTACT es el `Bike Buyer` (tercera corrida, `as400_screens` 326–340)
+
+La ficha de **WYCKOFF (6034)** dice `Bike Buyer: MICHAEL PORRARO-OWNER` y `Phone No 201 8915500`:
+exactamente el `CONTACT` y el `TELEPHONE` del pack slip de 881753. En otros dealers el mismo campo
+trae una persona (`ROBERT O'NEILL (OWNER)`, `JOSH SCHLABACH`) o **sus datos bancarios**
+(`ACT# 2385 ROUT# 0353`, `ACCT 5277 ROUTING 7607`) o una nota (`CREDIT CARD ON FILE`).
+
+- **Contacto** = el primer `Buyer` (Bike, luego Parts, luego Other) que se lee como persona:
+  `buyer_as_contact` rechaza cualquier dígito, `#` y las notas. Va a
+  **`customer_addresses.contact_name`** (la columna que ya lee FedEx), sólo donde esté vacía.
+- **Los números de cuenta y de ruta se enmascaran** (`mask_bank_numbers`) antes de salir del
+  proceso: en el valor parseado, en el log, en `.customer_seen.json` y en la pantalla que se guarda
+  en `as400_screens`. Las filas guardadas antes del enmascarado se limpiaron el mismo día.
+- `Cmd1 Product` = ventas por línea de producto; `Cmd2 Comp` = competidores (vacío); `Cmd3` y `Cmd4`
+  dejaron la misma ficha. La vuelta a casa se rendía estando ya en la búsqueda: ahora mira antes.
+- El menú y la ficha a veces tardan en pintar: se relee dos veces antes de declarar el fallo.

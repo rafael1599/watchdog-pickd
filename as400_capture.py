@@ -1935,6 +1935,14 @@ def enter_menu_option(
     driver.key("enter")
     time.sleep(page_wait)
     screen = read()
+    # The option's page can be slow to paint — Bay 2 read the menu again after
+    # `1` + ENTER on half the accounts of 29 sep. Look twice more before deciding
+    # the option did not take (reading is free; typing on would not be).
+    for _ in range(2):
+        if classify_screen(screen) != STATE_MENU:
+            break
+        time.sleep(page_wait)
+        screen = read()
     if classify_screen(screen) in (STATE_MENU, STATE_DISCONNECTED):
         raise CustomerScreenMismatch(
             f"menu option {option} did not open (still on the menu)", screen=screen
@@ -2011,6 +2019,15 @@ def capture_customer_display(
     driver.key("enter")
     time.sleep(page_wait)
     screen = read()
+    # Same patience for the display: 0007674 was still on the entry form, blank
+    # suffix and no «NOT on File», one read after its ENTER.
+    for _ in range(2):
+        if classify_screen(screen) == STATE_CUSTOMER_DISPLAY or "NOTONFILE" in re.sub(
+            r"\s+", "", screen.upper()
+        ):
+            break
+        time.sleep(page_wait)
+        screen = read()
     if classify_screen(screen) != STATE_CUSTOMER_DISPLAY:
         if "NOTONFILE" in re.sub(r"\s+", "", screen.upper()):
             raise CustomerScreenMismatch(

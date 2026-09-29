@@ -65,7 +65,8 @@ def test_parses_the_real_customer_display():
     assert p["email"] == "info@shrewsburybicycles.com"
     assert p["fax"] is None  # the line holds only «Salesman ID», not a fax number
     assert p["salesman"] == "179 LAMBERT/PARSONS"
-    assert p["bike_buyer"] == "ACT# 2385  ROUT# 0353"
+    assert p["bike_buyer"] == "ACT# ****  ROUT# ****"  # bank details, masked
+    assert p["contact"] is None
     assert p["parts_buyer"] is None and p["other_buyer"] is None
 
 
@@ -136,7 +137,9 @@ def test_capture_stops_when_option_1_did_not_open_customer_inquiry():
 
 
 def test_capture_stops_when_the_account_does_not_open_the_display():
-    driver = FakeDriver([MENU_SCREEN, MENU_SCREEN, CUSTOMER_ENTRY_SCREEN, CUSTOMER_ENTRY_SCREEN])
+    driver = FakeDriver(
+        [MENU_SCREEN, MENU_SCREEN, CUSTOMER_ENTRY_SCREEN] + [CUSTOMER_ENTRY_SCREEN] * 3
+    )
     with pytest.raises(CustomerScreenMismatch):
         capture_customer_display("9981", "00", driver, page_wait=0, step_wait=0)
 
@@ -439,3 +442,86 @@ def test_the_entry_form_is_a_known_screen_and_not_on_file_says_so():
     # precheck accepts the entry form (the previous lookup may have ended there)
     with pytest.raises(CustomerScreenMismatch, match="NOT on File"):
         capture_customer_display("6034", "00", driver, page_wait=0, step_wait=0)
+
+
+# ── the CONTACT (Bay 2, 29 sep 2026: as400_screens 326, 333, 338, 340) ───────
+
+WYCKOFF_DISPLAY = """                       C U S T O M E R    D I S P L A Y
+   cfvdet01
+  Account Number: 0006034 00
+  Name           WYCKOFF CYCLE LLC
+  Address        PO BOX 335
+  City           FRANKLIN LAKES   NJ  07417
+  Phone No       201 8915500
+  Fax No         201 8915509   Salesman ID   179 LAMBERT/PARSONS
+  EMAIL Address  WYCKOFFCYCLE@YAHOO.COM
+    Bike Buyer:      MICHAEL PORRARO-OWNER
+    Parts Buyer:
+    Other Buyer:
+ Cmd1    Cmd2  Cmd3        Cmd4     Cmd5     Cmd10  Cmd11  Cmd12    Cmd6   Cmd7"""
+
+
+def test_the_pack_slip_contact_is_the_bike_buyer():
+    # 881753's paper: TELEPHONE (201) 891-5500 · CONTACT MICHAEL PORRARO-OWNER.
+    p = parse_customer_display(WYCKOFF_DISPLAY)
+    assert p["contact"] == "MICHAEL PORRARO-OWNER"
+    assert p["phone"] == "(201) 891-5500"
+    assert p["fax"] == "(201) 891-5509"
+
+
+@pytest.mark.parametrize(
+    "value, contact",
+    [
+        ("MICHAEL PORRARO-OWNER", "MICHAEL PORRARO-OWNER"),
+        ("ROBERT O'NEILL (OWNER)", "ROBERT O'NEILL (OWNER)"),
+        ("JOSH SCHLABACH", "JOSH SCHLABACH"),
+        ("ACT# 2385  ROUT# 0353", None),
+        ("ACCT 5277  ROUTING 7607", None),
+        ("ACCT #5635  ROUTING #2505", None),
+        ("CREDIT CARD ON FILE", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_only_a_person_is_a_contact(value, contact):
+    from parser import buyer_as_contact
+
+    assert buyer_as_contact(value) == contact
+
+
+def test_bank_numbers_never_leave_unmasked():
+    from parser import mask_bank_numbers
+
+    assert mask_bank_numbers("ACCT 5277  ROUTING 7607") == "ACCT ****  ROUTING ****"
+    assert mask_bank_numbers("ROUT# 1030  ACT# 8595") == "ROUT# ****  ACT# ****"
+    assert mask_bank_numbers("ACCT #5635  ROUTING #2505") == "ACCT #****  ROUTING #****"
+    assert mask_bank_numbers("Account Number: 0006034 00") == "Account Number: 0006034 00"
+
+
+def test_the_kept_screen_is_masked():
+    client = _FakeClient([{"enabled": True, "config": {}}])
+    ce.keep_screen(
+        "acct:1-00", "customer_display", "x", "    Bike Buyer:      ACCT 5277  ROUTING 7607", client
+    )
+    assert "5277" not in client.store["as400_screens"][0]["raw"]
+
+
+def test_contact_goes_to_the_addresses_only_where_empty():
+    parsed = parse_customer_display(WYCKOFF_DISPLAY)
+    row = {"id": "c1", "as400_account": "6034", "phone": None, "email": None}
+    plan = ce.plan_write(row, parsed)
+    assert plan["_addresses"] == {"contact_name": "MICHAEL PORRARO-OWNER"}
+    client = _FakeClient()
+    ce.apply_write("c1", plan, client)
+    assert {"contact_name": "MICHAEL PORRARO-OWNER"} in client.store["updates"]
+    assert {"phone": "(201) 891-5500"} in client.store["updates"]
+    assert all("_addresses" not in u for u in client.store["updates"])
+
+
+def test_the_seen_file_is_masked_even_for_old_entries(tmp_path):
+    import json
+
+    path = ce._seen_path()
+    path.write_text(json.dumps({"1-00": {"action": "read", "parsed": {"bike_buyer": "ACCT 5277"}}}))
+    ce.remember("2-00", {"action": "read"})
+    assert "5277" not in path.read_text()

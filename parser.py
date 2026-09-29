@@ -110,6 +110,42 @@ def format_phone(raw):
     return text
 
 
+# The Buyer lines of CUSTOMER DISPLAY hold a person on some dealers and the
+# dealer's BANK details on others: `ACT# 2385  ROUT# 0353`, `ACCT 5277  ROUTING
+# 7607`, `ACCT #5635  ROUTING #2505` (Bay 2, 29 sep 2026). Those digits are masked
+# before anything leaves this process — the parsed value, the log and the raw
+# screen kept in `as400_screens` alike.
+_BANK_RE = re.compile(
+    r"\b(ACCOUNT|ACCT|ACT|ROUTING|ROUT|ABA)(\s*#?\s*)(\d[\d\s-]*\d|\d)", re.IGNORECASE
+)
+
+
+def mask_bank_numbers(text):
+    """`ACCT 5277  ROUTING 7607` → `ACCT ****  ROUTING ****`."""
+    if not text:
+        return text
+    return _BANK_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}****", text)
+
+
+_NOT_A_PERSON = ("CREDIT CARD", "ON FILE", "NONE", "N/A", "COD", "SAME", "****")
+
+
+def buyer_as_contact(value):
+    """A Buyer line that reads like a person, or None.
+
+    `MICHAEL PORRARO-OWNER` (WYCKOFF — the CONTACT on the pack slip of 881753),
+    `ROBERT O'NEILL (OWNER)`, `JOSH SCHLABACH` are people. Bank details, any digit
+    at all, and notes like `CREDIT CARD ON FILE` are not."""
+    v = (value or "").strip()
+    if not v or re.search(r"\d|#", v):
+        return None
+    if any(bad in v.upper() for bad in _NOT_A_PERSON):
+        return None
+    if not re.fullmatch(r"[A-Za-z][A-Za-z .'&()/,-]*", v):
+        return None
+    return v
+
+
 def parse_customer_display(text: str) -> Dict:
     """What CUSTOMER DISPLAY (menu 01) carries (docs/as400-screen-map.md §2.11).
 
@@ -148,9 +184,22 @@ def parse_customer_display(text: str) -> Dict:
         "salesman": salesman.group(1).strip() if salesman else None,
         "store_size": line_value("Size of Store"),
         "locations": line_value("# of Locations"),
-        "bike_buyer": line_value("Bike Buyer"),
-        "parts_buyer": line_value("Parts Buyer"),
-        "other_buyer": line_value("Other Buyer"),
+        "bike_buyer": mask_bank_numbers(line_value("Bike Buyer")),
+        "parts_buyer": mask_bank_numbers(line_value("Parts Buyer")),
+        "other_buyer": mask_bank_numbers(line_value("Other Buyer")),
+        # The pack slip's CONTACT is the Bike Buyer (881753 ⇄ WYCKOFF); the
+        # other two only when the Bike Buyer is not a person.
+        "contact": next(
+            (
+                c
+                for c in (
+                    buyer_as_contact(line_value(label))
+                    for label in ("Bike Buyer", "Parts Buyer", "Other Buyer")
+                )
+                if c
+            ),
+            None,
+        ),
     }
 
 
