@@ -299,6 +299,16 @@ def operator_idle_seconds() -> float:
     if _last_operator_input is None or idle < since_self - 1.0:
         _last_operator_input = now - idle
 
+    # What the clocks cannot see while we type several times a second, the
+    # sentinel can: a mouse move or a Delete is a person, full stop (29 sep 2026).
+    import operator_sentinel
+
+    seen = operator_sentinel.last_operator_at()
+    if seen is not None and seen > _last_operator_input:
+        _last_operator_input = seen
+    if operator_sentinel.emergency_remaining() > 0:
+        return 0.0  # Delete ×2: nobody is idle until the stop runs out
+
     return now - _last_operator_input
 
 
@@ -632,6 +642,9 @@ def _run_customer_gap() -> float:
 
         def someone_else_first() -> bool:
             # Checked before the expedition and before EVERY account.
+            if not ce.enabled():
+                _note_gap("customers: switched off")
+                return True
             if _kick.is_set():
                 _note_gap("orders requested")
                 return True
@@ -690,6 +703,19 @@ def _run_customer_gap() -> float:
     return time.monotonic() - started
 
 
+def as400_capture_mark_automated() -> None:
+    import as400_capture
+    import operator_sentinel
+
+    as400_capture.mark_automated_thread()
+    # A kicked pass is a person asking for it — the same person whose mouse just
+    # clicked the button — so the brake yields to it.
+    as400_capture.set_hands_off_check(
+        lambda: operator_sentinel.hands_off() and not _manual_pass.is_set()
+    )
+
+
+_manual_pass = threading.Event()
 _sku_driver = None
 
 
@@ -703,6 +729,8 @@ def _driver_for_sku_step():
 
 
 def _loop() -> None:
+    # The brake in as400_capture only applies to the thread that marks itself.
+    as400_capture_mark_automated()
     log.info(
         "auto-scanner started (from #%s) — first capture in %.0fs",
         scanned_store.next_scan_number(),
@@ -722,6 +750,11 @@ def _loop() -> None:
         if operator_idle_seconds() < IDLE_THRESHOLD_SEC and not _kick.is_set():
             if paused_since is None:
                 paused_since = time.monotonic()
+            import operator_sentinel
+
+            left = operator_sentinel.emergency_remaining()
+            if left > 0:
+                _note_gap(f"stopped by the operator (Delete ×2) — {left / 60:.0f} min left")
             _interruptible_wait(IDLE_POLL_SEC)
             continue
         if paused_since is not None:
@@ -738,6 +771,7 @@ def _loop() -> None:
             # poll faster so the kicked pass starts right after it.
             _stop.wait(0.5 if _kick.is_set() else IDLE_POLL_SEC)
             continue
+        manual = _kick.is_set()
         _kick.clear()  # this pass consumes the manual trigger
 
         wait = NOT_FOUND_WAIT_SEC
@@ -749,7 +783,12 @@ def _loop() -> None:
         try:
             if driver is None:
                 driver = MochaDriver()
-            res = run_scan_step(driver)
+            if manual:
+                _manual_pass.set()
+            try:
+                res = run_scan_step(driver)
+            finally:
+                _manual_pass.clear()
             action = res["action"]
             wait = _wait_for(action)
             # Health beacon: every non-unavailable step means AS400 answered
@@ -939,6 +978,9 @@ def start_auto_scanner() -> None:
     if _thread and _thread.is_alive():
         return
     _stop.clear()
+    import operator_sentinel
+
+    operator_sentinel.start()
     _thread = threading.Thread(target=_loop, daemon=True, name="auto-scanner")
     _thread.start()
 

@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 
 log = logging.getLogger("pickd-as400")
@@ -454,6 +455,11 @@ class CustomerScreenMismatch(CaptureError):
         self.screen = screen
 
 
+class OperatorTookOver(CaptureError):
+    """A person is at the Mac (operator_sentinel): the automated work stops at its
+    next keystroke instead of finishing what it was doing."""
+
+
 class OrderVoidSkip(CaptureError):
     """Capture dead-ended on the AS400 'ADDITIONAL MESSAGE INFORMATION' screen
     (e.g. a VOID order routes here after F5, prompting for an Option with no valid
@@ -693,6 +699,31 @@ def build_copy_screen_script(
 _last_self_input = None  # float | None — Python 3.9 on the Bay 2 Mac
 
 
+# The automated thread (the auto-scanner) marks itself; a capture the operator
+# asks for from the Bay 2 UI runs on another thread and is never stopped by this.
+_automation = threading.local()
+_hands_off_check = None
+
+
+def mark_automated_thread() -> None:
+    _automation.on = True
+
+
+def set_hands_off_check(fn) -> None:
+    """`fn()` → True while a person has the terminal (operator_sentinel)."""
+    global _hands_off_check
+    _hands_off_check = fn
+
+
+def _operator_has_it() -> bool:
+    if not getattr(_automation, "on", False) or _hands_off_check is None:
+        return False
+    try:
+        return bool(_hands_off_check())
+    except Exception:  # noqa: BLE001 — a broken check must not stop the orders
+        return False
+
+
 def note_self_input() -> None:
     """Stamp that WE just posted an input event."""
     global _last_self_input
@@ -741,6 +772,12 @@ class MochaDriver:
         # resetting the idle clock it was about to read and standing down for
         # itself (11 sep 2026).
         types = "keystroke" in script or "key code" in script
+        # The one door, so the one brake: the automated thread does not send a
+        # single key while a person has the Mac (Rafael, 29 sep 2026: «nadie puede
+        # parar al watcher»). It raises instead, and every caller already knows
+        # what a CaptureError means — stop, and do not walk home either.
+        if types and _operator_has_it():
+            raise OperatorTookOver("The operator has the Mac — the watcher keeps its hands off.")
         try:
             result = subprocess.run(
                 ["osascript", "-e", script],

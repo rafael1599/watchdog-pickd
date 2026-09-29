@@ -41,6 +41,7 @@ from as400_capture import (
     AS400Disconnected,
     AS400ManualLoginRequired,
     CaptureError,
+    OperatorTookOver,
     capture_customer_display,
     enter_menu_option,
     return_to_order_search,
@@ -351,6 +352,9 @@ def run_customer_step(driver, row: dict, *, capture_fn=capture_customer_display,
     started = time.monotonic()
     try:
         entry, screen = capture_fn(acct, suffix, driver)
+    except OperatorTookOver as e:
+        # Not the account's fault: nothing is remembered, it is read next time.
+        return {"action": "unavailable", "account": acct, "why": str(e)}
     except (AS400Disconnected, AS400ManualLoginRequired) as e:
         return {"action": "unavailable", "account": acct, "why": str(e)}
     except CaptureError as e:
@@ -450,11 +454,15 @@ def run_expedition(
         try:
             driver.key("f7")
             time.sleep(page_wait)
+        except OperatorTookOver:
+            raise
         except Exception as e:  # noqa: BLE001
             log.debug("customer explore: F7 before home failed (%s)", e)
         try:
             home_fn(driver)
             return True
+        except OperatorTookOver:
+            raise
         except Exception as e:  # noqa: BLE001
             # The walk counts its tries, and the extra screens of a sub-page can
             # spend them with the terminal already home — Bay 2, 29 sep 2026, gave
@@ -490,6 +498,8 @@ def run_expedition(
                 driver.copy_screen(),
             ):
                 saved += 1
+        except OperatorTookOver:
+            raise  # a person has the Mac: stop here, and do not call it explored
         except Exception as e:  # noqa: BLE001
             log.warning("customer explore: %s failed (%s)", key, e)
             keep_failure(key, e)
@@ -503,6 +513,8 @@ def run_expedition(
                 label, f"explore:menu:{int(option):02d}", f"{option}+ENTER on the menu", screen
             ):
                 saved += 1
+        except OperatorTookOver:
+            raise
         except Exception as e:  # noqa: BLE001
             log.warning("customer explore: menu %s failed (%s)", option, e)
             keep_failure(f"menu:{int(option):02d}", e)
@@ -519,6 +531,9 @@ def explore_if_due(driver, client=None) -> int:
         return 0
     try:
         n = run_expedition(driver, client=client)
+    except OperatorTookOver:
+        log.info("customer explore: the operator took the Mac — it runs again next gap")
+        return 0
     except Exception:  # noqa: BLE001
         log.exception("customer explore crashed — the scanner carries on")
         n = 0

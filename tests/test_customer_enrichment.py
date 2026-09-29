@@ -540,3 +540,28 @@ def test_a_read_with_a_plan_comes_back_when_writing_is_switched_on():
     }
     assert ce.rank_customers(customers, [], seen=seen, writes=False) == []
     assert [c["id"] for c in ce.rank_customers(customers, [], seen=seen, writes=True)] == ["a"]
+
+
+def test_the_operator_taking_over_is_not_the_accounts_fault():
+    from as400_capture import OperatorTookOver
+
+    def taken(a, s, d):
+        raise OperatorTookOver("the operator has the Mac")
+
+    row = {"id": "c1", "as400_account": "9981", "phone": None, "email": None}
+    res = ce.run_customer_step(None, row, capture_fn=taken, client=_FakeClient([]))
+    assert res["action"] == "unavailable"
+    assert "9981-00" not in ce.load_seen()
+
+
+def test_an_expedition_the_operator_interrupts_is_not_marked_done(monkeypatch):
+    from as400_capture import OperatorTookOver
+
+    monkeypatch.setattr(ce, "explore_due", lambda client=None: "9")
+
+    def interrupted(*a, **k):
+        raise OperatorTookOver("the operator has the Mac")
+
+    monkeypatch.setattr(ce, "run_expedition", interrupted)
+    assert ce.explore_if_due(None) == 0
+    assert not ce._explored_rev_path().exists()
