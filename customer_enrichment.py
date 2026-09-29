@@ -227,7 +227,12 @@ def fetch_queue(client=None) -> list:
         .data
         or []
     )
-    since = datetime.fromtimestamp(time.time() - 90 * 86400, timezone.utc).isoformat()
+    # `Z`, never `+00:00`: the `+` travels unencoded in the query string, PostgREST
+    # reads it as a space and rejects the filter — the first run on Bay 2 died
+    # here, before a single customer (29 sep 2026).
+    since = datetime.fromtimestamp(time.time() - 90 * 86400, timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
     orders = (
         cl.table("picking_lists")
         .select("customer_id, created_at")
@@ -312,6 +317,8 @@ def run_customer_step(driver, row: dict, *, capture_fn=capture_customer_display,
     except (AS400Disconnected, AS400ManualLoginRequired) as e:
         return {"action": "unavailable", "account": acct, "why": str(e)}
     except CaptureError as e:
+        if getattr(e, "screen", None):
+            keep_screen(f"acct:{key}", "customer_fail", str(e), e.screen, client)
         remember(key, {"action": "mismatch", "why": str(e)})
         return {"action": "mismatch", "account": acct, "why": str(e)}
     except Exception as e:  # noqa: BLE001
@@ -398,12 +405,30 @@ def run_expedition(
     saved = 0
 
     def home() -> bool:
+        # The screen's own advertised way out first — every screen seen so far
+        # says Cmd7 EXIT, ACCOUNTS RECEIVABLE INQUIRY says ONLY that — then the
+        # verified walk. On the order search or the menu an extra F7 is harmless:
+        # the walk types 3 again.
+        try:
+            driver.key("f7")
+            time.sleep(page_wait)
+        except Exception as e:  # noqa: BLE001
+            log.debug("customer explore: F7 before home failed (%s)", e)
         try:
             home_fn(driver)
             return True
         except Exception as e:  # noqa: BLE001
             log.warning("customer explore: could not get home (%s) — aborting", e)
+            try:
+                keep(label, "explore:lost", str(e), driver.copy_screen())
+            except Exception:  # noqa: BLE001
+                pass
             return False
+
+    def keep_failure(what, e):
+        screen = getattr(e, "screen", None)
+        if screen:
+            keep(label, f"explore:fail:{what}", str(e), screen)
 
     for key in keys:
         try:
@@ -421,6 +446,7 @@ def run_expedition(
                 saved += 1
         except Exception as e:  # noqa: BLE001
             log.warning("customer explore: %s failed (%s)", key, e)
+            keep_failure(key, e)
         if not home():
             return saved
 
@@ -433,6 +459,7 @@ def run_expedition(
                 saved += 1
         except Exception as e:  # noqa: BLE001
             log.warning("customer explore: menu %s failed (%s)", option, e)
+            keep_failure(f"menu:{int(option):02d}", e)
         if not home():
             return saved
 

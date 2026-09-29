@@ -437,7 +437,14 @@ class StockScreenMismatch(CaptureError):
 
 
 class CustomerScreenMismatch(CaptureError):
-    """The customer lookup did not land on CUSTOMER DISPLAY, or on another account."""
+    """The customer lookup did not land on CUSTOMER DISPLAY, or on another account.
+
+    Carries the screen it saw: the first run on Bay 2 (29 sep 2026) failed eight
+    times without saying where, and a failure nobody can look at is a guess."""
+
+    def __init__(self, message, screen=None):
+        super().__init__(message)
+        self.screen = screen
 
 
 class OrderVoidSkip(CaptureError):
@@ -1920,7 +1927,9 @@ def enter_menu_option(
     time.sleep(page_wait)
     screen = read()
     if classify_screen(screen) in (STATE_MENU, STATE_DISCONNECTED):
-        raise CustomerScreenMismatch(f"menu option {option} did not open (still on the menu)")
+        raise CustomerScreenMismatch(
+            f"menu option {option} did not open (still on the menu)", screen=screen
+        )
     return screen
 
 
@@ -1980,7 +1989,7 @@ def capture_customer_display(
     # The entry form has not been captured yet: its title is the only thing we can
     # check. A screen that does not even say CUSTOMER is not the one to type into.
     if "CUSTOMER" not in re.sub(r"\s+", "", entry.upper()):
-        raise CustomerScreenMismatch("option 1 did not open Customer Inquiry")
+        raise CustomerScreenMismatch("option 1 did not open Customer Inquiry", screen=entry)
 
     driver.type_text(digits)
     time.sleep(step_wait)
@@ -1994,5 +2003,6 @@ def capture_customer_display(
     if classify_screen(screen) != STATE_CUSTOMER_DISPLAY:
         raise CustomerScreenMismatch(
             f"account {digits} {sfx} did not open CUSTOMER DISPLAY ({classify_screen(screen)})",
+            screen=screen,
         )
     return entry, screen

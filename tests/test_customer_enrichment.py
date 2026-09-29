@@ -278,12 +278,13 @@ def test_expedition_one_key_one_read_then_home():
         ("explore:customer:f4", "after f4"),
         ("explore:customer:f5", "after f5"),
     ]
-    assert driver.keys == ["f4", "f5"]
+    assert driver.keys == ["f4", "f7", "f5", "f7"]  # the screen's own EXIT before each walk home
     assert len(homes) == 2  # home after every key
 
 
 def test_expedition_aborts_when_it_cannot_get_home():
-    driver = FakeDriver(["after f4", "after f5"])
+    driver = FakeDriver(["after f4", "where it got lost"])
+    kept = []
 
     def no_home(_):
         raise RuntimeError("lost")
@@ -296,9 +297,46 @@ def test_expedition_aborts_when_it_cannot_get_home():
         capture_fn=lambda a, s, d: ("entry", "display"),
         home_fn=no_home,
         page_wait=0,
-        keep=lambda *a: True,
+        keep=lambda label, classified, after, raw: kept.append((classified, raw)) or True,
     )
-    assert driver.keys == ["f4"]  # stopped after the first key
+    assert driver.keys == ["f4", "f7"]  # stopped after the first key
+    assert ("explore:lost", "where it got lost") in kept  # and kept the screen it got lost on
+
+
+def test_a_failed_lookup_keeps_the_screen_it_saw():
+    kept = []
+
+    def fails(a, s, d):
+        raise CustomerScreenMismatch("option 1 did not open Customer Inquiry", screen="THE ENTRY")
+
+    ce.run_expedition(
+        FakeDriver([]),
+        account="6034",
+        keys=("f4",),
+        menu_options=(),
+        capture_fn=fails,
+        home_fn=lambda d: None,
+        page_wait=0,
+        keep=lambda label, classified, after, raw: kept.append((classified, raw)) or True,
+    )
+    assert ("explore:fail:f4", "THE ENTRY") in kept
+
+
+def test_the_90_day_filter_has_no_plus_sign():
+    # A `+00:00` travels unencoded, PostgREST reads a space and the query fails.
+    seen = {}
+
+    class T(_FakeTable):
+        def gte(self, col, value):
+            seen["since"] = value
+            return self
+
+    class C(_FakeClient):
+        def table(self, name):
+            return T(self.store, name)
+
+    ce.fetch_queue(C())
+    assert "+" not in seen["since"] and seen["since"].endswith("Z")
 
 
 def test_commit_is_not_pressed_by_default():

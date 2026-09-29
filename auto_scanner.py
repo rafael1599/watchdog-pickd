@@ -646,7 +646,8 @@ def _run_customer_gap() -> float:
             _note_gap("exploring the customer screens")
             touched = True
             hold_awake()
-            ce.explore_if_due(driver)
+            kept = ce.explore_if_due(driver)
+            _note_gap(f"customers: explored, {kept} screen(s) kept")
 
         deadline = started + ce.gap_budget_sec()
         queue = None
