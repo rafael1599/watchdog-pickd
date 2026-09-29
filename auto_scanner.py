@@ -607,6 +607,87 @@ def _run_sku_gap() -> float:
     return time.monotonic() - started
 
 
+def _run_customer_gap() -> float:
+    """Spend what is left of the gap on the dealers' records (customer_enrichment).
+
+    After the catalogue, never instead of it (sku_enrichment.py: «bikes before
+    customers»): it runs only when the SKU queue had nothing to do. Same gates,
+    re-checked before EVERY account — the operator's keyboard, a manual «get
+    orders now», a pending deploy — and the gap ends by walking the terminal
+    back to the order search, whatever happened.
+
+    Wrapped whole: a side errand may not take the scanner down with it.
+    """
+    started = time.monotonic()
+    done = 0
+    touched = False
+    try:
+        import auto_update
+        import customer_enrichment as ce
+
+        if not ce.enabled():
+            return 0.0
+        driver = _driver_for_sku_step()
+
+        def someone_else_first() -> bool:
+            # Checked before the expedition and before EVERY account.
+            if _kick.is_set():
+                _note_gap("orders requested")
+                return True
+            if not ignoring_operator() and operator_idle_seconds() < IDLE_THRESHOLD_SEC:
+                _note_gap("the operator is back")
+                return True
+            if auto_update.update_pending.is_set():
+                _note_gap("an update is waiting")
+                return True
+            return False
+
+        if ce.explore_due() is not None and not someone_else_first():
+            _note_gap("exploring the customer screens")
+            touched = True
+            hold_awake()
+            ce.explore_if_due(driver)
+
+        deadline = started + ce.gap_budget_sec()
+        queue = None
+        for _ in range(ce.max_per_gap()):
+            if time.monotonic() >= deadline:
+                _note_gap(f"customers: budget spent after {done}")
+                break
+            if someone_else_first():
+                break
+            if queue is None:
+                queue = ce.fetch_queue()
+            if not queue:
+                _note_gap("customers: the queue is empty")
+                break
+            row = queue.pop(0)
+            hold_awake()
+            touched = True
+            res = ce.run_customer_step(driver, row)
+            done += 1
+            good = res.get("action") in ("read", "written")
+            _note_gap(
+                f"customers: {res.get('action')} {res.get('account')}"
+                + ("" if good else f" ({res.get('why')})"),
+                read=1 if good else 0,
+            )
+            if res.get("action") in ("unavailable", "error"):
+                break
+    except Exception:
+        log.exception("auto-scan: customer step crashed — the orders keep going")
+    finally:
+        if touched:
+            try:
+                from as400_capture import return_to_order_search
+
+                return_to_order_search(_driver_for_sku_step())
+            except Exception as e:  # noqa: BLE001
+                log.warning("auto-scan: the terminal didn't get home after customers (%s)", e)
+        let_sleep()
+    return time.monotonic() - started
+
+
 _sku_driver = None
 
 
@@ -762,6 +843,9 @@ def _loop() -> None:
                 # because the terminal is asked every budget instead of every
                 # twenty minutes.
                 spent = gap_spent = _run_sku_gap()
+                if spent < MIN_WORK_TO_SKIP_WAIT_SEC:
+                    # Nothing for the catalogue: the dealers' records get the gap.
+                    spent = gap_spent = spent + _run_customer_gap()
                 if spent >= MIN_WORK_TO_SKIP_WAIT_SEC:
                     wait = FOUND_NEXT_DELAY_SEC  # the waiting already happened, usefully
                     log.info(

@@ -24,3 +24,6 @@ logs/
 # Claude (skills symlink + local config)
 .claude/skills
 .claude/skills/
+.customer_seen.json
+.customer_explored.json
+.customer_seen.json.tmp

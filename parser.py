@@ -95,6 +95,65 @@ def _num(v):
         return None
 
 
+def format_phone(raw):
+    """`732 7412799` → `(732) 741-2799`; anything that is not ten digits (after an
+    optional leading 1) is returned as it came, trimmed, or None when empty. The
+    printed pack slip spells it `(201) 891-5500`, so PickD does too."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    digits = re.sub(r"\D", "", text)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) == 10:
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+    return text
+
+
+def parse_customer_display(text: str) -> Dict:
+    """What CUSTOMER DISPLAY (menu 01) carries (docs/as400-screen-map.md §2.11).
+
+    Returns `{account, suffix, name, phone, phone_raw, fax, email, salesman,
+    store_size, locations, bike_buyer, parts_buyer, other_buyer}`, None for
+    anything blank. Callers compare `account` with the one they asked for before
+    using the rest — it is the only defence against a lookup that landed on
+    somebody else's record.
+    """
+    t = text or ""
+
+    def line_value(label):
+        # The value is what follows the label on its own line, up to a run of
+        # three spaces (Fax No shares its line with Salesman ID).
+        m = re.search(rf"^[ \t]*{label}[ \t:]*(.*)$", t, re.IGNORECASE | re.MULTILINE)
+        if not m:
+            return None
+        value = re.split(r"\s{3,}", m.group(1).strip())[0].strip()
+        return value or None
+
+    acct = re.search(r"Account\s+Number:\s*(\d+)\s+(\d{1,2})", t, re.IGNORECASE)
+    email = re.search(r"EMAIL\s+Address[ \t]+(\S+@\S+)", t, re.IGNORECASE)
+    salesman = re.search(r"Salesman\s+ID[ \t]+(.+?)\s*$", t, re.IGNORECASE | re.MULTILINE)
+    phone_raw = line_value("Phone No")
+    fax = line_value("Fax No")
+    if fax and fax.upper().startswith("SALESMAN"):
+        fax = None
+    return {
+        "account": str(int(acct.group(1))) if acct else None,
+        "suffix": acct.group(2).zfill(2) if acct else None,
+        "name": line_value("Name"),
+        "phone": format_phone(phone_raw),
+        "phone_raw": phone_raw,
+        "fax": format_phone(fax),
+        "email": email.group(1).strip().lower() if email else None,
+        "salesman": salesman.group(1).strip() if salesman else None,
+        "store_size": line_value("Size of Store"),
+        "locations": line_value("# of Locations"),
+        "bike_buyer": line_value("Bike Buyer"),
+        "parts_buyer": line_value("Parts Buyer"),
+        "other_buyer": line_value("Other Buyer"),
+    }
+
+
 def parse_stock_inquiry(text: str) -> Dict:
     """Everything the STOCK INQUIRY detail screen carries that we care about.
 

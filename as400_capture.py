@@ -436,6 +436,10 @@ class StockScreenMismatch(CaptureError):
     """
 
 
+class CustomerScreenMismatch(CaptureError):
+    """The customer lookup did not land on CUSTOMER DISPLAY, or on another account."""
+
+
 class OrderVoidSkip(CaptureError):
     """Capture dead-ended on the AS400 'ADDITIONAL MESSAGE INFORMATION' screen
     (e.g. a VOID order routes here after F5, prompting for an Option with no valid
@@ -1881,3 +1885,114 @@ def capture_order(
         f"'{END_OF_ORDER_MARKER}' didn't appear after {max_pages} pages for order "
         f"{order_number}. Capture aborted."
     )
+
+
+# ── Customer Inquiry (menu 01) and the read-only menu options ───────────────
+#
+# Rafael, 29 sep 2026: «empieza con la fase de los datos alcanzables, luego tienes
+# que mandar al watcher a explorar cada opción para descubrir el mapa completo».
+# What we are after is the CONTACT the printed pack slip carries (881753:
+# «CONTACT MICHAEL PORRARO-OWNER») and that ORDER INQUIRY does not show.
+
+# The options a script may open. 07 changes the terminal and 09 is Order Entry,
+# which writes: neither is here, and `enter_menu_option` refuses anything else.
+READ_ONLY_MENU_OPTIONS = ("1", "2", "3", "4", "6", "10")
+
+
+def enter_menu_option(
+    driver, option: str, page_wait=None, step_wait: float = 0.6, read_fn=None
+) -> str:
+    """Walk the verified way to the SALESN menu, open `option`, return that screen.
+
+    Raises CustomerScreenMismatch when the option did not take (the menu is still
+    there): typing on into a menu that ignored us would be typing into the menu.
+    """
+    option = str(int(option))  # "04" → "4": the menu takes the number
+    if option not in READ_ONLY_MENU_OPTIONS:
+        raise ValueError(f"menu option {option} is not a read-only one — refusing to open it")
+    if page_wait is None:
+        page_wait = _env_float("AS400_PAGE_WAIT", PAGE_WAIT_DEFAULT)
+    read = read_fn or driver.copy_screen
+    return_to_menu(driver, step_wait=step_wait, read_fn=read, page_wait=page_wait)
+    driver.type_text(option)
+    time.sleep(step_wait)
+    driver.key("enter")
+    time.sleep(page_wait)
+    screen = read()
+    if classify_screen(screen) in (STATE_MENU, STATE_DISCONNECTED):
+        raise CustomerScreenMismatch(f"menu option {option} did not open (still on the menu)")
+    return screen
+
+
+def customer_account_fields(account, suffix="00"):
+    """`'6034'`, `'00'` → what is typed: the account digits and a 2-digit suffix.
+
+    None when the account is not a number — nothing is typed into the terminal on
+    a guess. `CUSTOMER_ACCOUNT_PAD=1` types it zero-padded to seven, the way the
+    screen prints it (`0006034`), in case the field wants that; the identity
+    check on the display catches either spelling landing on the wrong record.
+    """
+    digits = re.sub(r"\s+", "", str(account or ""))
+    if not digits.isdigit() or len(digits) > 7:
+        return None
+    sfx = re.sub(r"\s+", "", str(suffix or "00")) or "00"
+    if not sfx.isdigit() or len(sfx) > 2:
+        return None
+    if os.getenv("CUSTOMER_ACCOUNT_PAD", "0") in ("1", "true", "True", "yes"):
+        digits = digits.zfill(7)
+    else:
+        digits = str(int(digits))
+    return digits, sfx.zfill(2)
+
+
+def capture_customer_display(
+    account, suffix, driver, page_wait=None, step_wait: float = 0.6, read_fn=None
+):
+    """Drive the terminal to CUSTOMER DISPLAY for `account`/`suffix`.
+
+    Returns `(entry_screen, display_screen)`. READ ONLY, and it does not bring the
+    terminal home — the caller owns that, because it has to run either way.
+
+    The route (docs/as400-screen-map.md §2.11, Rafael 2026-09-01):
+
+        menu ──1 + ENTER──▶ Customer Inquiry ──account, TAB, 00, ENTER──▶ CUSTOMER DISPLAY
+    """
+    if page_wait is None:
+        page_wait = _env_float("AS400_PAGE_WAIT", PAGE_WAIT_DEFAULT)
+    read = read_fn or driver.copy_screen
+    fields = customer_account_fields(account, suffix)
+    if fields is None:
+        raise CustomerScreenMismatch(f"{account!r}/{suffix!r} is not an AS400 account number")
+    digits, sfx = fields
+
+    # Verify before driving, as every capture does: never type into a dead or
+    # unrecognized screen.
+    state = classify_screen(read())
+    if state == STATE_DISCONNECTED:
+        raise AS400Disconnected("The AS400 isn't connected — not looking up a customer.")
+    if state not in _READY_STATES + (STATE_MENU, STATE_CUSTOMER_DISPLAY, STATE_STOCK_INQUIRY):
+        raise AS400ManualLoginRequired(
+            f"The AS400 is on a screen I don't know ({state}), so a customer lookup would "
+            "be typing into it."
+        )
+
+    entry = enter_menu_option(driver, "1", page_wait=page_wait, step_wait=step_wait, read_fn=read)
+    # The entry form has not been captured yet: its title is the only thing we can
+    # check. A screen that does not even say CUSTOMER is not the one to type into.
+    if "CUSTOMER" not in re.sub(r"\s+", "", entry.upper()):
+        raise CustomerScreenMismatch("option 1 did not open Customer Inquiry")
+
+    driver.type_text(digits)
+    time.sleep(step_wait)
+    driver.key("tab")
+    time.sleep(step_wait)
+    driver.type_text(sfx)
+    time.sleep(step_wait)
+    driver.key("enter")
+    time.sleep(page_wait)
+    screen = read()
+    if classify_screen(screen) != STATE_CUSTOMER_DISPLAY:
+        raise CustomerScreenMismatch(
+            f"account {digits} {sfx} did not open CUSTOMER DISPLAY ({classify_screen(screen)})",
+        )
+    return entry, screen

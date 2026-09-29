@@ -1,6 +1,8 @@
 # Los huecos del escáner se usan para las fichas de cliente
 
-> Estado: **PROPUESTA**, 1 sep 2026. Nada escrito todavía.
+> Estado: **E1 + E2 escritos y apagados, 29 sep 2026** (`customer_enrichment.py`). Se encienden desde
+> PickD con la fila `app_flags.as400_customer_enrich`, no desde el `.env` de Bay 2 — ver §9.
+> Propuesta original: 1 sep 2026.
 > Pedido de Rafael: *«cuando no hay órdenes para tomar, se comienza a analizar los detalles de los
 > clientes de las órdenes que se fueron a PickD ese día y se envían, y luego de terminar se deja en
 > la pantalla de búsqueda de órdenes»*.
@@ -102,3 +104,48 @@ cambia en cada orden y su ficha no significa lo mismo.
    aparecen nombres, entonces sí.
 4. ❓ **¿Cuántas fichas por hueco?** *Default:* **una**, y volver a dormir lo que tocaba. El escáner
    existe para las órdenes; esto es lo que hace mientras no hay ninguna.
+
+## 9. 29 sep 2026 — escrito, y el CONTACT del papel
+
+Rafael, con la foto del pack slip de **881753**: *«empieza con la fase de los datos alcanzables,
+luego tienes que mandar al watcher a explorar cada opción para descubrir el mapa completo. Lo que
+queremos es lo que dice contact en esta orden»*. El papel impreso trae
+`TELEPHONE (201) 891-5500` y `CONTACT MICHAEL PORRARO-OWNER`; la captura de ORDER INQUIRY de esa
+misma orden (`as400_captures.raw_text`) no trae ninguno de los dos — ni ninguna de las 328 que hay.
+
+**Lo escrito:**
+
+- `capture_customer_display` (`as400_capture.py`): menú verificado → `1` + ENTER → comprueba que la
+  pantalla diga CUSTOMER → cuenta, TAB, `00`, ENTER → exige `CUSTOMER DISPLAY`. `enter_menu_option`
+  **se niega** a abrir 07 y 09.
+- `parse_customer_display` (`parser.py`): teléfono con la grafía del papel (`(732) 741-2799`), email,
+  vendedor y los tres `Buyer`.
+- `customer_enrichment.run_customer_step`: una cuenta, guarda **cada** pantalla en `as400_screens`
+  (`sku = acct:<cuenta>-<sufijo>`, `classified = customer_entry | customer_display`), compara la cuenta
+  de la pantalla con la pedida y aplica `plan_write` — sólo `phone` y `email`, sólo sobre NULL (la
+  regla se repite en el `UPDATE … is null`). Lo leído se anota en `.customer_seen.json` para no
+  preguntar dos veces en la fase de sólo lectura.
+- En el escáner, `_run_customer_gap` corre en el hueco `not_found` **sólo si el de SKU no tuvo nada
+  que hacer**, con las mismas guardas antes de cada cuenta (operario, «get orders now», deploy
+  pendiente) y **una** vuelta verificada a la búsqueda de órdenes al terminar.
+
+**El interruptor vive en PickD** (`app_flags`, clave `as400_customer_enrich`), porque Bay 2 está
+detrás del NAT y editar su `.env` exige ir al Mac. `enabled` enciende el paso; `config.write` es E2;
+`config.explore` + `config.explore_rev` mandan la expedición (una vez por rev: subir el número la
+repite sin desplegar); `config.explore_account`, `explore_keys`, `explore_menu`, `gap_budget_sec` y
+`max_per_gap` la ajustan. Un env var puesto gana siempre — `CUSTOMER_ENRICH=0` es el freno en el Mac.
+
+**La expedición** (`run_expedition`), para encontrar el CONTACT: sobre la cuenta **6034** (WYCKOFF
+CYCLE, la de 881753 — así una pantalla que diga PORRARO se reconoce), abre cada tecla que CUSTOMER
+DISPLAY anuncia — `Cmd1 Product`, `Cmd2 Comp`, `Cmd3 Closest Dlr`, `Cmd4 POP Info`, `Cmd5 CallBack`,
+`Cmd6 Prior`, `Cmd10 Top10`, `Cmd12 PreSeas` — y las opciones del menú nunca abiertas `04`, `06` y
+`10`. **Una tecla, una lectura, y a casa** por el camino verificado; si no puede volver, aborta.
+Todo queda en `as400_screens` con `classified = explore:customer:f<n>` / `explore:menu:<nn>`.
+
+- ❓ **`Cmd11 Commit` no se pulsa.** *Default:* fuera de la lista, porque es la única leyenda que se
+  lee como una acción. Se añade con `config.explore_keys` si Rafael confirma que sólo consulta.
+- ❓ **La cuenta, ¿se teclea `6034` o `0006034`?** *Default:* como la guarda PickD (`6034`); la
+  pantalla se compara con la pedida, así que una grafía equivocada es un `mismatch`, nunca otra ficha.
+  `CUSTOMER_ACCOUNT_PAD=1` prueba la otra.
+- `contact_name` **no se escribe todavía**: primero hay que ver en qué pantalla está.
+
