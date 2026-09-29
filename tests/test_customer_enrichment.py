@@ -565,3 +565,10 @@ def test_an_expedition_the_operator_interrupts_is_not_marked_done(monkeypatch):
     monkeypatch.setattr(ce, "run_expedition", interrupted)
     assert ce.explore_if_due(None) == 0
     assert not ce._explored_rev_path().exists()
+
+
+def test_a_truncated_email_is_not_an_email():
+    screen = CUSTOMER_DISPLAY_SCREEN.replace(
+        "INFO@SHREWSBURYBICYCLES.COM", "CONTACT@BALTIMOREBICYCLEWORKS."
+    )
+    assert parse_customer_display(screen)["email"] is None

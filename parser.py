@@ -167,7 +167,12 @@ def parse_customer_display(text: str) -> Dict:
         return value or None
 
     acct = re.search(r"Account\s+Number:\s*(\d+)\s+(\d{1,2})", t, re.IGNORECASE)
-    email = re.search(r"EMAIL\s+Address[ \t]+(\S+@\S+)", t, re.IGNORECASE)
+    # A complete address only: the screen's field is fixed-width and cuts a long
+    # one short (`contact@baltimorebicycleworks.`, 29 sep 2026) — a truncated
+    # e-mail in PickD is worse than none.
+    email = re.search(
+        r"EMAIL\s+Address[ \t]+([^@\s]+@[^@\s]+\.[A-Za-z]{2,})(?=\s|$)", t, re.IGNORECASE
+    )
     salesman = re.search(r"Salesman\s+ID[ \t]+(.+?)\s*$", t, re.IGNORECASE | re.MULTILINE)
     phone_raw = line_value("Phone No")
     fax = line_value("Fax No")
