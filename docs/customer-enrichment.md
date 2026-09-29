@@ -149,3 +149,18 @@ Todo queda en `as400_screens` con `classified = explore:customer:f<n>` / `explor
   `CUSTOMER_ACCOUNT_PAD=1` prueba la otra.
 - `contact_name` **no se escribe todavía**: primero hay que ver en qué pantalla está.
 
+
+### Lo que dijo Bay 2 el mismo día (`as400_screens` 298–313)
+
+- **La opción 01 abre primero `CUSTOMER DETAIL DISPLAY`**: `Customer: _______ __`, `Phone:`,
+  `Search:` y una lista. Estado nuevo `STATE_CUSTOMER_INQUIRY` (sale con `Cmd7`).
+- **La cuenta se teclea con ceros a la izquierda, siete dígitos** (`0006034`): el campo se llena
+  desde la izquierda y `6034` quedó `6034000` → «Customer ID NOT on File». Ahora es el default
+  (`CUSTOMER_ACCOUNT_PAD=0` teclea la cuenta tal cual).
+- **`04`** = `ACCOUNTS RECEIVABLE INQUIRY`: `Customer:`, `Phone:`, `Search:`, `Roll Keys SCROLL`,
+  `Cmd7 EXIT`. Sin teclear nada dentro todavía.
+- **`06`** = `SPOOL FILE STATUS` de IBM (`SPOOLJOB — Control printing`), con opciones que **cancelan,
+  retienen y cambian** entradas de impresión. **Fuera de `READ_ONLY_MENU_OPTIONS`.** Ojo: es donde
+  viven las impresiones — el pack slip con el CONTACT sale de ahí (`6. Copy or display entries`) —,
+  así que es la pista más fuerte, y **no se automatiza sin que Rafael lo decida**.
+- **`10`** = `PICK SLIP UPDATE` (`Order:`). Un «update»: **fuera de la lista**.

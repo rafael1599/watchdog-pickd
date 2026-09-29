@@ -57,8 +57,9 @@ FLAG_TTL_SEC = 60.0
 # and a key that commits something in the ERP is not a thing to press to see what
 # happens. ❓ Rafael can add it with `config.explore_keys` once he has looked.
 EXPLORE_KEYS_DEFAULT = ("f1", "f2", "f3", "f4", "f5", "f6", "f10", "f12")
-# 01, 02 and 03 are mapped; 07 changes the terminal and 09 writes.
-EXPLORE_MENU_DEFAULT = ("4", "6", "10")
+# 01, 02 and 03 are mapped; 07 changes the terminal and 09 writes; 06 (spool
+# control) and 10 (pick slip UPDATE) were opened once and struck off.
+EXPLORE_MENU_DEFAULT = ("4",)
 # 881753's customer — the one whose printed CONTACT we know, so a screen that
 # carries it is recognisable by the name MICHAEL PORRARO.
 EXPLORE_ACCOUNT_DEFAULT = "6034"
@@ -165,10 +166,14 @@ def load_seen() -> dict:
     return {}
 
 
+MAX_FAILED_TRIES = 3
+
+
 def remember(key: str, entry: dict) -> None:
     with _lock:
         data = load_seen()
-        data[key] = {**entry, "at": _now()}
+        tries = (data.get(key) or {}).get("tries", 0) + 1
+        data[key] = {**entry, "tries": tries, "at": _now()}
         p = _seen_path()
         tmp = p.with_suffix(p.suffix + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -210,7 +215,13 @@ def rank_customers(customers, orders, seen=None, today=None) -> list:
             continue
         if c.get("phone") and c.get("email"):
             continue
-        if account_key(acct) in seen:
+        prior = seen.get(account_key(acct))
+        # A read is final (❓2: no refresh). A failure is retried a few times —
+        # the first run on Bay 2 failed on every account because of how the
+        # number was typed, and that must not bury them for ever.
+        if prior and (
+            prior.get("action") in ("read", "written") or prior.get("tries", 1) >= MAX_FAILED_TRIES
+        ):
             continue
         out.append(c)
     out.sort(key=lambda c: (c["id"] not in has_today, -count.get(c["id"], 0), c.get("name") or ""))

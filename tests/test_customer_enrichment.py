@@ -18,8 +18,20 @@ from tests.test_as400_capture import (
     FakeDriver,
 )
 
-CUSTOMER_ENTRY_SCREEN = """                    C U S T O M E R   I N Q U I R Y
-  Account Number: _______  __"""
+# Bay 2, 29 sep 2026 (as400_screens 312), after a number it did not know.
+CUSTOMER_ENTRY_SCREEN = """                     CUSTOMER DETAIL DISPLAY
+    Customer: _______ __           Phone:
+      Search:
+    Roll Keys                                                       Cmd7
+     SCROLL                                                          EXIT"""
+
+NOT_ON_FILE_SCREEN = """                     CUSTOMER DETAIL DISPLAY
+    Customer: 6034000 00           Phone:
+      Search:
+     0000000 00
+                    Customer ID NOT on File
+    Roll Keys                                                       Cmd7
+     SCROLL                                                          EXIT"""
 
 
 @pytest.fixture(autouse=True)
@@ -72,19 +84,21 @@ def test_phone_is_spelled_like_the_pack_slip(raw, out):
     assert format_phone(raw) == out
 
 
-def test_account_fields_type_what_the_record_says(monkeypatch):
-    assert customer_account_fields("6034") == ("6034", "00")
-    assert customer_account_fields("0006034", "0") == ("6034", "00")
+def test_account_is_typed_zero_padded_to_seven(monkeypatch):
+    # Bay 2, 29 sep 2026: `6034` filled the seven-digit field from the left,
+    # became `6034000` and AS400 said «Customer ID NOT on File».
+    assert customer_account_fields("6034") == ("0006034", "00")
+    assert customer_account_fields("0006034", "0") == ("0006034", "00")
     assert customer_account_fields("EBAY") is None
     assert customer_account_fields("12345678") is None
-    monkeypatch.setenv("CUSTOMER_ACCOUNT_PAD", "1")
-    assert customer_account_fields("6034") == ("0006034", "00")
+    monkeypatch.setenv("CUSTOMER_ACCOUNT_PAD", "0")
+    assert customer_account_fields("6034") == ("6034", "00")
 
 
 # ── the route ────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("option", ["7", "9", "09", "24"])
+@pytest.mark.parametrize("option", ["6", "7", "9", "09", "10", "24"])
 def test_never_opens_an_option_that_writes(option):
     with pytest.raises(ValueError):
         enter_menu_option(FakeDriver([MENU_SCREEN]), option, page_wait=0)
@@ -107,7 +121,7 @@ def test_capture_walks_menu_1_account_tab_suffix_enter():
     assert driver.actions[-6:] == [
         ("text", "1"),
         ("key", "enter"),
-        ("text", "9981"),
+        ("text", "0009981"),
         ("key", "tab"),
         ("text", "00"),
         ("key", "enter"),
@@ -118,7 +132,7 @@ def test_capture_stops_when_option_1_did_not_open_customer_inquiry():
     driver = FakeDriver([MENU_SCREEN, MENU_SCREEN, "SOMETHING ELSE ENTIRELY"])
     with pytest.raises(CustomerScreenMismatch):
         capture_customer_display("9981", "00", driver, page_wait=0, step_wait=0)
-    assert ("text", "9981") not in driver.actions  # nothing typed into a stranger
+    assert ("text", "0009981") not in driver.actions  # nothing typed into a stranger
 
 
 def test_capture_stops_when_the_account_does_not_open_the_display():
@@ -158,8 +172,12 @@ def test_queue_puts_todays_customers_first_then_the_busiest():
         {"customer_id": "b", "created_at": "2026-09-02T10:00:00Z"},
         {"customer_id": "c", "created_at": "2026-09-29T10:00:00Z"},
     ]
-    ranked = ce.rank_customers(customers, orders, seen={"7-00": {}}, today="2026-09-29")
-    assert [c["id"] for c in ranked] == ["c", "b", "a"]
+    seen = {"7-00": {"action": "read"}, "1-00": {"action": "mismatch", "tries": 1}}
+    ranked = ce.rank_customers(customers, orders, seen=seen, today="2026-09-29")
+    assert [c["id"] for c in ranked] == ["c", "b", "a"]  # a failed once: tried again
+    seen["1-00"]["tries"] = ce.MAX_FAILED_TRIES
+    ranked = ce.rank_customers(customers, orders, seen=seen, today="2026-09-29")
+    assert [c["id"] for c in ranked] == ["c", "b"]
 
 
 class _FakeTable:
@@ -409,3 +427,15 @@ def test_the_expedition_also_yields_to_the_operator(monkeypatch):
     monkeypatch.setattr(ce, "explore_if_due", lambda d, client=None: ran.append(1))
     auto_scanner._run_customer_gap()
     assert ran == [] and homes == []
+
+
+def test_the_entry_form_is_a_known_screen_and_not_on_file_says_so():
+    from as400_capture import STATE_CUSTOMER_INQUIRY, classify_screen
+
+    assert classify_screen(NOT_ON_FILE_SCREEN) == STATE_CUSTOMER_INQUIRY
+    driver = FakeDriver(
+        [NOT_ON_FILE_SCREEN, MENU_SCREEN, CUSTOMER_ENTRY_SCREEN, NOT_ON_FILE_SCREEN]
+    )
+    # precheck accepts the entry form (the previous lookup may have ended there)
+    with pytest.raises(CustomerScreenMismatch, match="NOT on File"):
+        capture_customer_display("6034", "00", driver, page_wait=0, step_wait=0)

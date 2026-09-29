@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 import scanned_store
 from as400_capture import (
     STATE_CUSTOMER_DISPLAY,
+    STATE_CUSTOMER_INQUIRY,
     STATE_STOCK_INQUIRY,
     AS400Disconnected,
     AS400ManualLoginRequired,
@@ -114,7 +115,7 @@ UNAVAILABLE_LOUD_SEC = float(os.getenv("SCAN_UNAVAILABLE_LOUD_SEC", "600"))
 # From the operator's seat that is the watcher stealing the terminal in a loop
 # (Rafael, 11 sep 2026: "cuando tomo control al watcher no le importa"). These
 # are screens a person navigates to; UNKNOWN, LOGIN and MESSAGE are not.
-OPERATOR_SCREENS = (STATE_CUSTOMER_DISPLAY, STATE_STOCK_INQUIRY)
+OPERATOR_SCREENS = (STATE_CUSTOMER_DISPLAY, STATE_CUSTOMER_INQUIRY, STATE_STOCK_INQUIRY)
 # How long the terminal is left alone once it looks like somebody is using it,
 # before assuming they walked away and forgot.
 OPERATOR_HOLD_SEC = float(os.getenv("SCAN_OPERATOR_HOLD_SEC", "600"))

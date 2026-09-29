@@ -102,6 +102,7 @@ STATE_LOGIN = "login"  # AS400 sign-on screen
 STATE_MENU = "menu"  # SALESN options menu (pick 3 = Order Inquiry)
 STATE_MESSAGE = "message"  # transient "Message Display / Press Enter to continue"
 STATE_CUSTOMER_DISPLAY = "customer_display"  # CUSTOMER DISPLAY (menu option 01)
+STATE_CUSTOMER_INQUIRY = "customer_inquiry"  # CUSTOMER DETAIL DISPLAY — menu 01's entry form
 STATE_STOCK_INQUIRY = "stock_inquiry"  # STOCK INQUIRY (menu option 02) — detail OR its NOTES
 STATE_ORDER_SEARCH = "order_search"  # logged in, ready to type an order number
 STATE_ORDER_INQUIRY = "order_inquiry"  # viewing an order
@@ -154,6 +155,10 @@ MESSAGE_MARKERS = ("PRESSENTERTOCONTINUE",)
 # e-mail), so the daemon can find the terminal parked here. Its own legend says
 # Cmd7 EXIT, which is the way back to the menu.
 CUSTOMER_MARKERS = ("CUSTOMERDISPLAY",)
+# The form option 01 opens first (Bay 2, 29 sep 2026): `Customer: _______ __`,
+# `Phone:`, `Search:` and a list; a number it does not know says «Customer ID NOT
+# on File». Not a substring of the display's marker, so it gets its own. Cmd7 EXIT.
+CUSTOMER_INQUIRY_MARKERS = ("CUSTOMERDETAILDISPLAY",)
 # Option 02 of the SALESN menu: the catalogue name, the AS400 weight and its own
 # stock by warehouse (docs/as400-screen-map.md §2.12).
 #
@@ -187,6 +192,8 @@ def classify_screen(text: str) -> str:
         return STATE_MENU
     if any(m in norm for m in MESSAGE_MARKERS):
         return STATE_MESSAGE
+    if any(m in norm for m in CUSTOMER_INQUIRY_MARKERS):
+        return STATE_CUSTOMER_INQUIRY
     if any(m in norm for m in CUSTOMER_MARKERS):
         return STATE_CUSTOMER_DISPLAY
     if any(m in norm for m in STOCK_MARKERS):
@@ -1169,7 +1176,7 @@ def _advance_toward_order_screen(
         driver.key("enter")
     elif state == STATE_MESSAGE:
         driver.key("enter")  # "Press Enter to continue"
-    elif state == STATE_CUSTOMER_DISPLAY:
+    elif state in (STATE_CUSTOMER_DISPLAY, STATE_CUSTOMER_INQUIRY):
         driver.key("f7")  # EXIT, per the screen's own legend → back to the menu
     elif state == STATE_STOCK_INQUIRY:
         # Cmd7 EXIT on both forms — the detail screen's footer legend and the
@@ -1902,8 +1909,10 @@ def capture_order(
 # «CONTACT MICHAEL PORRARO-OWNER») and that ORDER INQUIRY does not show.
 
 # The options a script may open. 07 changes the terminal and 09 is Order Entry,
-# which writes: neither is here, and `enter_menu_option` refuses anything else.
-READ_ONLY_MENU_OPTIONS = ("1", "2", "3", "4", "6", "10")
+# which writes. Opened once on 29 sep 2026 and struck off: 06 is the IBM SPOOL
+# FILE STATUS, whose own menu cancels, holds and changes print entries, and 10 is
+# PICK SLIP UPDATE. `enter_menu_option` refuses anything not listed here.
+READ_ONLY_MENU_OPTIONS = ("1", "2", "3", "4")
 
 
 def enter_menu_option(
@@ -1937,9 +1946,10 @@ def customer_account_fields(account, suffix="00"):
     """`'6034'`, `'00'` → what is typed: the account digits and a 2-digit suffix.
 
     None when the account is not a number — nothing is typed into the terminal on
-    a guess. `CUSTOMER_ACCOUNT_PAD=1` types it zero-padded to seven, the way the
-    screen prints it (`0006034`), in case the field wants that; the identity
-    check on the display catches either spelling landing on the wrong record.
+    a guess. **Zero-padded to seven**, the way the screen prints it (`0006034`):
+    the field is seven digits and fills from the left, so `6034` became
+    `6034000` and «Customer ID NOT on File» (Bay 2, 29 sep 2026).
+    `CUSTOMER_ACCOUNT_PAD=0` types it bare.
     """
     digits = re.sub(r"\s+", "", str(account or ""))
     if not digits.isdigit() or len(digits) > 7:
@@ -1947,10 +1957,10 @@ def customer_account_fields(account, suffix="00"):
     sfx = re.sub(r"\s+", "", str(suffix or "00")) or "00"
     if not sfx.isdigit() or len(sfx) > 2:
         return None
-    if os.getenv("CUSTOMER_ACCOUNT_PAD", "0") in ("1", "true", "True", "yes"):
-        digits = digits.zfill(7)
-    else:
+    if os.getenv("CUSTOMER_ACCOUNT_PAD", "1") in ("0", "false", "False", "no"):
         digits = str(int(digits))
+    else:
+        digits = digits.zfill(7)
     return digits, sfx.zfill(2)
 
 
@@ -1979,7 +1989,8 @@ def capture_customer_display(
     state = classify_screen(read())
     if state == STATE_DISCONNECTED:
         raise AS400Disconnected("The AS400 isn't connected — not looking up a customer.")
-    if state not in _READY_STATES + (STATE_MENU, STATE_CUSTOMER_DISPLAY, STATE_STOCK_INQUIRY):
+    known = (STATE_MENU, STATE_CUSTOMER_DISPLAY, STATE_CUSTOMER_INQUIRY, STATE_STOCK_INQUIRY)
+    if state not in _READY_STATES + known:
         raise AS400ManualLoginRequired(
             f"The AS400 is on a screen I don't know ({state}), so a customer lookup would "
             "be typing into it."
@@ -2001,6 +2012,10 @@ def capture_customer_display(
     time.sleep(page_wait)
     screen = read()
     if classify_screen(screen) != STATE_CUSTOMER_DISPLAY:
+        if "NOTONFILE" in re.sub(r"\s+", "", screen.upper()):
+            raise CustomerScreenMismatch(
+                f"account {digits} {sfx}: Customer ID NOT on File", screen=screen
+            )
         raise CustomerScreenMismatch(
             f"account {digits} {sfx} did not open CUSTOMER DISPLAY ({classify_screen(screen)})",
             screen=screen,
