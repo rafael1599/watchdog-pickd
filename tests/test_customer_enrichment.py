@@ -1,6 +1,8 @@
 """The dealer's phone and e-mail from CUSTOMER DISPLAY, and the expedition that
 maps where the CONTACT lives (customer_enrichment.py, Rafael 29 sep 2026)."""
 
+from datetime import datetime, timezone
+
 import pytest
 
 import customer_enrichment as ce
@@ -160,27 +162,29 @@ def test_plan_fills_only_empty_columns_of_the_right_account():
     assert ce.plan_write(other, parsed) == {}
 
 
-def test_queue_puts_todays_customers_first_then_the_busiest():
+def test_queue_is_only_the_customers_of_todays_orders():
+    # Rafael, 29 sep 2026: «no tenemos que volvernos locos buscando información de
+    # clientes de órdenes antiguas». `orders` is what fetch_queue asked for: today.
     customers = [
         {"id": "a", "name": "A", "as400_account": "1"},
         {"id": "b", "name": "B", "as400_account": "2"},
-        {"id": "c", "name": "C", "as400_account": "3"},
+        {"id": "c", "name": "C", "as400_account": "3"},  # no order today
         {"id": "d", "name": "D", "as400_account": "4", "ship_to_varies": True},
-        {"id": "e", "name": "E", "as400_account": None},
         {"id": "f", "name": "F", "as400_account": "6", "phone": "x", "email": "y"},
         {"id": "g", "name": "G", "as400_account": "7"},
     ]
-    orders = [
-        {"customer_id": "b", "created_at": "2026-09-01T10:00:00Z"},
-        {"customer_id": "b", "created_at": "2026-09-02T10:00:00Z"},
-        {"customer_id": "c", "created_at": "2026-09-29T10:00:00Z"},
-    ]
+    orders = [{"customer_id": c} for c in ("a", "b", "b", "d", "f", "g")]
     seen = {"7-00": {"action": "read"}, "1-00": {"action": "mismatch", "tries": 1}}
-    ranked = ce.rank_customers(customers, orders, seen=seen, today="2026-09-29")
-    assert [c["id"] for c in ranked] == ["c", "b", "a"]  # a failed once: tried again
+    ranked = ce.rank_customers(customers, orders, seen=seen)
+    assert [c["id"] for c in ranked] == ["b", "a"]  # busiest first; a failed once, retried
     seen["1-00"]["tries"] = ce.MAX_FAILED_TRIES
-    ranked = ce.rank_customers(customers, orders, seen=seen, today="2026-09-29")
-    assert [c["id"] for c in ranked] == ["c", "b"]
+    assert [c["id"] for c in ce.rank_customers(customers, orders, seen=seen)] == ["b"]
+
+
+def test_today_is_the_warehouse_day_in_new_york():
+    # 03:00 UTC on 30 sep is still 29 sep in New York (EDT, UTC-4).
+    now = datetime(2026, 9, 30, 3, 0, tzinfo=timezone.utc)
+    assert ce.today_start_utc(now) == "2026-09-29T04:00:00Z"
 
 
 class _FakeTable:
@@ -533,13 +537,14 @@ def test_a_read_with_a_plan_comes_back_when_writing_is_switched_on():
         {"id": "b", "name": "B", "as400_account": "2"},
         {"id": "c", "name": "C", "as400_account": "3"},
     ]
+    today = [{"customer_id": c} for c in ("a", "b", "c")]
     seen = {
         "1-00": {"action": "read", "plan": {"phone": "(201) 891-5500"}},
         "2-00": {"action": "read", "plan": {}},
         "3-00": {"action": "written", "plan": {"phone": "x"}},
     }
-    assert ce.rank_customers(customers, [], seen=seen, writes=False) == []
-    assert [c["id"] for c in ce.rank_customers(customers, [], seen=seen, writes=True)] == ["a"]
+    assert ce.rank_customers(customers, today, seen=seen, writes=False) == []
+    assert [c["id"] for c in ce.rank_customers(customers, today, seen=seen, writes=True)] == ["a"]
 
 
 def test_the_operator_taking_over_is_not_the_accounts_fault():

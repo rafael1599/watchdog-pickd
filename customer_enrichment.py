@@ -196,25 +196,24 @@ def rank_customers(customers, orders, seen=None, today=None, writes=False) -> li
     """Who to read next, pure so it is testable.
 
     `customers`: rows with id, as400_account, ship_to_varies, phone, email.
-    `orders`: picking_lists rows with customer_id and created_at (last 90 days).
-    Order (docs/customer-enrichment.md §5): customers with an order today first,
-    then by how many orders they placed in 90 days. Only accounts AS400 can be
-    asked for, never `ship_to_varies` (end consumer, eBay, warranty), never one
-    already read, and never one that has both phone and e-mail already.
+    `orders`: picking_lists rows with customer_id — TODAY's orders only.
+
+    Only the customers of today's orders (Rafael, 29 sep 2026: «lo importante es
+    cumplir con las órdenes que se registraron en el día, no tenemos que volvernos
+    locos buscando información de clientes de órdenes antiguas»). Only accounts
+    AS400 can be asked for, never `ship_to_varies` (end consumer, eBay, warranty),
+    never one already read, and never one that has both phone and e-mail already.
     """
     seen = seen or {}
-    today = today or datetime.now(timezone.utc).date().isoformat()
     count: dict = {}
-    has_today: set = set()
     for o in orders or []:
         cid = o.get("customer_id")
-        if not cid:
-            continue
-        count[cid] = count.get(cid, 0) + 1
-        if str(o.get("created_at") or "")[:10] == today:
-            has_today.add(cid)
+        if cid:
+            count[cid] = count.get(cid, 0) + 1
     out = []
     for c in customers or []:
+        if c.get("id") not in count:
+            continue
         acct = str(c.get("as400_account") or "").strip()
         if not acct.isdigit() or c.get("ship_to_varies"):
             continue
@@ -235,8 +234,22 @@ def rank_customers(customers, orders, seen=None, today=None, writes=False) -> li
             if action not in ("read", "written") and prior.get("tries", 1) >= MAX_FAILED_TRIES:
                 continue
         out.append(c)
-    out.sort(key=lambda c: (c["id"] not in has_today, -count.get(c["id"], 0), c.get("name") or ""))
+    out.sort(key=lambda c: (-count.get(c["id"], 0), c.get("name") or ""))
     return out
+
+
+def today_start_utc(now=None) -> str:
+    """Midnight of today in New York — the warehouse's day — as a UTC timestamp.
+
+    `Z`, never `+00:00`: the `+` travels unencoded in the query string, PostgREST
+    reads it as a space and rejects the filter — the first run on Bay 2 died
+    there, before a single customer (29 sep 2026)."""
+    from zoneinfo import ZoneInfo
+
+    ny = ZoneInfo("America/New_York")
+    local = (now or datetime.now(timezone.utc)).astimezone(ny)
+    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def fetch_queue(client=None) -> list:
@@ -249,12 +262,7 @@ def fetch_queue(client=None) -> list:
         .data
         or []
     )
-    # `Z`, never `+00:00`: the `+` travels unencoded in the query string, PostgREST
-    # reads it as a space and rejects the filter — the first run on Bay 2 died
-    # here, before a single customer (29 sep 2026).
-    since = datetime.fromtimestamp(time.time() - 90 * 86400, timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    since = today_start_utc()
     orders = (
         cl.table("picking_lists")
         .select("customer_id, created_at")
