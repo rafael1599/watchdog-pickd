@@ -191,7 +191,7 @@ def account_key(account, suffix="00") -> str:
 # ── the queue ────────────────────────────────────────────────────────────────
 
 
-def rank_customers(customers, orders, seen=None, today=None) -> list:
+def rank_customers(customers, orders, seen=None, today=None, writes=False) -> list:
     """Who to read next, pure so it is testable.
 
     `customers`: rows with id, as400_account, ship_to_varies, phone, email.
@@ -220,13 +220,19 @@ def rank_customers(customers, orders, seen=None, today=None) -> list:
         if c.get("phone") and c.get("email"):
             continue
         prior = seen.get(account_key(acct))
-        # A read is final (❓2: no refresh). A failure is retried a few times —
-        # the first run on Bay 2 failed on every account because of how the
-        # number was typed, and that must not bury them for ever.
-        if prior and (
-            prior.get("action") in ("read", "written") or prior.get("tries", 1) >= MAX_FAILED_TRIES
-        ):
-            continue
+        # A write is final (❓2: no refresh), and so is a read that had nothing
+        # to write — or any read while writing is off. A read that DID have a plan
+        # comes back once writing is on: the read-only phase of 29 sep read them,
+        # and they must not stay unwritten for ever. A failure is retried a few
+        # times — the first run failed on every account because of how the number
+        # was typed, and that must not bury them either.
+        if prior:
+            action = prior.get("action")
+            pending = action == "read" and writes and bool(prior.get("plan"))
+            if action in ("read", "written") and not pending:
+                continue
+            if action not in ("read", "written") and prior.get("tries", 1) >= MAX_FAILED_TRIES:
+                continue
         out.append(c)
     out.sort(key=lambda c: (c["id"] not in has_today, -count.get(c["id"], 0), c.get("name") or ""))
     return out
@@ -257,7 +263,7 @@ def fetch_queue(client=None) -> list:
         .data
         or []
     )
-    return rank_customers(customers, orders, load_seen())
+    return rank_customers(customers, orders, load_seen(), writes=writes_enabled(client))
 
 
 # ── what a read would write ──────────────────────────────────────────────────

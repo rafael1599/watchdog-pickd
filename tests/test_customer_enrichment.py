@@ -525,3 +525,18 @@ def test_the_seen_file_is_masked_even_for_old_entries(tmp_path):
     path.write_text(json.dumps({"1-00": {"action": "read", "parsed": {"bike_buyer": "ACCT 5277"}}}))
     ce.remember("2-00", {"action": "read"})
     assert "5277" not in path.read_text()
+
+
+def test_a_read_with_a_plan_comes_back_when_writing_is_switched_on():
+    customers = [
+        {"id": "a", "name": "A", "as400_account": "1"},
+        {"id": "b", "name": "B", "as400_account": "2"},
+        {"id": "c", "name": "C", "as400_account": "3"},
+    ]
+    seen = {
+        "1-00": {"action": "read", "plan": {"phone": "(201) 891-5500"}},
+        "2-00": {"action": "read", "plan": {}},
+        "3-00": {"action": "written", "plan": {"phone": "x"}},
+    }
+    assert ce.rank_customers(customers, [], seen=seen, writes=False) == []
+    assert [c["id"] for c in ce.rank_customers(customers, [], seen=seen, writes=True)] == ["a"]
