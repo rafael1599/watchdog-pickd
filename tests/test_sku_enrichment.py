@@ -1449,7 +1449,7 @@ def test_a_tier_full_of_set_aside_skus_does_not_block_the_next_one(tmp_path, mon
         # como la tabla dice «hasta aquí». Sin eso, paginar no terminaría.
         lambda client=None, tier="auto", offset=0: (
             []
-            if offset or tier == "unregistered"
+            if offset or tier in ("unregistered", "sd_probes")
             else [{"sku": "03-4983GY", "model": None, "qty": 0}]
             if tier == "bikes"
             else [{"sku": "98-6860", "model": None, "qty": 0}]
@@ -1679,3 +1679,103 @@ def test_colourless_only_trims_an_as400_stock_number():
     assert colourless("01-0169") is None
     assert colourless("TM-993") is None
     assert colourless("792584991050") is None
+
+
+# ── free S/D numbers: the pool PickD keeps in sd_sku_probes ─────────────────
+# Rafael, 7 Oct 2026: «deberíamos tener al menos 30 que sí pickd ha verificado a
+# través del watchdog en el AS400 que no están».
+
+
+class _ProbeClient(_FakeClient):
+    def __init__(self, due, **kw):
+        super().__init__(bikes=kw.get("bikes", []), parts=[])
+        self.due = due
+        self.rpcs = []
+
+    def rpc(self, name, args):
+        self.rpcs.append((name, args))
+        due = self.due
+        return type("Q", (), {"execute": lambda _s: type("R", (), {"data": due})()})()
+
+
+def test_the_pool_numbers_are_asked_before_the_catalogue():
+    c = _ProbeClient([{"sku": "01-0563"}, {"sku": "01-0564"}], bikes=[{"sku": "03-4039BR"}])
+    rows = sku_enrichment.fetch_candidates(c)
+    assert [r["sku"] for r in rows] == ["01-0563", "01-0564"]
+    assert all(r["sd_probe"] for r in rows)
+    assert c.rpcs[0][0] == "sd_probe_queue"
+    assert "bikes" not in c.calls
+
+
+def test_an_empty_pool_hands_over_to_the_bikes():
+    c = _ProbeClient([], bikes=[{"sku": "03-4039BR"}])
+    assert [r["sku"] for r in sku_enrichment.fetch_candidates(c)] == ["03-4039BR"]
+
+
+class _ProbeWrites:
+    def __init__(self):
+        self.calls = []
+
+    def table(self, name):
+        self.calls.append(("table", name))
+        return self
+
+    def update(self, values):
+        self.calls.append(("update", values))
+        return self
+
+    def eq(self, col, val):
+        self.calls.append(("eq", col, val))
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": []})()
+
+
+def test_a_pool_number_as400_lacks_is_recorded_free_and_never_marked_unknown(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKU_UNKNOWN_PATH", str(tmp_path / "unknown.json"))
+    monkeypatch.setenv("SKU_ENRICH_WRITE", "1")
+    client = _ProbeWrites()
+    monkeypatch.setattr("supabase_client.get_client", lambda: client)
+
+    def missing(sku, driver):
+        raise StockSkuNotFound("no record")
+
+    res = run_sku_step(
+        object(),
+        {"sku": "01-0563", "sd_probe": True},
+        capture_fn=missing,
+        return_fn=lambda d: None,
+        walk_out_fn=lambda d: None,
+    )
+    assert res["action"] == "unknown"
+    assert ("table", "sd_sku_probes") in client.calls
+    update = next(v for k, *v in client.calls if k == "update")[0]
+    assert update["verdict"] == "absent"
+    assert ("eq", "sku", "01-0563") in client.calls
+
+    from sku_enrichment import load_unknown
+
+    # Asked again in 14 days: a number AS400 lacks today may be created there.
+    assert "01-0563" not in load_unknown()
+
+
+def test_a_pool_number_as400_has_is_recorded_taken_and_nothing_is_registered(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKU_UNKNOWN_PATH", str(tmp_path / "unknown.json"))
+    monkeypatch.setenv("SKU_ENRICH_WRITE", "1")
+    client = _ProbeWrites()
+    monkeypatch.setattr("supabase_client.get_client", lambda: client)
+    registered = []
+    monkeypatch.setattr(sku_enrichment, "register_from_as400", lambda *a, **k: registered.append(a))
+
+    res = run_sku_step(
+        object(),
+        {"sku": "03-3933BK", "sd_probe": True},
+        capture_fn=lambda sku, driver: STOCK_DETAIL,
+        return_fn=lambda d: None,
+    )
+    assert res["action"] == "read"
+    update = next(v for k, *v in client.calls if k == "update")[0]
+    assert update["verdict"] == "present"
+    assert update["as400_description"]
+    assert registered == []

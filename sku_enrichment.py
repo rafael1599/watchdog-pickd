@@ -214,6 +214,37 @@ def mark_unknown(sku: str, reason: str = "not_in_as400", client=None) -> None:
         log.warning("SKU %s: no se pudo marcar as400_absent_at (%s)", sku, e)
 
 
+# ── free S/D numbers (PickD's sd_sku_probes) ─────────────────────────────────
+# Rafael, 7 Oct 2026: «deberíamos tener al menos 30 que sí pickd ha verificado a
+# través del watchdog en el AS400 que no están». PickD picks 01- numbers it has
+# never seen (`sd_probe_queue`); this asks AS400 about each one and writes the
+# answer back. Never into sku_metadata — a number nobody registered is not a
+# catalogue row — and never into the local unknown list: an «absent» is asked
+# again after 14 days, because AS400 is where S/D numbers get created.
+
+SD_PROBE_TARGET = int(os.getenv("SD_PROBE_TARGET", "30"))
+
+
+def record_probe(sku: str, verdict: str, description: str | None = None, client=None) -> None:
+    """Write AS400's answer about one pool number: `absent` or `present`."""
+    if not writes_enabled():
+        log.info("SD probe %s WOULD be %s (%r)", sku, verdict, description)
+        # Sin escribir, el número volvería en el hueco siguiente: se aparta.
+        defer_sku(sku, "sd probe not recorded (writes off)")
+        return
+    try:
+        if client is None:
+            from supabase_client import get_client
+
+            client = get_client()
+        client.table("sd_sku_probes").update(
+            {"verdict": verdict, "checked_at": _now(), "as400_description": description or None}
+        ).eq("sku", sku).execute()
+    except Exception as e:  # noqa: BLE001
+        log.warning("SD probe %s: could not record %s (%s)", sku, verdict, e)
+        defer_sku(sku, f"sd probe not recorded: {e}")
+
+
 _backfilled = False
 
 
@@ -840,6 +871,11 @@ def _look_up(
             log.warning(
                 "SKU %s: AS400 says %s, Pickd has is_bike=%s", sku, kind, row.get("is_bike")
             )
+        # A pool number AS400 does have: taken, not free. Nothing is registered.
+        if row.get("sd_probe"):
+            record_probe(sku, "present", description)
+            log.info("SD probe %s: AS400 has it — %r", sku, description)
+            return {"action": "read", "sku": sku, "parsed": parsed, "plan": {}}
         # A SKU with no catalogue row at all is registered, not updated: there
         # is no row to fill in. Same switch as every other write.
         if row.get("unregistered"):
@@ -867,6 +903,10 @@ def _look_up(
         # unless the caller is about to ask again without the colour code.
         if not mark_missing:
             log.info("SKU %s: %s — asking again without the colour before marking", sku, e)
+            return {"action": "unknown", "sku": sku, "why": str(e)}
+        if row.get("sd_probe"):
+            record_probe(sku, "absent")
+            log.info("SD probe %s: AS400 does not have it — free for an S/D", sku)
             return {"action": "unknown", "sku": sku, "why": str(e)}
         mark_unknown(sku)
         log.info("SKU %s: %s — marked, won't be asked again", sku, e)
@@ -973,6 +1013,25 @@ def fetch_candidates(client=None, tier: str = "auto", offset: int = 0) -> list:
             if is_lookupable(r.get("sku") or "")
         ]
 
+    # Then the pool of free S/D numbers PickD wants checked (sd_sku_probes):
+    # a handful, asked once each, so it never holds the catalogue up for long.
+    # The RPC tops the pool up itself and returns everything due, so there is
+    # no second page.
+    if not rows and tier in ("auto", "sd_probes") and offset == 0:
+        try:
+            due = (
+                client.rpc(
+                    "sd_probe_queue",
+                    {"p_target": SD_PROBE_TARGET, "p_limit": QUEUE_FETCH_LIMIT},
+                ).execute()
+            ).data or []
+        except Exception as e:  # noqa: BLE001 — una PickD sin la RPC no para la cola
+            log.debug("sd_probe_queue not available (%s)", e)
+            due = []
+        rows = [
+            {"sku": r["sku"], "sd_probe": True} for r in due if is_lookupable(r.get("sku") or "")
+        ]
+
     # Then the bikes. Same cadence the catalogue work already has with the
     # customers (docs/customer-enrichment.md) — one finite queue at a time, in
     # the order somebody would work them.
@@ -1053,7 +1112,7 @@ def next_sku(client=None) -> dict | None:
     tabla**, no en la primera página.
     """
     unknown = load_unknown()
-    for tier in ("unregistered", "bikes", "parts"):
+    for tier in ("unregistered", "sd_probes", "bikes", "parts"):
         offset = 0
         while offset < QUEUE_MAX_SCAN:
             rows = fetch_candidates(client, tier=tier, offset=offset)
