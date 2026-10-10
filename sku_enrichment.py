@@ -42,7 +42,7 @@ from as400_capture import (
     return_to_order_search,
     return_to_search,
 )
-from parser import parse_stock_inquiry
+from parser import looks_like_frame, parse_stock_inquiry
 
 log = logging.getLogger("pickd-sku-enrichment")
 
@@ -547,10 +547,11 @@ def register_from_as400(sku: str, parsed: dict, client=None) -> dict:
     place, next to the triggers that would otherwise contradict them, and PickD
     owns them. From here it is one call with what the screen said.
 
-    `is_bike` comes from AS400's own `B-Bike/P-Part`, which is the authoritative
-    answer to a question PickD guesses from a two-digit prefix: registered
-    blind, a part in department 03 would be born a bike, with 45 lb and a bike
-    carton that ends up in the FedEx export.
+    `is_bike` comes from AS400's own `B-Bike/P-Part`, with one exception: frames
+    and framekits (`looks_like_frame(description)`). AS400 classifies all frames
+    as 'B' (Bike) because it has no separate frame category, but in PickD a
+    frame must enter as a part (`p_is_bike = False`) so it is not assigned 45 lb
+    and a bike carton (Rafael, 10 oct 2026, bug-037).
     """
     if client is None:
         from supabase_client import get_client
@@ -564,12 +565,16 @@ def register_from_as400(sku: str, parsed: dict, client=None) -> dict:
         return {"action": "skipped", "sku": sku, "why": "the screen carried no description"}
 
     kind = parsed.get("kind")
+    if looks_like_frame(description):
+        p_is_bike = False
+    else:
+        p_is_bike = (kind == "B") if kind in ("B", "P") else None
     res = client.rpc(
         "register_sku_from_as400",
         {
             "p_sku": sku,
             "p_item_name": description,
-            "p_is_bike": (kind == "B") if kind in ("B", "P") else None,
+            "p_is_bike": p_is_bike,
             "p_location": "UNKNOWN",
             "p_warehouse": "LUDLOW",
             "p_as400_description": description,
@@ -865,9 +870,18 @@ def _look_up(
         # the disagreements and change nothing — enough of them and it earns a
         # PRD of its own (Q6). For a SKU with no row yet there is no guess to
         # disagree with: AS400's answer goes straight in.
+        # Un cuadro con kind B y Pickd is_bike=False NO es discrepancia: el AS400
+        # no tiene categoría de cuadros y Pickd los clasifica deliberadamente
+        # como partes (Rafael, 10 oct 2026, bug-037).
         kind = parsed.get("kind")
         description = (parsed.get("description") or "").strip()
-        if kind and row.get("is_bike") is not None and (kind == "B") != bool(row.get("is_bike")):
+        is_frame = looks_like_frame(description) or looks_like_frame(row.get("as400_description"))
+        if (
+            kind
+            and row.get("is_bike") is not None
+            and (kind == "B") != bool(row.get("is_bike"))
+            and not (kind == "B" and not row.get("is_bike") and is_frame)
+        ):
             log.warning(
                 "SKU %s: AS400 says %s, Pickd has is_bike=%s", sku, kind, row.get("is_bike")
             )

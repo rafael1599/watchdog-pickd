@@ -1020,6 +1020,105 @@ def test_the_alta_sends_as400s_own_bike_or_part_answer(monkeypatch):
     assert sent["p_as400_snapshot"]["on_hand"] == {"NJ": 3}
 
 
+def test_the_alta_marks_frame_as_part_even_if_as400_says_bike():
+    # El AS400 clasifica los cuadros como 'B-Bike' (11 cuadros en prod, ningún otro
+    # campo los distingue de una bici completa). En PickD un cuadro debe nacer como
+    # parte (p_is_bike = False) para evitar la caja de bici y las 45 lb (Rafael, 10 oct 2026).
+    import sku_enrichment
+
+    sent = {}
+
+    class _Rpc:
+        def execute(self):
+            return type("R", (), {"data": {"action": "registered"}})()
+
+    class _Client:
+        def rpc(self, name, args):
+            sent.update({"name": name, **args})
+            return _Rpc()
+
+    out = sku_enrichment.register_from_as400(
+        "03-3666BL",
+        {"description": "PORTAL C2 FRAME 15 2026 BLUE", "kind": "B", "on_hand": {"NJ": 2}},
+        client=_Client(),
+    )
+    assert out["action"] == "registered"
+    assert sent["name"] == "register_sku_from_as400"
+    assert sent["p_is_bike"] is False
+
+
+def test_the_alta_preserves_is_bike_true_for_regular_bike():
+    # Una bicicleta completa (sin palabra FRAME) con kind B sigue enviando p_is_bike = True.
+    import sku_enrichment
+
+    sent = {}
+
+    class _Rpc:
+        def execute(self):
+            return type("R", (), {"data": {"action": "registered"}})()
+
+    class _Client:
+        def rpc(self, name, args):
+            sent.update({"name": name, **args})
+            return _Rpc()
+
+    out = sku_enrichment.register_from_as400(
+        "03-3684BR",
+        {"description": "TRAIL X1 17 GLOSS BLACK", "kind": "B", "on_hand": {"NJ": 4}},
+        client=_Client(),
+    )
+    assert out["action"] == "registered"
+    assert sent["name"] == "register_sku_from_as400"
+    assert sent["p_is_bike"] is True
+
+
+def test_discrepancy_warning_skipped_for_frames(caplog, monkeypatch):
+    # Un cuadro con kind B en AS400 e is_bike=False en PickD NO es discrepancia (bug-037).
+    # Una bici normal con kind B e is_bike=False en PickD SÍ dispara el aviso.
+    import logging
+
+    import sku_enrichment
+
+    monkeypatch.setattr(sku_enrichment, "keep_screen", lambda *a, **kw: False)
+    monkeypatch.setattr(sku_enrichment, "writes_enabled", lambda: False)
+
+    # Caso 1: Cuadro (no debe advertir)
+    row_frame = {"sku": "03-3666BL", "is_bike": False}
+    with caplog.at_level(logging.WARNING):
+        sku_enrichment._look_up(
+            driver=None,
+            row=row_frame,
+            sku="03-3666BL",
+            started=0,
+            capture_fn=lambda asked, driver, **kw: "",
+            parse_fn=lambda screen: {
+                "sku": "03-3666BL",
+                "description": "PORTAL C2 FRAME 15 2026 BLUE",
+                "kind": "B",
+            },
+        )
+    assert not any("AS400 says B, Pickd has is_bike=False" in r.message for r in caplog.records)
+
+    caplog.clear()
+
+    # Caso 2: Bici normal (sí debe advertir)
+    row_bike = {"sku": "03-3684BR", "is_bike": False}
+    with caplog.at_level(logging.WARNING):
+        sku_enrichment._look_up(
+            driver=None,
+            row=row_bike,
+            sku="03-3684BR",
+            started=0,
+            capture_fn=lambda asked, driver, **kw: "",
+            parse_fn=lambda screen: {
+                "sku": "03-3684BR",
+                "description": "TRAIL X1 17 GLOSS BLACK",
+                "kind": "B",
+            },
+        )
+    assert any("AS400 says B, Pickd has is_bike=False" in r.message for r in caplog.records)
+
+
 def test_the_alta_refuses_a_screen_with_no_name():
     # A row called nothing helps nobody find a box, and the RPC would reject it.
     import sku_enrichment

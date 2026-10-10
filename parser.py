@@ -300,6 +300,26 @@ def parse_stock_inquiry(text: str) -> Dict:
     }
 
 
+# ── DETECCIÓN DE CUADROS (Rafael, 10 oct 2026) ───────────────────────────────
+# El AS400 sólo dice 'B' (Bike) o 'P' (Part) y clasifica los cuadros como 'B'.
+# Ningún otro campo de la pantalla (proveedor, comisión, precio, unidad) los
+# distingue de una bici completa. La única pista fiable en el AS400 es la
+# palabra FRAME en la descripción: un cuadro debe entrar como parte (is_bike=False),
+# no como bici (45 lb y caja de bici). Regla canónica compartida con PickD (bug-037).
+FRAME_WORD_PATTERN = re.compile(r"\b(FRAME|FRAMEKIT|FRAMESET|FRAMES|FRAMEKITS)\b", re.IGNORECASE)
+
+
+def looks_like_frame(text: Optional[str]) -> bool:
+    """Devuelve True si la descripción representa un cuadro o kit de cuadro.
+
+    Rafael, 10 oct 2026: el AS400 no tiene otro campo que lo distinga de una bici;
+    un cuadro debe nacer como parte (is_bike=False). None o vacío devuelve False.
+    """
+    if not text:
+        return False
+    return bool(FRAME_WORD_PATTERN.search(text))
+
+
 def parse_order_number(text: str) -> Optional[str]:
     """
     Extract order number from text. Position-independent regex.
