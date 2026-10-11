@@ -88,6 +88,11 @@ held; 8 días → archived) porque antes sólo corrían cuando alguien abría la
 
 ## Actualizar: un push es el deploy (8 sep 2026)
 
+> **Desde el 11 oct 2026 a `main` sólo se llega por PR: nunca push directo.** El deploy ahora
+> es el merge del PR (Bay 2 lo ve igual, sondea `origin/main`). Lo rechaza `.githooks/pre-push`,
+> que activa el `SessionStart` de `.claude/settings.json` (`core.hooksPath=.githooks`); en un
+> clon a mano sin Claude, correr una vez `git config core.hooksPath .githooks`.
+
 `auto_update.py` mira `origin` cada 5 minutos desde Bay 2 y, cuando es seguro, corre el
 mismo `scripts/update.sh` que el botón ⟳. **Pregunta esta máquina; GitHub no llama.**
 
