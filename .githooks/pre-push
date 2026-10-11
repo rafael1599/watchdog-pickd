@@ -1,0 +1,14 @@
+#!/bin/sh
+# Todo por PR (2026-10-11): nada se pushea a main/master, ni a mano ni desde un agente.
+# Vive en el repo; lo activa `core.hooksPath=.githooks`, que el SessionStart de .claude/settings.json
+# setea al abrir Claude. Clon a mano sin Claude: `git config core.hooksPath .githooks` una vez.
+# git pasa por stdin una línea por ref: <local ref> <local sha> <remote ref> <remote sha>.
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main | refs/heads/master)
+      echo "✗ pre-push: push a ${remote_ref#refs/heads/} bloqueado — todo va por rama + PR." >&2
+      echo "  git switch -c tipo/descripcion && git push -u origin HEAD && gh pr create" >&2
+      exit 1
+      ;;
+  esac
+done
