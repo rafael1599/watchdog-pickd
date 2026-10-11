@@ -478,3 +478,41 @@ def test_restart_failure_recorded_when_restart_actually_fails():
 
     # Aquí sí se llamó a restart y falló -> backoff activo
     assert is_restart_backing_off() is True
+
+
+# ── Defecto 3: Parseo no entendible da not_found sin Cmd+N ────────────────────
+
+
+def test_step_unparseable_capture_yields_not_found_without_restart():
+    """Defecto 3: captura sin excepción pero con parse sin orden o sin líneas da not_found sin Cmd+N."""
+
+    class FakeDriverWithRestart:
+        def new_window(self):
+            pass
+
+    restarted = []
+
+    def fake_restart(drv, dead_screen=None):
+        restarted.append(True)
+
+    def cap(n, drv):
+        return "GARBLED TEXT WITHOUT ORDER"
+
+    def stub_preview(text):
+        return {
+            "order_number": None,
+            "item_count": 0,
+            "is_last_page": False,
+            "total_mismatch": False,
+        }
+
+    drv = FakeDriverWithRestart()
+    r = auto_scanner.run_scan_step(
+        drv,
+        start=880112,
+        capture_fn=cap,
+        preview_fn=stub_preview,
+        restart_fn=fake_restart,
+    )
+    assert r == {"action": "not_found", "number": "880112"}
+    assert len(restarted) == 0

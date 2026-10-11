@@ -563,9 +563,10 @@ def test_step_restarts_session_when_capture_raises_session_closed():
     assert scanned_store.get("880112") is not None
 
 
-def test_step_restarts_session_when_captured_order_number_mismatches():
-    # If a capture succeeds but the text does NOT show the order number that was entered
-    # (e.g. stale screen or dropped keystrokes), run_scan_step restarts the AS400 and retries.
+def test_step_unparseable_capture_yields_not_found_without_restart():
+    """Defecto 3: una captura que el parser no entiende (sin número o sin líneas)
+    no es una sesión muerta: da not_found y NO dispara Cmd+N."""
+
     class FakeDriverWithRestart:
         def new_window(self):
             pass
@@ -575,27 +576,26 @@ def test_step_restarts_session_when_captured_order_number_mismatches():
     def fake_restart(drv, dead_screen=None):
         restarted.append(True)
 
-    calls = []
-
     def cap(n, drv):
-        calls.append(n)
-        if len(calls) == 1:
-            # Stale screen showing a previous order 880110
-            return "ORDER 880110 END OF ORDER"
-        # Second call returns the real order
-        return f"ORDER {n} END OF ORDER"
+        return "GARBLED TEXT WITHOUT ORDER"
+
+    def stub_preview(text):
+        return {
+            "order_number": None,
+            "item_count": 0,
+            "is_last_page": False,
+            "total_mismatch": False,
+        }
 
     r = auto_scanner.run_scan_step(
         FakeDriverWithRestart(),
         start=880112,
         capture_fn=cap,
-        preview_fn=_preview,
+        preview_fn=stub_preview,
         restart_fn=fake_restart,
     )
-    assert r == {"action": "captured", "number": "880112"}
-    assert len(restarted) == 1
-    assert len(calls) == 2
-    assert scanned_store.get("880112") is not None
+    assert r == {"action": "not_found", "number": "880112"}
+    assert len(restarted) == 0
 
 
 def test_step_unavailable_when_restart_fails():
