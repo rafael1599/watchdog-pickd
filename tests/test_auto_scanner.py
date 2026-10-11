@@ -14,7 +14,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import auto_scanner  # noqa: E402
 import scanned_store  # noqa: E402
-from as400_capture import AS400Disconnected, CaptureError, OrderNotFound  # noqa: E402
+from as400_capture import (  # noqa: E402
+    AS400Disconnected,
+    AS400SessionClosed,
+    CaptureError,
+    OrderNotFound,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -514,3 +519,94 @@ def test_a_step_that_crashes_before_naming_its_action_does_not_kill_the_loop(mon
     antes, despues = src.split("        try:", 1)
     assert 'action = "error"' in antes, "action tiene que estar ligada antes del try"
     assert "_paced(action" in despues
+
+
+def test_step_restarts_session_when_capture_raises_session_closed():
+    # When capture_order raises AS400SessionClosed, run_scan_step restarts the AS400
+    # and retries the capture, advancing and capturing the order.
+    class FakeDriverWithRestart:
+        def new_window(self):
+            pass
+
+    restarted = []
+
+    def fake_restart(drv, dead_screen=None):
+        restarted.append(True)
+
+    calls = []
+
+    def cap(n, drv):
+        calls.append(n)
+        if len(calls) == 1:
+            raise AS400SessionClosed("Session died on order entry")
+        return f"ORDER {n} END OF ORDER"
+
+    r = auto_scanner.run_scan_step(
+        FakeDriverWithRestart(),
+        start=880112,
+        capture_fn=cap,
+        preview_fn=_preview,
+        restart_fn=fake_restart,
+    )
+    assert r == {"action": "captured", "number": "880112"}
+    assert len(restarted) == 1
+    assert len(calls) == 2  # First failed, retried after restart
+    assert scanned_store.get("880112") is not None
+
+
+def test_step_restarts_session_when_captured_order_number_mismatches():
+    # If a capture succeeds but the text does NOT show the order number that was entered
+    # (e.g. stale screen or dropped keystrokes), run_scan_step restarts the AS400 and retries.
+    class FakeDriverWithRestart:
+        def new_window(self):
+            pass
+
+    restarted = []
+
+    def fake_restart(drv, dead_screen=None):
+        restarted.append(True)
+
+    calls = []
+
+    def cap(n, drv):
+        calls.append(n)
+        if len(calls) == 1:
+            # Stale screen showing a previous order 880110
+            return "ORDER 880110 END OF ORDER"
+        # Second call returns the real order
+        return f"ORDER {n} END OF ORDER"
+
+    r = auto_scanner.run_scan_step(
+        FakeDriverWithRestart(),
+        start=880112,
+        capture_fn=cap,
+        preview_fn=_preview,
+        restart_fn=fake_restart,
+    )
+    assert r == {"action": "captured", "number": "880112"}
+    assert len(restarted) == 1
+    assert len(calls) == 2
+    assert scanned_store.get("880112") is not None
+
+
+def test_step_unavailable_when_restart_fails():
+    # If the restart itself or the retry fails, run_scan_step returns unavailable
+    class FakeDriverWithRestart:
+        def new_window(self):
+            pass
+
+    def broken_restart(drv, dead_screen=None):
+        raise AS400Disconnected("Cannot connect to host")
+
+    def cap(n, drv):
+        raise AS400SessionClosed("Session died")
+
+    r = auto_scanner.run_scan_step(
+        FakeDriverWithRestart(),
+        start=880112,
+        capture_fn=cap,
+        preview_fn=_preview,
+        restart_fn=broken_restart,
+    )
+    assert r == {"action": "unavailable", "number": "880112"}
+    assert scanned_store.get("880112") is None
