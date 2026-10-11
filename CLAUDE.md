@@ -2,6 +2,14 @@
 
 Daemon que monitorea una carpeta (`~/send-to-pickd/`) por archivos PDF de ordenes de compra, extrae el texto con pdfplumber, parsea los datos (numero de orden, cliente, items/SKUs), y los inserta en Supabase como picking lists para la app web de PickD.
 
+> **El watcher reinicia solo la sesión del AS400 (11 oct 2026, decisión de Rafael).** Si la sesión del AS400
+> se cae o congela (pantalla de búsqueda vacía, Sign On, o desconexión), `auto_scanner` abre una ventana nueva
+> con `Cmd+N`, cierra la muerta detrás (`Ctrl+Shift+Tab` + `Cmd+W` + `Enter`), se reautentica vía `bootstrap_session`
+> y reintenta la captura (`AS400_AUTO_RESTART=1` por defecto; `0` desactiva). Sujeto a una **única regla de inactividad
+> de 60 s** (`AS400_RESTART_IDLE_SEC`, que también gobierna `hard_restart`) y `operator_sentinel.hands_off()`. Si un reinicio
+> falla, aplica espera exponencial creciente (4, 8, 16, 32, 64 min tope; un éxito vuelve la cuenta a 4). Cada intento se
+> registra en `as400_screens` (`classified = 'session_restart'`).
+
 > **El auto-deploy se paró solo, y así se ve (10 sep 2026).** Un push es el deploy
 > (`auto_update.py`), pero `update.sh` hace `mkdir -p logs`, `logs/` no estaba en `.gitignore` y el
 > gate leía `git status --porcelain` — que cuenta lo no trackeado. O sea: **el primer auto-update
