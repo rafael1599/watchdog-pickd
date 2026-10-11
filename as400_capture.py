@@ -10,6 +10,8 @@ The keystroke/clipboard layer (MochaDriver) only works on macOS. The capture LOO
 (capture_order) is pure and testable with any driver implementing the same interface.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import re
@@ -306,6 +308,16 @@ def _screen_order_number(text: str):
     return m.group(1) if m else None
 
 
+def _is_empty_order_search_screen(text: str) -> bool:
+    """True if the screen is the order search form with an empty order number field.
+
+    Identified by the Alpha Search / Invoice fields of the search form combined
+    with no digits in the Order Number field.
+    """
+    norm = _alnum(text)
+    return "ALPHASEARCH" in norm and _screen_order_number(text) is None
+
+
 def _is_order_header_screen(text: str, order_number) -> bool:
     """True when the screen is ALREADY the header (page 1) of exactly this order.
 
@@ -356,6 +368,15 @@ def _reuse_header_default() -> bool:
     Bay 2 machine can switch it off without a deploy: AS400_REUSE_HEADER=0.
     """
     return os.getenv("AS400_REUSE_HEADER", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _skip_precheck_default() -> bool:
+    """Whether capture_order skips the initial screen read before typing F6+number.
+
+    Auto-scanner passes skip_precheck=True explicitly. Can also be enabled via
+    AS400_SKIP_PRECHECK=1.
+    """
+    return os.getenv("AS400_SKIP_PRECHECK", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _await_changed_page(read_fn, prev_norm, *, settled_reads, poll, deadline, on_stale=None):
@@ -421,6 +442,12 @@ class AS400Disconnected(CaptureError):
 
 class AS400ManualLoginRequired(CaptureError):
     """The screen is unrecognized or not logged in — a human must log in first."""
+
+
+class AS400SessionClosed(CaptureError):
+    """The order number entered did not appear on screen or the session closed.
+    Signals that the AS400 session closed, dropped, or was left on a dead window,
+    requiring a fresh window (Cmd+N) and re-login."""
 
 
 class StockSkuNotFound(CaptureError):
@@ -759,6 +786,11 @@ class MochaDriver:
             subprocess.run(["open", "-b", target], check=True)
         else:
             subprocess.run(["open", "-a", target], check=True)
+
+    def new_window(self) -> None:
+        """Cmd+N — open a fresh session window in Mocha."""
+        self.focus()
+        self._osascript('tell application "System Events" to keystroke "n" using command down')
 
     def close_window(self) -> None:
         """Cmd+W, then ENTER. Both, always, in ONE script.
@@ -1276,7 +1308,7 @@ def hard_restart(driver, idle_fn=None) -> bool:
     return True
 
 
-def _close_the_dead_window(driver) -> None:
+def _close_the_dead_window(driver, dead_screen: str | None = None) -> None:
     """Ctrl+Shift+Tab back to the dead window and close it. Best effort.
 
     VERIFIES before closing, like everything else that drives this terminal. If
@@ -1293,7 +1325,16 @@ def _close_the_dead_window(driver) -> None:
         log.info("AS400 recovery: couldn't reach the old window to close it (%s)", e)
         return
 
-    if not _is_message_info_screen(screen):
+    is_dead = _is_message_info_screen(screen)
+    if not is_dead and dead_screen is not None:
+        if _norm_screen(screen) == _norm_screen(dead_screen):
+            is_dead = True
+    if not is_dead:
+        state = classify_screen(screen)
+        if state in (STATE_DISCONNECTED,):
+            is_dead = True
+
+    if not is_dead:
         log.info(
             "AS400 recovery: the window behind isn't the dead one — leaving it alone (state=%s)",
             classify_screen(screen),
@@ -1313,6 +1354,34 @@ def _close_the_dead_window(driver) -> None:
         log.info("AS400 recovery: the dead window is closed")
     except Exception as e:
         log.warning("AS400 recovery: couldn't close the dead window (%s) — it stays behind", e)
+
+
+def restart_as400_session(
+    driver,
+    dead_screen: str | None = None,
+    launch_wait: float = LAUNCH_WAIT,
+    step_wait: float = 0.6,
+) -> str:
+    """Recover from a closed, dropped or dead AS400 session.
+
+    Opens a fresh session window (Cmd+N), closes the dead window behind it,
+    and logs back in via bootstrap_session until reaching the order screen.
+    Returns the resulting screen state (e.g. STATE_ORDER_SEARCH).
+    """
+    log.warning("AS400 recovery: restarting session — opening fresh window (Cmd+N)")
+    try:
+        driver.new_window()
+        time.sleep(_env_float("AS400_NEW_WINDOW_WAIT", 3.0))
+    except Exception as e:
+        log.warning("AS400 recovery: Cmd+N failed (%s)", e)
+        if quit_and_relaunch_enabled():
+            _quit_and_relaunch(driver)
+        else:
+            raise
+
+    _close_the_dead_window(driver, dead_screen=dead_screen)
+    log.info("AS400 recovery: logging into the new session")
+    return bootstrap_session(driver, launch_wait=launch_wait, step_wait=step_wait)
 
 
 def _quit_and_relaunch(driver) -> bool:
@@ -1613,6 +1682,7 @@ def capture_order(
     poll_interval=None,
     refresh_timeout=None,
     reuse_header=None,
+    skip_precheck: bool = False,
 ) -> str:
     """
     Capture a full order from the AS400 screen into one text blob.
@@ -1627,6 +1697,8 @@ def capture_order(
                       independent of the environment.
         max_pages:    safety cap on item pages to avoid an infinite loop if the
                       END OF ORDER marker never appears.
+        skip_precheck: If True, skip the initial copy_screen() before typing F6+number.
+                      Saves 1 full screen capture on every scan in auto_scanner.
 
     Returns the concatenated text of the header page + all item pages.
     Raises CaptureError if END OF ORDER is not seen within max_pages.
@@ -1709,39 +1781,45 @@ def capture_order(
     # already, in the same script. Calling both meant two Apple events asking the
     # same question at the start of every capture.
 
-    # Verify the screen BEFORE driving it: never type an order number into a
-    # disconnected or unrecognized view (that's how a dead session silently
-    # swallowed keystrokes and still looked "fine").
-    screen = read_screen()
-    state = classify_screen(screen)
-    if state == STATE_DISCONNECTED:
-        raise AS400Disconnected(
-            "The AS400 isn't connected. Log in manually in Mocha, then try again."
-        )
-    if state not in _READY_STATES:
-        raise AS400ManualLoginRequired(
-            "The AS400 isn't on the order-search screen (not logged in or an "
-            "unknown view). Log in manually, then try again."
-        )
+    header = None
+    should_precheck = not skip_precheck and not _skip_precheck_default()
+    if should_precheck:
+        # Verify the screen BEFORE driving it: never type an order number into a
+        # disconnected or unrecognized view (that's how a dead session silently
+        # swallowed keystrokes and still looked "fine").
+        screen = read_screen()
+        state = classify_screen(screen)
+        if state == STATE_DISCONNECTED:
+            raise AS400Disconnected(
+                "The AS400 isn't connected. Log in manually in Mocha, then try again."
+            )
+        if state not in _READY_STATES:
+            raise AS400ManualLoginRequired(
+                "The AS400 isn't on the order-search screen (not logged in or an "
+                "unknown view). Log in manually, then try again."
+            )
 
-    if reuse_header is None:
-        reuse_header = _reuse_header_default()
+        if reuse_header is None:
+            reuse_header = _reuse_header_default()
 
-    if reuse_header and _is_order_header_screen(screen, order_number):
-        # The screen we just read IS this order's header — the operator looked the
-        # order up in Mocha before hitting capture, or a previous attempt left it
-        # there. Pressing F6 and re-typing the number walks BACK to the search
-        # screen to arrive at the page already in front of us: a third of the
-        # capture, and two keystrokes into a terminal shared with a person. Carry
-        # on from here; every guard below still runs on this same text (VOID,
-        # message screen, invalid number, wrong view), so nothing is skipped —
-        # only the round trip is.
-        header = screen
-        log.info(
-            "AS400 #%s already on screen — continuing from it (no F6 / re-type)",
-            order_number,
-        )
+        if reuse_header and _is_order_header_screen(screen, order_number):
+            # The screen we just read IS this order's header — the operator looked the
+            # order up in Mocha before hitting capture, or a previous attempt left it
+            # there. Pressing F6 and re-typing the number walks BACK to the search
+            # screen to arrive at the page already in front of us: a third of the
+            # capture, and two keystrokes into a terminal shared with a person. Carry
+            # on from here; every guard below still runs on this same text (VOID,
+            # message screen, invalid number, wrong view), so nothing is skipped —
+            # only the round trip is.
+            header = screen
+            log.info(
+                "AS400 #%s already on screen — continuing from it (no F6 / re-type)",
+                order_number,
+            )
     else:
+        screen = ""
+
+    if header is None:
         # Page 1: customer header. Typing the last digit surfaces it automatically.
         # F6 opens a fresh order search before each new order; it, the number and
         # the read that follows are one script when the driver allows it.
@@ -1799,12 +1877,32 @@ def capture_order(
         )
 
     # Guard: if this isn't an order view we're on the wrong screen (a menu, etc.)
-    # or the order doesn't exist. Bail out now instead of pressing F5 and looping
-    # through pages that will never show END OF ORDER.
+    # or the session disconnected/closed. Bail out immediately instead of pressing F5.
     if not _looks_like_order_screen(header):
-        raise OrderNotFound(
-            f"The screen isn't an order inquiry (wrong view, or order "
-            f"{order_number} doesn't exist). Go to order search (F7 → 3) and try again."
+        st = classify_screen(header)
+        if st == STATE_DISCONNECTED:
+            raise AS400Disconnected(f"The AS400 disconnected while entering order {order_number}.")
+        if st == STATE_LOGIN:
+            raise AS400SessionClosed(
+                f"The AS400 session closed (Sign On screen) while entering order {order_number}."
+            )
+        raise AS400SessionClosed(
+            f"Order {order_number} did not open an order screen (state={st}); "
+            "the AS400 session may have closed."
+        )
+
+    # If the order search screen is still empty or shows a different order number,
+    # the entered order number did not appear — session likely died or closed.
+    if _is_empty_order_search_screen(header):
+        raise AS400SessionClosed(
+            f"Order {order_number} did not appear in the order search screen after entry "
+            "(field is empty); the AS400 session may have closed."
+        )
+    scr_num = _screen_order_number(header)
+    if scr_num is not None and scr_num != str(order_number).strip():
+        raise AS400SessionClosed(
+            f"Order {order_number} did not appear on screen after entry (screen shows #{scr_num}); "
+            "the AS400 session may have closed."
         )
 
     # The last page we acted on. We only page forward once the screen differs from

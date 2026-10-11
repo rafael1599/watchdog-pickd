@@ -40,6 +40,7 @@ Daemon que monitorea una carpeta (`~/send-to-pickd/`) por archivos PDF de ordene
 - Deteccion de duplicados via hash SHA-256
 - Creacion, append y reopen de ordenes (**combinar NO**: es decisión de PickD, con una persona confirmando)
 - Resolucion de SKUs contra inventario (con fuzzy matching)
+- Auto-reinicio de sesión AS400 (`Cmd+N` + `bootstrap_session`) si la sesión expira o el número tecleado no aparece
 - Auto-start via launchd (macOS)
 
 ## Como correr

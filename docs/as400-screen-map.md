@@ -216,6 +216,23 @@ apagado), sólo si `Cmd+N` falla: cerrar puede sacar un diálogo —y un diálog
 events posteriores, que cambiaría un terminal atascado por uno que nadie puede manejar— y supone que
 Mocha reconecta solo al abrirse, que nadie ha comprobado.
 
+### 2.10b Sesión cerrada al teclear orden → auto-reinicio (`Cmd+N` + login)
+*Evidencia:* `tests/test_as400_capture.py` (`AS400SessionClosed`, `restart_as400_session`) y `tests/test_auto_scanner.py`.
+**Qué pasa:** a veces la sesión del AS400 se cae o se cierra sola. Al escribir el número de orden (`F6` + número), el número recién puesto **no aparece** en la pantalla:
+- La pantalla queda en la búsqueda con el campo vacío (`_is_empty_order_search_screen`), sin ser un error de orden inválida.
+- La pantalla cae a `Sign On` (`STATE_LOGIN`), `Disconnected` (`STATE_DISCONNECTED`), o menú.
+- O la pantalla muestra otro número distinto al que se acaba de tipear (`_screen_order_number(header) != order_number`).
+
+**Optimización crítica (ahorro de capturas):**
+- **Cero capturas intermedias / nunca pasa a F5:** Si la pantalla leída tras teclear la orden no muestra el número pedido, **se aborta en ese mismo instante** con `AS400SessionClosed`. No se pulsa `F5`, no se pasa a la pantalla de ítems, ni se buclea en páginas vacías (evitando de 1 a 25 capturas inútiles de 1.1s cada una en Bay 2).
+- **`skip_precheck=True` en auto-scanner:** El escáner automático omite la lectura previa antes de teclear `F6 + número`. Envía `F6` + número + lectura en un solo script, pasando de 3 lecturas a 2 por orden normal, y detectando una desconexión en **1 sola lectura**.
+
+**Qué hacemos al detectar la desconexión:**
+1. Abren una ventana nueva con `Cmd+N` (`driver.new_window()`).
+2. Cierran la ventana muerta anterior (`Ctrl+Shift+Tab` + `Cmd+W` + `Enter`).
+3. Ejecutan `bootstrap_session` para autenticarse de nuevo (`ROMAN` → `STOU` → opción 3) hasta llegar a la pantalla de búsqueda de órdenes.
+4. Reintentan la captura de la orden automáticamente sin detener el escaneo continuo.
+
 ### 2.11 `C U S T O M E R   D I S P L A Y` → `STATE_CUSTOMER_DISPLAY`
 *Evidencia:* `tests/test_as400_capture.py` (`CUSTOMER_DISPLAY_SCREEN`, capturada por Rafael el 1 sep
 2026). Opción **01** del menú. **Aquí está el teléfono** (§5b).

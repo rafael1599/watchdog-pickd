@@ -43,6 +43,7 @@ import sku_enrichment  # noqa: E402
 from as400_capture import (  # noqa: E402
     AS400Disconnected,
     AS400ManualLoginRequired,
+    AS400SessionClosed,
     CaptureError,
     MochaDriver,
     OrderVoidSkip,
@@ -599,7 +600,7 @@ def capture():
     except AS400Disconnected as e:
         auto_scanner.note_as400(False)
         return jsonify({"error": str(e), "state": "disconnected"}), 503
-    except AS400ManualLoginRequired as e:
+    except (AS400ManualLoginRequired, AS400SessionClosed) as e:
         auto_scanner.note_as400(False)
         return jsonify({"error": str(e), "state": "needs_login"}), 409
     except OrderVoidSkip:
