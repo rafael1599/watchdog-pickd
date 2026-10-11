@@ -12,7 +12,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import as400_capture  # noqa: E402
 import auto_scanner  # noqa: E402
+import operator_sentinel  # noqa: E402
 import scanned_store  # noqa: E402
 from as400_capture import (  # noqa: E402
     AS400Disconnected,
@@ -26,6 +28,13 @@ from as400_capture import (  # noqa: E402
 def tmp_store(tmp_path, monkeypatch):
     monkeypatch.setenv("SCANNED_STORE_PATH", str(tmp_path / "scanned.json"))
     monkeypatch.setenv("SCAN_CURSOR_PATH", str(tmp_path / "scan_cursor"))
+    operator_sentinel._reset_for_tests()
+    as400_capture._reset_restart_backoff_for_tests()
+    monkeypatch.setattr(auto_scanner, "_last_operator_input", None)
+    monkeypatch.setattr(as400_capture, "_system_idle_seconds", lambda: 120.0)
+    yield
+    operator_sentinel._reset_for_tests()
+    as400_capture._reset_restart_backoff_for_tests()
 
 
 def _preview(text):

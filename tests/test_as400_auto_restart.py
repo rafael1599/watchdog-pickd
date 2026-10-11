@@ -32,10 +32,15 @@ def _reset_state(tmp_path, monkeypatch):
     monkeypatch.setenv("SCAN_CURSOR_PATH", str(tmp_path / "scan_cursor"))
     as400_capture._reset_restart_backoff_for_tests()
     operator_sentinel._reset_for_tests()
+    monkeypatch.setattr(auto_scanner, "_last_operator_input", None)
+    monkeypatch.setattr(as400_capture, "_system_idle_seconds", lambda: 120.0)
     monkeypatch.setattr(as400_capture, "_last_hard_restart", 0.0)
     monkeypatch.delenv("AS400_AUTO_RESTART", raising=False)
     monkeypatch.delenv("AS400_RESTART_IDLE_SEC", raising=False)
     monkeypatch.delenv("AS400_HARD_RESTART_IDLE_SEC", raising=False)
+    yield
+    operator_sentinel._reset_for_tests()
+    as400_capture._reset_restart_backoff_for_tests()
 
 
 def _preview(text):
@@ -139,8 +144,11 @@ def test_inactivity_guard_thresholds():
 def test_inactivity_guard_sentinel_blocks():
     # Even if idle is large (1000s), if operator sentinel is active (hands off), no restart
     operator_sentinel.on_signal("MOUSE")
-    assert operator_sentinel.hands_off() is True
-    assert operator_allows_restart(idle_fn=lambda: 1000.0) is False
+    try:
+        assert operator_sentinel.hands_off() is True
+        assert operator_allows_restart(idle_fn=lambda: 1000.0) is False
+    finally:
+        operator_sentinel._reset_for_tests()
 
 
 def test_step_respects_inactivity_guard(monkeypatch):
@@ -253,7 +261,10 @@ def test_hard_restart_uses_unified_60s_rule(monkeypatch):
     # Sentinel activo → no reinicia
     monkeypatch.setattr(as400_capture, "_last_hard_restart", 0.0)
     operator_sentinel.on_signal("MOUSE")
-    assert hard_restart(d, idle_fn=lambda: 100.0) is False
+    try:
+        assert hard_restart(d, idle_fn=lambda: 100.0) is False
+    finally:
+        operator_sentinel._reset_for_tests()
 
 
 # ── Registration in as400_screens ─────────────────────────────────────────────
