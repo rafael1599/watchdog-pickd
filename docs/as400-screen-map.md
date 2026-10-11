@@ -205,8 +205,8 @@ vuelve adelante con `Ctrl+Tab`. Cerrarle una ventana a alguien por ordenar serí
 peor que dejar una muerta detrás.
 
 Automatizado y **apagado por defecto** (`AS400_HARD_RESTART`), no porque sea arriesgado sino para
-que la primera vez que dispare haya alguien delante. Se niega si el Mac lleva menos de 5 minutos sin
-tocarse (la ventana nueva roba el foco, y el foco robado a media orden interrumpe a una persona) y
+que la primera vez que dispare haya alguien delante. Se niega si el Mac lleva menos de 60 s sin
+tocarse o si el centinela del operador dice manos fuera (regla unificada de inactividad de 1 min, Rafael 11 oct 2026; antes 5 min) y
 más de una vez por episodio. **No inicia sesión**: de eso se encarga `bootstrap_session`, que
 verifica cada pantalla, así que una recuperación que aterrice donde no debe acaba en un honesto
 «hace falta una persona» y no en un bucle.
@@ -215,6 +215,29 @@ Como último recurso de verdad queda **cerrar Mocha y reabrirlo** (`AS400_HARD_R
 apagado), sólo si `Cmd+N` falla: cerrar puede sacar un diálogo —y un diálogo bloquea todos los Apple
 events posteriores, que cambiaría un terminal atascado por uno que nadie puede manejar— y supone que
 Mocha reconecta solo al abrirse, que nadie ha comprobado.
+
+### 2.10b Sesión cerrada al teclear orden → auto-reinicio (`Cmd+N` + login) (decisión de Rafael, 11 oct 2026)
+*Evidencia:* `tests/test_as400_capture.py` (`AS400SessionClosed`, `restart_as400_session`), `tests/test_auto_scanner.py` y `tests/test_as400_auto_restart.py`.
+**Qué pasa:** a veces la sesión del AS400 se cae o se cierra sola. Al escribir el número de orden (`F6` + número), el número recién puesto **no aparece** en la pantalla:
+- La pantalla queda en la búsqueda con el campo vacío (`_is_empty_order_search_screen`), sin ser un error de orden inválida.
+- La pantalla cae a `Sign On` (`STATE_LOGIN`), `Disconnected` (`STATE_DISCONNECTED`), o menú.
+- O la pantalla muestra otro número distinto al que se acaba de tipear (`_screen_order_number(header) != order_number`).
+
+**Aborto inmediato sin pulsar F5 (`AS400SessionClosed`):**
+Si la pantalla leída tras teclear la orden no muestra el número pedido, **se aborta en ese mismo instante** con `AS400SessionClosed`. No se pulsa `F5`, no se pasa a la pantalla de ítems, ni se buclea en páginas vacías (evitando de 1 a 25 capturas inútiles de 1.1s cada una en Bay 2).
+
+**Variables de control y guardas de inactividad:**
+- `AS400_AUTO_RESTART` (por defecto `1`): encendido por defecto. Con `0`, el watcher degrada al comportamiento previo (sin reinicio automático, marca `unavailable`).
+- `AS400_RESTART_IDLE_SEC` (por defecto `60`): **una sola regla de inactividad: 1 minuto**. Antes de cualquier `Cmd+N` automático (el reinicio nuevo **y** el `hard_restart` existente) hace falta que nadie haya tocado ratón ni teclado en 60 s **y** que el centinela del operador no diga «manos fuera» (`operator_sentinel.hands_off() == False`). `AS400_HARD_RESTART_IDLE_SEC` deja de tener su propio 300 y lee la misma regla. Si hay alguien en el Mac, el paso queda `unavailable` y se reintenta cuando la máquina quede libre.
+
+**Serie de espera tras reinicio fallido (Backoff exponencial):**
+- Espera creciente: 4, 8, 16, 32, 64 minutos, y se queda en **64** (tope). Función pura `restart_backoff_sec(failures)`.
+- Un reinicio exitoso vuelve la cuenta a 4 min.
+- Mientras corre la espera no se intenta otro `Cmd+N`.
+- Un reinicio por orden dentro de `run_scan_step` (si tras reiniciar vuelve a fallar, `unavailable`).
+
+**Registro en `as400_screens` (sin migraciones):**
+Cada intento de reinicio (exitoso o fallido, y por qué) se registra insertando una fila en `as400_screens` con `classified = 'session_restart'`, `sku` con la orden (o `"session"`/`"loop"`), `after` con el resultado/motivo, y la pantalla muerta en `raw`. Acompañado de un `log.warning` con el motivo. Si escribir en la base falla, el watcher sigue (nunca se cae por el registro).
 
 ### 2.11 `C U S T O M E R   D I S P L A Y` → `STATE_CUSTOMER_DISPLAY`
 *Evidencia:* `tests/test_as400_capture.py` (`CUSTOMER_DISPLAY_SCREEN`, capturada por Rafael el 1 sep
