@@ -837,6 +837,11 @@ class MochaDriver:
         else:
             subprocess.run(["open", "-a", target], check=True)
 
+    def new_window(self) -> None:
+        """Cmd+N — open a fresh session window in Mocha."""
+        self.focus()
+        self._osascript('tell application "System Events" to keystroke "n" using command down')
+
     def close_window(self) -> None:
         """Cmd+W, then ENTER. Both, always, in ONE script.
 

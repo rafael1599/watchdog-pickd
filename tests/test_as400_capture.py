@@ -25,6 +25,7 @@ from as400_capture import (
     STATE_UNKNOWN,
     AS400Disconnected,
     AS400ManualLoginRequired,
+    AS400SessionClosed,
     CaptureError,
     MochaDriver,
     OrderNotFound,
@@ -41,6 +42,7 @@ from as400_capture import (
     build_read_screen_script,
     capture_order,
     classify_screen,
+    restart_as400_session,
     run_login,
 )
 
@@ -1483,3 +1485,87 @@ def test_a_screen_without_fields_is_not_automatically_the_notes_form():
     src = inspect.getsource(as400_capture)
     assert "Landed on the STOCK INQUIRY NOTES form" not in src
     assert "with no readable fields; the screen shows" in src
+
+
+def test_mocha_driver_has_new_window():
+    driver = MochaDriver()
+    executed = []
+    driver._osascript = lambda s: executed.append(s)
+    driver.new_window()
+    assert any('keystroke "n" using command down' in s for s in executed)
+
+
+def test_capture_order_detects_session_closed_when_search_screen_empty():
+    driver = FakeDriver([READY, ORDER_SEARCH_SCREEN])
+    with pytest.raises(AS400SessionClosed) as exc:
+        capture_order("881310", driver, page_wait=0)
+    assert "did not appear in the order search screen" in str(exc.value)
+
+
+def test_capture_order_detects_session_closed_when_sign_on_screen():
+    driver = FakeDriver([READY, SIGN_ON_SCREEN])
+    with pytest.raises(AS400SessionClosed) as exc:
+        capture_order("881310", driver, page_wait=0)
+    assert "Sign On screen" in str(exc.value)
+
+
+def test_capture_order_detects_session_closed_when_mismatched_order_number():
+    driver = FakeDriver([READY, ORDER_HEADER_SCREEN])
+    with pytest.raises(AS400SessionClosed) as exc:
+        capture_order("881310", driver, page_wait=0)
+    assert "screen shows #880009" in str(exc.value)
+
+
+def test_restart_as400_session_flow():
+    class FakeRecoveryDriver:
+        def __init__(self):
+            self.events = []
+            self._screens = [
+                ORDER_SEARCH_SCREEN,  # copy_screen on previous_window (dead window)
+                SIGN_ON_SCREEN,  # new window starts at Sign On
+                MESSAGE_SCREEN,  # Message Display
+                MENU_SCREEN,  # SALESN Options
+                READY,  # Order Inquiry search form
+            ]
+
+        def new_window(self):
+            self.events.append("cmd+n")
+
+        def previous_window(self):
+            self.events.append("ctrl+shift+tab")
+
+        def next_window(self):
+            self.events.append("ctrl+tab")
+
+        def close_window(self):
+            self.events.append("cmd+w+enter")
+
+        def focus(self):
+            pass
+
+        def launch(self):
+            self.events.append("launch")
+
+        def copy_screen(self, steps=()):
+            return self._screens.pop(0) if self._screens else ORDER_SEARCH_SCREEN
+
+        def key(self, name):
+            self.events.append(f"key:{name}")
+
+        def type_text(self, text):
+            self.events.append(f"type:{text}")
+
+    drv = FakeRecoveryDriver()
+    state = restart_as400_session(drv, dead_screen=ORDER_SEARCH_SCREEN, launch_wait=0, step_wait=0)
+    assert state in ("order_search", "order_inquiry")
+    assert "cmd+n" in drv.events
+    assert "ctrl+shift+tab" in drv.events
+    assert "cmd+w+enter" in drv.events
+    assert "type:ROMAN" in drv.events
+
+
+def test_capture_order_fails_fast_on_empty_search_without_f5():
+    driver = FakeDriver([READY, ORDER_SEARCH_SCREEN])
+    with pytest.raises(AS400SessionClosed):
+        capture_order("881310", driver, page_wait=0)
+    assert "f5" not in driver.keys
