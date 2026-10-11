@@ -13,6 +13,8 @@ import auto_scanner
 import operator_sentinel
 import scanned_store
 from as400_capture import (
+    AS400Disconnected,
+    AS400ManualLoginRequired,
     AS400SessionClosed,
     auto_restart_enabled,
     hard_restart,
@@ -342,3 +344,84 @@ def test_step_continues_if_screen_registration_fails(monkeypatch):
     assert r == {"action": "captured", "number": "880112"}
     assert len(restarted) == 1
     assert scanned_store.get("880112") is not None
+
+
+# ── Defectos 1 y 2: Recuperación en bucle (_recover_unavailable) ───────────────
+
+
+def test_unavailable_recovery_prefers_bootstrap_before_restart():
+    """Defecto 1: en 'unavailable', intenta primero bootstrap_session.
+    Si tiene éxito, NO debe abrir ventana nueva con restart_as400_session (Cmd+N)."""
+
+    class FakeDriverWithNewWindow:
+        def new_window(self):
+            pass
+
+    bootstrap_called = []
+    restart_called = []
+
+    def fake_bootstrap(drv):
+        bootstrap_called.append(drv)
+
+    def fake_restart(drv, dead_screen=None):
+        restart_called.append(drv)
+
+    drv = FakeDriverWithNewWindow()
+    auto_scanner._recover_unavailable(
+        drv,
+        bootstrap_fn=fake_bootstrap,
+        restart_fn=fake_restart,
+    )
+    assert len(bootstrap_called) == 1
+    assert len(restart_called) == 0
+
+
+def test_unavailable_recovery_restarts_on_disconnect():
+    """Defecto 1: sólo si bootstrap_session falla con AS400Disconnected o AS400SessionClosed,
+    se intenta restart_as400_session."""
+
+    class FakeDriverWithNewWindow:
+        def new_window(self):
+            pass
+
+    restart_called = []
+
+    def failing_bootstrap(drv):
+        raise AS400Disconnected("dropped connection")
+
+    def fake_restart(drv, dead_screen=None):
+        restart_called.append(drv)
+
+    drv = FakeDriverWithNewWindow()
+    auto_scanner._recover_unavailable(
+        drv,
+        bootstrap_fn=failing_bootstrap,
+        restart_fn=fake_restart,
+    )
+    assert len(restart_called) == 1
+
+
+def test_unavailable_recovery_manual_login_does_not_restart():
+    """Defecto 1: cualquier otra excepción de bootstrap_session (p. ej. AS400ManualLoginRequired)
+    sigue el camino de main, sin Cmd+N."""
+
+    class FakeDriverWithNewWindow:
+        def new_window(self):
+            pass
+
+    restart_called = []
+
+    def manual_login_bootstrap(drv):
+        raise AS400ManualLoginRequired("manual login needed")
+
+    def fake_restart(drv, dead_screen=None):
+        restart_called.append(drv)
+
+    drv = FakeDriverWithNewWindow()
+    with pytest.raises(AS400ManualLoginRequired):
+        auto_scanner._recover_unavailable(
+            drv,
+            bootstrap_fn=manual_login_bootstrap,
+            restart_fn=fake_restart,
+        )
+    assert len(restart_called) == 0

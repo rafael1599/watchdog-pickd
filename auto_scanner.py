@@ -827,6 +827,55 @@ def _driver_for_sku_step():
     return _sku_driver
 
 
+def _recover_unavailable(
+    driver,
+    *,
+    bootstrap_fn=bootstrap_session,
+    restart_fn=restart_as400_session,
+    operator_allows_restart_fn=operator_allows_restart,
+) -> None:
+    """Attempt session recovery when scanner encounters 'unavailable'.
+
+    First tries bootstrap_session(driver) as in main. Only if that fails with
+    AS400Disconnected or AS400SessionClosed (truly dead session) and auto-restart
+    conditions are met, attempts restart_as400_session(driver).
+    Any other exception from bootstrap_session raises directly without Cmd+N.
+    Rafael, 11 oct 2026.
+    """
+    try:
+        bootstrap_fn(driver)
+    except (AS400Disconnected, AS400SessionClosed) as boot_err:
+        dead_screen = getattr(boot_err, "screen", None)
+        can_restart = (
+            auto_restart_enabled()
+            and driver is not None
+            and hasattr(driver, "new_window")
+            and not is_restart_backing_off()
+            and operator_allows_restart_fn()
+        )
+        if can_restart:
+            try:
+                try:
+                    restart_fn(driver, dead_screen=dead_screen)
+                except TypeError:
+                    restart_fn(driver)
+                record_restart_success()
+                keep_restart_screen("loop", "ok", raw=dead_screen)
+            except Exception as restart_err:
+                record_restart_failure()
+                keep_restart_screen("loop", f"fail: {restart_err}", raw=dead_screen)
+                raise restart_err from boot_err
+        else:
+            if is_restart_backing_off():
+                log.info(
+                    "auto-scan: restart backing off (%.0fs remaining) — skipping Cmd+N",
+                    restart_cooldown_remaining(),
+                )
+            elif not operator_allows_restart_fn():
+                log.info("auto-scan: operator active on Mac — skipping Cmd+N")
+            raise
+
+
 def _loop() -> None:
     # The brake in as400_capture only applies to the thread that marks itself.
     as400_capture_mark_automated()
@@ -940,33 +989,11 @@ def _loop() -> None:
                 _operator_since = None
                 # Try to (re)connect; if it works, retry promptly next iteration.
                 try:
-                    if auto_restart_enabled() and hasattr(driver, "new_window"):
-                        if is_restart_backing_off():
-                            log.info(
-                                "auto-scan: restart backing off (%.0fs remaining) — skipping Cmd+N",
-                                restart_cooldown_remaining(),
-                            )
-                            bootstrap_session(driver)
-                        elif not operator_allows_restart():
-                            log.info("auto-scan: operator active on Mac — skipping Cmd+N")
-                            bootstrap_session(driver)
-                        else:
-                            restart_as400_session(driver)
-                            record_restart_success()
-                            keep_restart_screen("loop", "ok")
-                    else:
-                        bootstrap_session(driver)
+                    _recover_unavailable(driver)
                     wait = FOUND_NEXT_DELAY_SEC
                     note_as400(True)
                     _unavailable_since = None
                 except Exception as e:
-                    if (
-                        auto_restart_enabled()
-                        and hasattr(driver, "new_window")
-                        and not is_restart_backing_off()
-                    ):
-                        record_restart_failure()
-                        keep_restart_screen("loop", f"fail: {e}")
                     # A stuck terminal used to log at INFO — the same level as
                     # "that order doesn't exist yet" — every five minutes, for
                     # as long as it took somebody to notice. On 2026-09-08 that
