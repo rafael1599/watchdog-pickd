@@ -112,7 +112,7 @@ def test_step_skips_restart_during_backoff():
 
     restarted = []
 
-    def fake_restart(drv):
+    def fake_restart(drv, dead_screen=None):
         restarted.append(True)
 
     def cap(n, drv):
@@ -157,7 +157,7 @@ def test_inactivity_guard_sentinel_blocks():
 def test_step_respects_inactivity_guard(monkeypatch):
     restarted = []
 
-    def fake_restart(drv):
+    def fake_restart(drv, dead_screen=None):
         restarted.append(True)
 
     def cap(n, drv):
@@ -206,7 +206,7 @@ def test_auto_restart_disabled_flag(monkeypatch):
 
     restarted = []
 
-    def fake_restart(drv):
+    def fake_restart(drv, dead_screen=None):
         restarted.append(True)
 
     def cap(n, drv):
@@ -324,7 +324,7 @@ def test_step_continues_if_screen_registration_fails(monkeypatch):
 
     restarted = []
 
-    def fake_restart(drv):
+    def fake_restart(drv, dead_screen=None):
         restarted.append(True)
 
     calls = []
@@ -582,3 +582,91 @@ def test_step_manual_login_does_not_trigger_restart():
     )
     assert r == {"action": "unavailable", "number": "880112"}
     assert len(restarted) == 0
+
+
+# ── TypeError interno en restart_fn no se reintenta ──────────────────────────
+
+
+def test_step_restart_type_error_called_only_once(monkeypatch):
+    """Un restart_fn que lanza TypeError internamente se llama una sola vez
+    (sin reintentar sin dead_screen) y el paso queda unavailable con el fallo registrado."""
+
+    class FakeDriverWithRestart:
+        def new_window(self):
+            pass
+
+    recorded_screens = []
+    monkeypatch.setattr(
+        auto_scanner,
+        "keep_restart_screen",
+        lambda label, after, raw=None: recorded_screens.append((label, after, raw)),
+    )
+
+    calls = []
+
+    def broken_restart(drv, dead_screen=None):
+        calls.append(True)
+        raise TypeError("internal bug inside restart_as400_session")
+
+    def cap(n, drv):
+        err = AS400SessionClosed("Session died")
+        err.screen = "DEAD SCREEN BUFFER"
+        raise err
+
+    drv = FakeDriverWithRestart()
+    r = auto_scanner.run_scan_step(
+        drv,
+        start=880112,
+        capture_fn=cap,
+        preview_fn=_preview,
+        restart_fn=broken_restart,
+    )
+    assert r == {"action": "unavailable", "number": "880112"}
+    assert len(calls) == 1
+    assert is_restart_backing_off() is True
+    assert len(recorded_screens) == 1
+    assert recorded_screens[0][0] == "880112"
+    assert "fail: internal bug inside restart_as400_session" in recorded_screens[0][1]
+    assert recorded_screens[0][2] == "DEAD SCREEN BUFFER"
+
+
+def test_unavailable_recovery_restart_type_error_called_only_once(monkeypatch):
+    """En _recover_unavailable, un restart_fn que lanza TypeError se llama una sola vez
+    y propaga el error registrando el fallo."""
+
+    class FakeDriverWithRestart:
+        def new_window(self):
+            pass
+
+    recorded_screens = []
+    monkeypatch.setattr(
+        auto_scanner,
+        "keep_restart_screen",
+        lambda label, after, raw=None: recorded_screens.append((label, after, raw)),
+    )
+
+    calls = []
+
+    def failing_bootstrap(drv):
+        err = AS400Disconnected("disconnected")
+        err.screen = "BOOTSTRAP DEAD SCREEN"
+        raise err
+
+    def broken_restart(drv, dead_screen=None):
+        calls.append(True)
+        raise TypeError("internal bug inside restart_as400_session")
+
+    drv = FakeDriverWithRestart()
+    with pytest.raises(TypeError, match="internal bug inside restart_as400_session"):
+        auto_scanner._recover_unavailable(
+            drv,
+            bootstrap_fn=failing_bootstrap,
+            restart_fn=broken_restart,
+            operator_allows_restart_fn=lambda: True,
+        )
+    assert len(calls) == 1
+    assert is_restart_backing_off() is True
+    assert len(recorded_screens) == 1
+    assert recorded_screens[0][0] == "loop"
+    assert "fail: internal bug inside restart_as400_session" in recorded_screens[0][1]
+    assert recorded_screens[0][2] == "BOOTSTRAP DEAD SCREEN"
