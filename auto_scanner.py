@@ -51,7 +51,6 @@ from as400_capture import (
     MochaDriver,
     OrderNotFound,
     OrderVoidSkip,
-    _is_invalid_order,
     auto_restart_enabled,
     bootstrap_session,
     capture_order,
@@ -373,7 +372,6 @@ def run_scan_step(
         n = nxt
         skipped += 1
 
-    session_restarted = False
     try:
         text = capture_fn(str(n), driver)
     except OrderVoidSkip:
@@ -404,7 +402,6 @@ def run_scan_step(
                     restart_fn(driver, dead_screen=dead_screen)
                 except TypeError:
                     restart_fn(driver)
-                session_restarted = True
                 record_restart_success()
                 keep_restart_screen(str(n), "ok", raw=dead_screen)
                 text = capture_fn(str(n), driver)
@@ -429,53 +426,6 @@ def run_scan_step(
 
     preview = preview_fn(text)
     meta = _meta_from_preview(preview)
-
-    # If the capture didn't include the requested order number (and session was not already restarted):
-    scanned_num = meta.get("order_number")
-    order_num_matches = scanned_num is not None and str(scanned_num).strip() == str(n)
-    if not order_num_matches and not session_restarted:
-        if _is_invalid_order(text):
-            return {"action": "not_found", "number": str(n)}
-        can_restart = (
-            driver is not None
-            and hasattr(driver, "new_window")
-            and auto_restart_enabled()
-            and not is_restart_backing_off()
-            and operator_allows_restart()
-        )
-        if can_restart:
-            log.warning(
-                "auto-scan: order #%s entered in AS400, but captured text shows %r — session may have closed. Restarting AS400 (Cmd+N).",
-                n,
-                scanned_num,
-            )
-            try:
-                try:
-                    restart_fn(driver, dead_screen=text)
-                except TypeError:
-                    restart_fn(driver)
-                session_restarted = True
-                record_restart_success()
-                keep_restart_screen(str(n), "ok", raw=text)
-                text = capture_fn(str(n), driver)
-                preview = preview_fn(text)
-                meta = _meta_from_preview(preview)
-            except Exception as restart_err:
-                record_restart_failure()
-                keep_restart_screen(str(n), f"fail: {restart_err}", raw=text)
-                log.warning(
-                    "auto-scan: restart or retry failed after order mismatch for #%s (%s)",
-                    n,
-                    restart_err,
-                )
-                return {"action": "unavailable", "number": str(n)}
-        else:
-            return {"action": "unavailable", "number": str(n)}
-
-    scanned_num = meta.get("order_number")
-    if scanned_num is None or str(scanned_num).strip() != str(n):
-        if not _is_invalid_order(text):
-            return {"action": "unavailable", "number": str(n)}
     # VOID/empty order: a COMPLETE screen (END OF ORDER reached) with a real order
     # number but ZERO items — e.g. an order voided in AS400 ('Account Number: VOID').
     # It will never gain items, so retrying is useless: advance the cursor past it
