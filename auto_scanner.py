@@ -408,10 +408,7 @@ def run_scan_step(
             e,
         )
         try:
-            try:
-                restart_fn(driver, dead_screen=dead_screen)
-            except TypeError:
-                restart_fn(driver)
+            restart_fn(driver, dead_screen=dead_screen)
         except Exception as restart_err:
             record_restart_failure()
             keep_restart_screen(str(n), f"fail: {restart_err}", raw=dead_screen)
@@ -818,10 +815,7 @@ def _recover_unavailable(
         )
         if can_restart:
             try:
-                try:
-                    restart_fn(driver, dead_screen=dead_screen)
-                except TypeError:
-                    restart_fn(driver)
+                restart_fn(driver, dead_screen=dead_screen)
                 record_restart_success()
                 keep_restart_screen("loop", "ok", raw=dead_screen)
             except Exception as restart_err:
