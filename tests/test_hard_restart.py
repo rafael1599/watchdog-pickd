@@ -106,10 +106,10 @@ def test_it_is_off_until_somebody_has_watched_it_once(monkeypatch):
 
 def test_it_never_steals_focus_from_somebody_working(monkeypatch):
     # A new window comes to the front, and focus taken mid-order is somebody's
-    # work interrupted. Five minutes untouched, five times the normal gate.
+    # work interrupted. One minute untouched (unified rule, Rafael 11 oct 2026).
     monkeypatch.setenv("AS400_HARD_RESTART", "1")
     d = FakeEmulator()
-    assert hard_restart(d, idle_fn=lambda: 120.0) is False
+    assert hard_restart(d, idle_fn=lambda: 59.0) is False
     assert d.events == []
 
 

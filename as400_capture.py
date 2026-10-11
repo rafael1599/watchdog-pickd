@@ -10,6 +10,8 @@ The keystroke/clipboard layer (MochaDriver) only works on macOS. The capture LOO
 (capture_order) is pure and testable with any driver implementing the same interface.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import re
@@ -314,6 +316,16 @@ def _screen_order_number(text: str):
     return m.group(1) if m else None
 
 
+def _is_empty_order_search_screen(text: str) -> bool:
+    """True if the screen is the order search form with an empty order number field.
+
+    Identified by the Alpha Search / Invoice fields of the search form combined
+    with no digits in the Order Number field.
+    """
+    norm = _alnum(text)
+    return "ALPHASEARCH" in norm and _screen_order_number(text) is None
+
+
 def _is_order_header_screen(text: str, order_number) -> bool:
     """True when the screen is ALREADY the header (page 1) of exactly this order.
 
@@ -429,6 +441,16 @@ class AS400Disconnected(CaptureError):
 
 class AS400ManualLoginRequired(CaptureError):
     """The screen is unrecognized or not logged in — a human must log in first."""
+
+
+class AS400SessionClosed(CaptureError):
+    """The order number entered did not appear on screen or the session closed.
+    Signals that the AS400 session closed, dropped, or was left on a dead window,
+    requiring a fresh window (Cmd+N) and re-login."""
+
+    def __init__(self, message: str = "", screen: str | None = None):
+        super().__init__(message)
+        self.screen = screen
 
 
 class StockSkuNotFound(CaptureError):
@@ -1230,6 +1252,149 @@ def _advance_toward_order_screen(
 _last_hard_restart = 0.0
 
 
+def auto_restart_enabled() -> bool:
+    """Whether the daemon may automatically restart closed/dead AS400 sessions (Cmd+N).
+
+    Defaults to enabled (1). Set AS400_AUTO_RESTART=0 to disable and revert
+    to manual recovery. Rafael, 11 oct 2026.
+    """
+    return os.getenv("AS400_AUTO_RESTART", "1").strip().lower() not in ("0", "false", "no")
+
+
+def restart_idle_threshold_sec() -> float:
+    """Required idle time before allowing an automatic Cmd+N restart.
+
+    Unified rule: 60s by default (Rafael, 11 oct 2026).
+    Reads AS400_RESTART_IDLE_SEC, falling back to AS400_HARD_RESTART_IDLE_SEC,
+    defaulting to 60.0.
+    """
+    raw = os.getenv("AS400_RESTART_IDLE_SEC")
+    if raw is None:
+        raw = os.getenv("AS400_HARD_RESTART_IDLE_SEC", "60.0")
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        return 60.0
+
+
+def operator_allows_restart(idle_fn=None) -> bool:
+    """True only if nobody has touched keyboard or mouse in the last 60s
+    AND the operator sentinel does not say 'hands off'.
+
+    Single decision point for both session restarts and hard_restart.
+    Rafael, 11 oct 2026.
+    """
+    try:
+        import operator_sentinel
+
+        if operator_sentinel.hands_off():
+            log.info("AS400 recovery: operator sentinel says hands off — not restarting")
+            return False
+    except Exception:
+        pass
+
+    idle = (idle_fn or _system_idle_seconds)()
+    needed = restart_idle_threshold_sec()
+    if idle < needed:
+        log.info(
+            "AS400 recovery: not while somebody is using the Mac (idle %.0fs < %.0fs)",
+            idle,
+            needed,
+        )
+        return False
+    return True
+
+
+def restart_backoff_sec(failures: int) -> float:
+    """Pure function calculating exponential backoff delay in seconds for failed restarts.
+
+    0 failures: 0s
+    1 failure:  4 min (240s)
+    2 failures: 8 min (480s)
+    3 failures: 16 min (960s)
+    4 failures: 32 min (1920s)
+    >=5 failures: 64 min (3840s, capped)
+
+    Rafael, 11 oct 2026.
+    """
+    if failures <= 0:
+        return 0.0
+    minutes = min(4 * (2 ** (failures - 1)), 64)
+    return float(minutes * 60)
+
+
+_consecutive_restart_failures: int = 0
+_last_restart_failed_at: float = 0.0
+
+
+def record_restart_failure(now: float | None = None) -> float:
+    """Record a failed restart attempt. Increments failure count, sets failure time,
+    and returns backoff delay in seconds for this failure."""
+    global _consecutive_restart_failures, _last_restart_failed_at
+    _consecutive_restart_failures += 1
+    _last_restart_failed_at = time.time() if now is None else now
+    return restart_backoff_sec(_consecutive_restart_failures)
+
+
+def record_restart_success() -> None:
+    """Record a successful restart. Resets failure count so the next failure waits 4 min."""
+    global _consecutive_restart_failures, _last_restart_failed_at
+    _consecutive_restart_failures = 0
+    _last_restart_failed_at = 0.0
+
+
+def restart_cooldown_remaining(now: float | None = None) -> float:
+    """Remaining backoff time in seconds after a failed restart (0 if no backoff)."""
+    if _consecutive_restart_failures <= 0 or _last_restart_failed_at <= 0.0:
+        return 0.0
+    current = time.time() if now is None else now
+    needed = restart_backoff_sec(_consecutive_restart_failures)
+    elapsed = current - _last_restart_failed_at
+    return max(0.0, needed - elapsed)
+
+
+def is_restart_backing_off(now: float | None = None) -> bool:
+    """True if we are within the backoff window of a previous failed restart."""
+    return restart_cooldown_remaining(now) > 0.0
+
+
+def _reset_restart_backoff_for_tests() -> None:
+    global _consecutive_restart_failures, _last_restart_failed_at
+    _consecutive_restart_failures = 0
+    _last_restart_failed_at = 0.0
+
+
+def keep_restart_screen(
+    label: str,
+    after: str,
+    raw: str | None = None,
+    client=None,
+) -> bool:
+    """Record an AS400 session restart attempt in as400_screens.
+
+    Classified is always 'session_restart'.
+    Never raises an exception — a database failure cannot take the watcher down.
+    Rafael, 11 oct 2026.
+    """
+    try:
+        if client is None:
+            from supabase_client import get_client
+
+            client = get_client()
+        client.table("as400_screens").insert(
+            {
+                "sku": str(label or "session"),
+                "classified": "session_restart",
+                "after": str(after or ""),
+                "raw": str(raw or ""),
+            }
+        ).execute()
+        return True
+    except Exception as e:  # noqa: BLE001 — recording cannot break the step
+        log.warning("could not record session_restart in as400_screens (%s)", e)
+        return False
+
+
 def hard_restart_enabled() -> bool:
     """Whether the daemon may try to rescue itself from the dead-end screen.
 
@@ -1279,26 +1444,15 @@ def hard_restart(driver, idle_fn=None) -> bool:
     Mocha altogether — the case that would need the application reopened.
 
     Either way it refuses unless the Mac has been untouched for
-    AS400_HARD_RESTART_IDLE_SEC (a new window steals focus, and focus stolen
-    mid-order is somebody's work interrupted) and unless the last attempt was
-    longer ago than the cooldown, so a terminal that cannot be saved is not
-    poked every five minutes all night.
-
-    It does NOT log in — the caller's bootstrap does, verifying every screen, so
-    a recovery that lands somewhere unexpected still ends as an honest "a human
-    is needed" rather than a loop.
+    AS400_RESTART_IDLE_SEC (60s) and operator sentinel hands_off is false,
+    and unless the last attempt was longer ago than the cooldown.
     """
     global _last_hard_restart
 
     if not hard_restart_enabled():
         return False
 
-    idle = (idle_fn or _system_idle_seconds)()
-    needed = _env_float("AS400_HARD_RESTART_IDLE_SEC", 300.0)
-    if idle < needed:
-        log.info(
-            "AS400 recovery: not while somebody is using the Mac (idle %.0fs < %.0fs)", idle, needed
-        )
+    if not operator_allows_restart(idle_fn=idle_fn):
         return False
 
     since = time.time() - _last_hard_restart
@@ -1331,7 +1485,7 @@ def hard_restart(driver, idle_fn=None) -> bool:
     return True
 
 
-def _close_the_dead_window(driver) -> None:
+def _close_the_dead_window(driver, dead_screen: str | None = None) -> None:
     """Ctrl+Shift+Tab back to the dead window and close it. Best effort.
 
     VERIFIES before closing, like everything else that drives this terminal. If
@@ -1348,7 +1502,16 @@ def _close_the_dead_window(driver) -> None:
         log.info("AS400 recovery: couldn't reach the old window to close it (%s)", e)
         return
 
-    if not _is_message_info_screen(screen):
+    is_dead = _is_message_info_screen(screen)
+    if not is_dead and dead_screen is not None:
+        if _norm_screen(screen) == _norm_screen(dead_screen):
+            is_dead = True
+    if not is_dead:
+        state = classify_screen(screen)
+        if state in (STATE_DISCONNECTED,):
+            is_dead = True
+
+    if not is_dead:
         log.info(
             "AS400 recovery: the window behind isn't the dead one — leaving it alone (state=%s)",
             classify_screen(screen),
@@ -1370,6 +1533,35 @@ def _close_the_dead_window(driver) -> None:
         log.warning("AS400 recovery: couldn't close the dead window (%s) — it stays behind", e)
 
 
+def restart_as400_session(
+    driver,
+    dead_screen: str | None = None,
+    launch_wait: float = LAUNCH_WAIT,
+    step_wait: float = 0.6,
+) -> str:
+    """Recover from a closed, dropped or dead AS400 session.
+
+    Opens a fresh session window (Cmd+N), closes the dead window behind it,
+    and logs back in via bootstrap_session until reaching the order screen.
+    Returns the resulting screen state (e.g. STATE_ORDER_SEARCH).
+    Rafael, 11 oct 2026.
+    """
+    log.warning("AS400 recovery: restarting session — opening fresh window (Cmd+N)")
+    try:
+        driver.new_window()
+        time.sleep(_env_float("AS400_NEW_WINDOW_WAIT", 3.0))
+    except Exception as e:
+        log.warning("AS400 recovery: Cmd+N failed (%s)", e)
+        if quit_and_relaunch_enabled():
+            _quit_and_relaunch(driver)
+        else:
+            raise
+
+    _close_the_dead_window(driver, dead_screen=dead_screen)
+    log.info("AS400 recovery: logging into the new session")
+    return bootstrap_session(driver, launch_wait=launch_wait, step_wait=step_wait)
+
+
 def _quit_and_relaunch(driver) -> bool:
     """The deepest fallback, behind its own switch. See quit_and_relaunch_enabled."""
     log.warning("AS400 recovery: closing the emulator")
@@ -1387,11 +1579,16 @@ def _system_idle_seconds() -> float:
     """Seconds since the last input. Mirrors auto_scanner's reader; imported
     lazily so this module keeps having no local dependencies."""
     try:
-        from auto_scanner import system_idle_seconds
+        from auto_scanner import operator_idle_seconds
 
-        return system_idle_seconds()
+        return operator_idle_seconds()
     except Exception:
-        return 0.0  # can't tell → assume somebody is there, and don't restart
+        try:
+            from auto_scanner import system_idle_seconds
+
+            return system_idle_seconds()
+        except Exception:
+            return 0.0  # can't tell → assume somebody is there, and don't restart
 
 
 def bootstrap_session(
@@ -1854,12 +2051,36 @@ def capture_order(
         )
 
     # Guard: if this isn't an order view we're on the wrong screen (a menu, etc.)
-    # or the order doesn't exist. Bail out now instead of pressing F5 and looping
-    # through pages that will never show END OF ORDER.
+    # or the session disconnected/closed. Bail out immediately instead of pressing F5.
     if not _looks_like_order_screen(header):
-        raise OrderNotFound(
-            f"The screen isn't an order inquiry (wrong view, or order "
-            f"{order_number} doesn't exist). Go to order search (F7 → 3) and try again."
+        st = classify_screen(header)
+        if st == STATE_DISCONNECTED:
+            raise AS400Disconnected(f"The AS400 disconnected while entering order {order_number}.")
+        if st == STATE_LOGIN:
+            raise AS400SessionClosed(
+                f"The AS400 session closed (Sign On screen) while entering order {order_number}.",
+                screen=header,
+            )
+        raise AS400SessionClosed(
+            f"Order {order_number} did not open an order screen (state={st}); "
+            "the AS400 session may have closed.",
+            screen=header,
+        )
+
+    # If the order search screen is still empty or shows a different order number,
+    # the entered order number did not appear — session likely died or closed.
+    if _is_empty_order_search_screen(header):
+        raise AS400SessionClosed(
+            f"Order {order_number} did not appear in the order search screen after entry "
+            "(field is empty); the AS400 session may have closed.",
+            screen=header,
+        )
+    scr_num = _screen_order_number(header)
+    if scr_num is not None and scr_num != str(order_number).strip():
+        raise AS400SessionClosed(
+            f"Order {order_number} did not appear on screen after entry (screen shows #{scr_num}); "
+            "the AS400 session may have closed.",
+            screen=header,
         )
 
     # The last page we acted on. We only page forward once the screen differs from
