@@ -425,3 +425,56 @@ def test_unavailable_recovery_manual_login_does_not_restart():
             restart_fn=fake_restart,
         )
     assert len(restart_called) == 0
+
+
+def test_restart_failure_not_recorded_if_restart_was_not_attempted():
+    """Defecto 2: si bootstrap_session falla pero NO se intentó reinicio (p. ej. operador activo),
+    NO debe registrarse fallo de reinicio ni activar backoff."""
+
+    class FakeDriverWithNewWindow:
+        def new_window(self):
+            pass
+
+    def failing_bootstrap(drv):
+        raise AS400Disconnected("dropped connection")
+
+    def fake_restart(drv, dead_screen=None):
+        raise RuntimeError("should not be called")
+
+    drv = FakeDriverWithNewWindow()
+    with pytest.raises(AS400Disconnected):
+        auto_scanner._recover_unavailable(
+            drv,
+            bootstrap_fn=failing_bootstrap,
+            restart_fn=fake_restart,
+            operator_allows_restart_fn=lambda: False,
+        )
+
+    # El fallo de bootstrap con operador activo NO debe registrar fallo de reinicio
+    assert is_restart_backing_off() is False
+
+
+def test_restart_failure_recorded_when_restart_actually_fails():
+    """Defecto 2: record_restart_failure sólo cuando restart_as400_session se llamó y falló."""
+
+    class FakeDriverWithNewWindow:
+        def new_window(self):
+            pass
+
+    def failing_bootstrap(drv):
+        raise AS400Disconnected("dropped connection")
+
+    def failing_restart(drv, dead_screen=None):
+        raise RuntimeError("Cmd+N failed")
+
+    drv = FakeDriverWithNewWindow()
+    with pytest.raises(RuntimeError):
+        auto_scanner._recover_unavailable(
+            drv,
+            bootstrap_fn=failing_bootstrap,
+            restart_fn=failing_restart,
+            operator_allows_restart_fn=lambda: True,
+        )
+
+    # Aquí sí se llamó a restart y falló -> backoff activo
+    assert is_restart_backing_off() is True
