@@ -382,7 +382,9 @@ def run_scan_step(
         return {"action": "empty_skipped", "number": str(n)}
     except OrderNotFound:
         return {"action": "not_found", "number": str(n)}
-    except (AS400Disconnected, AS400ManualLoginRequired, AS400SessionClosed) as e:
+    except AS400ManualLoginRequired:
+        return {"action": "unavailable", "number": str(n)}
+    except (AS400Disconnected, AS400SessionClosed) as e:
         dead_screen = getattr(e, "screen", None)
         can_restart = (
             driver is not None
@@ -391,28 +393,7 @@ def run_scan_step(
             and not is_restart_backing_off()
             and operator_allows_restart()
         )
-        if can_restart:
-            log.warning(
-                "auto-scan: AS400 session closed or unavailable for #%s (%s) — restarting session with new window (Cmd+N)",
-                n,
-                e,
-            )
-            try:
-                try:
-                    restart_fn(driver, dead_screen=dead_screen)
-                except TypeError:
-                    restart_fn(driver)
-                record_restart_success()
-                keep_restart_screen(str(n), "ok", raw=dead_screen)
-                text = capture_fn(str(n), driver)
-            except Exception as restart_err:
-                record_restart_failure()
-                keep_restart_screen(str(n), f"fail: {restart_err}", raw=dead_screen)
-                log.warning(
-                    "auto-scan: session restart or retry failed for #%s (%s)", n, restart_err
-                )
-                return {"action": "unavailable", "number": str(n)}
-        else:
+        if not can_restart:
             if is_restart_backing_off():
                 log.info(
                     "auto-scan: restart backing off (%.0fs remaining) — skipping Cmd+N for #%s",
@@ -420,6 +401,38 @@ def run_scan_step(
                     n,
                 )
             return {"action": "unavailable", "number": str(n)}
+
+        log.warning(
+            "auto-scan: AS400 session closed or unavailable for #%s (%s) — restarting session with new window (Cmd+N)",
+            n,
+            e,
+        )
+        try:
+            try:
+                restart_fn(driver, dead_screen=dead_screen)
+            except TypeError:
+                restart_fn(driver)
+        except Exception as restart_err:
+            record_restart_failure()
+            keep_restart_screen(str(n), f"fail: {restart_err}", raw=dead_screen)
+            log.warning("auto-scan: session restart failed for #%s (%s)", n, restart_err)
+            return {"action": "unavailable", "number": str(n)}
+
+        record_restart_success()
+        keep_restart_screen(str(n), "ok", raw=dead_screen)
+
+        try:
+            text = capture_fn(str(n), driver)
+        except OrderVoidSkip:
+            scanned_store.skip(n)
+            log.info("auto-scan: #%s routed to AS400 message screen (VOID) — skipped past it", n)
+            return {"action": "empty_skipped", "number": str(n)}
+        except OrderNotFound:
+            return {"action": "not_found", "number": str(n)}
+        except (AS400Disconnected, AS400ManualLoginRequired, AS400SessionClosed):
+            return {"action": "unavailable", "number": str(n)}
+        except CaptureError:
+            return {"action": "incomplete", "number": str(n)}
     except CaptureError:
         # Partial / stalled capture (no END OF ORDER) — retry the same number later.
         return {"action": "incomplete", "number": str(n)}

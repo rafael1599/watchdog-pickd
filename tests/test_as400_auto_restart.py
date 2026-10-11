@@ -16,6 +16,7 @@ from as400_capture import (
     AS400Disconnected,
     AS400ManualLoginRequired,
     AS400SessionClosed,
+    OrderNotFound,
     auto_restart_enabled,
     hard_restart,
     is_restart_backing_off,
@@ -515,4 +516,69 @@ def test_step_unparseable_capture_yields_not_found_without_restart():
         restart_fn=fake_restart,
     )
     assert r == {"action": "not_found", "number": "880112"}
+    assert len(restarted) == 0
+
+
+# ── Defecto 4: Separación de reinicio y reintento / Exclusión de login manual ─
+
+
+def test_step_restart_success_separated_from_retry_failure():
+    """Defecto 4: si el reinicio sale bien pero el reintento de captura da OrderNotFound,
+    el resultado es not_found, el reinicio cuenta como éxito y NO se registra fallo de reinicio."""
+
+    class FakeDriverWithRestart:
+        def new_window(self):
+            pass
+
+    restarted = []
+
+    def fake_restart(drv, dead_screen=None):
+        restarted.append(True)
+
+    calls = []
+
+    def cap(n, drv):
+        calls.append(n)
+        if len(calls) == 1:
+            raise AS400SessionClosed("Session closed")
+        raise OrderNotFound("Order does not exist")
+
+    drv = FakeDriverWithRestart()
+    r = auto_scanner.run_scan_step(
+        drv,
+        start=880112,
+        capture_fn=cap,
+        preview_fn=_preview,
+        restart_fn=fake_restart,
+    )
+    assert r == {"action": "not_found", "number": "880112"}
+    assert len(restarted) == 1
+    # El reinicio fue un éxito, no debe haber backoff activo
+    assert is_restart_backing_off() is False
+
+
+def test_step_manual_login_does_not_trigger_restart():
+    """Defecto 4: AS400ManualLoginRequired no debe disparar Cmd+N en run_scan_step."""
+
+    class FakeDriverWithRestart:
+        def new_window(self):
+            pass
+
+    restarted = []
+
+    def fake_restart(drv, dead_screen=None):
+        restarted.append(True)
+
+    def cap(n, drv):
+        raise AS400ManualLoginRequired("A person must log in")
+
+    drv = FakeDriverWithRestart()
+    r = auto_scanner.run_scan_step(
+        drv,
+        start=880112,
+        capture_fn=cap,
+        preview_fn=_preview,
+        restart_fn=fake_restart,
+    )
+    assert r == {"action": "unavailable", "number": "880112"}
     assert len(restarted) == 0
