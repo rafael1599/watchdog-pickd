@@ -326,6 +326,10 @@ def _is_empty_order_search_screen(text: str) -> bool:
     return "ALPHASEARCH" in norm and _screen_order_number(text) is None
 
 
+# El escáner la usa para decidir si una búsqueda vacía es de la sesión o de la orden.
+is_empty_order_search_screen = _is_empty_order_search_screen
+
+
 def _is_order_header_screen(text: str, order_number) -> bool:
     """True when the screen is ALREADY the header (page 1) of exactly this order.
 
