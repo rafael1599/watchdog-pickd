@@ -8,6 +8,8 @@
 .sku_unknown.json
 .sku_unknown.json.tmp
 .scan_cursor
+.scan_parked.json
+.scan_parked.json.tmp
 __pycache__/
 *.pdf
 .DS_Store

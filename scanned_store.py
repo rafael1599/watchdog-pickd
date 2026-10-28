@@ -50,6 +50,15 @@ def _path() -> Path:
     )
 
 
+def _parked_path() -> Path:
+    return Path(
+        os.getenv(
+            "SCAN_PARKED_PATH",
+            str(Path(__file__).resolve().parent / ".scan_parked.json"),
+        )
+    )
+
+
 def _cursor_path() -> Path:
     # The scan cursor is a separate, monotonic high-water mark so removing/archiving
     # a cached order never rewinds the scanner (which would re-capture that number).
@@ -126,6 +135,11 @@ def put(order_number, raw_text: str, meta: dict | None = None, source: str = "au
         if source == "auto_scan" and key.isdigit() and int(key) >= SCAN_START:
             if int(key) + 1 > (_read_cursor() or 0):
                 _write_cursor(int(key) + 1)
+        # Una aparcada que por fin se capturó (en su repaso o a mano) sale de la lista.
+        parked = _load_parked()
+        if key in parked:
+            del parked[key]
+            _save_parked(parked)
     return entry
 
 
@@ -234,3 +248,101 @@ def search(query: str, limit: int = 25) -> list[dict]:
 
 def count() -> int:
     return len(load())
+
+
+# ── Órdenes aparcadas (28 oct 2026) ──────────────────────────────────────────
+#
+# La 882082 existía en el AS400 y no abría: al teclearla, la búsqueda volvía
+# vacía, sin «Invalid Order Number». Eso es justo lo que se ve con una sesión
+# muerta, así que el escáner reinició el AS400 50 veces en una hora sobre ese
+# número, y como el cursor sólo avanza al capturar, ninguna orden posterior
+# entró. Una orden así se APARTA: el cursor sigue con la siguiente y ella se
+# repasa cada tanto, sin reinicios, hasta que abra o caduque.
+#
+# Archivo aparte del caché: es estado del escáner, no una orden capturada, y
+# `load()` lo leen la UI y la puerta como lista de órdenes.
+
+
+def _load_parked() -> dict:
+    p = _parked_path()
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        log.warning("scan parked list unreadable at %s — starting empty", p)
+        return {}
+
+
+def _save_parked(data: dict) -> None:
+    p = _parked_path()
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def park(order_number, now: datetime | None = None) -> dict:
+    """Aparta una orden que no abre y adelanta el cursor más allá de ella.
+
+    Llamarla otra vez sobre la misma orden cuenta un intento más y mueve la hora
+    del último, que es lo que espacia el siguiente repaso."""
+    key = str(order_number)
+    at = (now or datetime.now(timezone.utc)).isoformat()
+    with _lock:
+        if key.isdigit() and int(key) >= SCAN_START:
+            if int(key) + 1 > (_read_cursor() or 0):
+                _write_cursor(int(key) + 1)
+        parked = _load_parked()
+        entry = parked.get(key) or {"first_at": at, "tries": 0}
+        entry["last_at"] = at
+        entry["tries"] = int(entry.get("tries") or 0) + 1
+        parked[key] = entry
+        _save_parked(parked)
+        return dict(entry)
+
+
+def unpark(order_number) -> None:
+    """Saca una orden de la lista sin capturarla (p. ej. resultó VOID)."""
+    key = str(order_number)
+    with _lock:
+        data = _load_parked()
+        if key in data:
+            del data[key]
+            _save_parked(data)
+
+
+def parked() -> dict:
+    """Las órdenes apartadas, {número: {first_at, last_at, tries}}."""
+    with _lock:
+        return _load_parked()
+
+
+def due_parked(every_sec: float, max_age_sec: float, now: datetime | None = None) -> str | None:
+    """La aparcada que toca repasar (la más antigua de las que esperaron
+    `every_sec`), o None. Las que llevan más de `max_age_sec` aparcadas se
+    sueltan aquí, con un aviso: a esa edad la puerta ya la habría archivado."""
+    now = now or datetime.now(timezone.utc)
+    with _lock:
+        data = _load_parked()
+        expired = []
+        due = []
+        for key, e in data.items():
+            try:
+                first = datetime.fromisoformat(e["first_at"])
+                last = datetime.fromisoformat(e["last_at"])
+            except (KeyError, TypeError, ValueError):
+                expired.append(key)
+                continue
+            if (now - first).total_seconds() > max_age_sec:
+                expired.append(key)
+            elif (now - last).total_seconds() >= every_sec:
+                due.append((last, key))
+        if expired:
+            for key in expired:
+                log.warning(
+                    "scan: #%s never opened in the AS400 — dropped from the parked list", key
+                )
+                del data[key]
+            _save_parked(data)
+        return min(due)[1] if due else None

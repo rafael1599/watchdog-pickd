@@ -55,6 +55,7 @@ from as400_capture import (
     bootstrap_session,
     capture_order,
     classify_screen,
+    is_empty_order_search_screen,
     is_restart_backing_off,
     keep_restart_screen,
     operator_allows_restart,
@@ -107,6 +108,11 @@ def ignoring_operator() -> bool:
         return False
     return datetime.now(timezone.utc) < until
 
+
+# Una orden que el AS400 no abre se aparta y se repasa cada tanto (ver
+# scanned_store.park): cada cuánto, y cuánto tiempo antes de soltarla.
+PARKED_REVISIT_SEC = float(os.getenv("SCAN_PARKED_REVISIT_SEC", "900"))  # 15 min
+PARKED_MAX_AGE_SEC = float(os.getenv("SCAN_PARKED_MAX_AGE_SEC", str(3 * 86400)))
 
 # How often to re-check while paused (operator active / manual capture running).
 IDLE_POLL_SEC = float(os.getenv("SCAN_IDLE_POLL_SEC", "15"))
@@ -355,6 +361,10 @@ def run_scan_step(
     if restart_fn is None:
         from as400_capture import restart_as400_session as restart_fn
 
+    due = scanned_store.due_parked(PARKED_REVISIT_SEC, PARKED_MAX_AGE_SEC)
+    if due is not None:
+        return _revisit_parked(due, driver, capture_fn, preview_fn)
+
     n = scanned_store.next_scan_number(start)
     # Don't re-pull an order we already have. The scan position can legitimately
     # land on a number that's already cached — most often when the operator
@@ -386,6 +396,9 @@ def run_scan_step(
         return {"action": "unavailable", "number": str(n)}
     except (AS400Disconnected, AS400SessionClosed) as e:
         dead_screen = getattr(e, "screen", None)
+        parked = _park_if_session_fine(n, e, driver, capture_fn)
+        if parked is not None:
+            return parked
         can_restart = (
             driver is not None
             and hasattr(driver, "new_window")
@@ -426,7 +439,12 @@ def run_scan_step(
             return {"action": "empty_skipped", "number": str(n)}
         except OrderNotFound:
             return {"action": "not_found", "number": str(n)}
-        except (AS400Disconnected, AS400ManualLoginRequired, AS400SessionClosed):
+        except AS400SessionClosed as e2:
+            parked = _park_if_session_fine(n, e2, driver, capture_fn)
+            if parked is not None:
+                return parked
+            return {"action": "unavailable", "number": str(n)}
+        except (AS400Disconnected, AS400ManualLoginRequired):
             return {"action": "unavailable", "number": str(n)}
         except CaptureError:
             return {"action": "incomplete", "number": str(n)}
@@ -470,9 +488,74 @@ def run_scan_step(
     return {"action": "captured", "number": str(n)}
 
 
+def _park_if_session_fine(n: int, err: Exception, driver, capture_fn) -> dict | None:
+    """¿Es la sesión o es esta orden? (28 oct 2026, #882082)
+
+    La búsqueda que vuelve vacía tras teclear un número es lo que se ve con una
+    sesión muerta… y también con una orden que existe y el AS400 no abre. La
+    882082 lo hizo: 50 reinicios de ventana en una hora y el cursor parado, sin
+    que entrara ninguna orden posterior. Para distinguirlas se le pregunta al
+    AS400 por la última orden que sí capturamos: si ésa abre, la sesión está
+    bien y el problema es este número, que se aparta (sin reinicio) para que el
+    cursor siga. Si tampoco abre, es la sesión, y sigue el camino de siempre.
+
+    Devuelve el resultado del paso cuando la aparta, o None.
+    """
+    if not isinstance(err, AS400SessionClosed):
+        return None
+    if not is_empty_order_search_screen(getattr(err, "screen", None) or ""):
+        return None
+    known = scanned_store.latest_number()
+    if known == n or scanned_store.get(known) is None:
+        return None  # nada capturado con qué comparar: no se puede saber
+    try:
+        capture_fn(str(known), driver)
+    except Exception as probe_err:  # noqa: BLE001 — cualquier fallo = no está probado
+        log.info("auto-scan: #%s did not open and neither did #%s (%s)", n, known, probe_err)
+        return None
+    entry = scanned_store.park(n)
+    log.warning(
+        "auto-scan: #%s does not open in the AS400 but #%s does — parked it and moving on "
+        "(retry every %.0f min, attempt %d)",
+        n,
+        known,
+        PARKED_REVISIT_SEC / 60,
+        entry["tries"],
+    )
+    return {"action": "parked", "number": str(n)}
+
+
+def _revisit_parked(number: str, driver, capture_fn, preview_fn) -> dict:
+    """Otro intento con una orden apartada. Sin reinicios: ya sabemos que la
+    búsqueda vacía es de ella, y si la sesión se cayó de verdad el siguiente
+    paso normal lo verá."""
+    try:
+        text = capture_fn(str(number), driver)
+    except OrderVoidSkip:
+        scanned_store.unpark(number)
+        log.info("auto-scan: parked #%s turned out VOID — dropped", number)
+        return {"action": "empty_skipped", "number": str(number)}
+    except (AS400Disconnected, AS400ManualLoginRequired):
+        return {"action": "unavailable", "number": str(number)}
+    except CaptureError:
+        # Incluye AS400SessionClosed (la búsqueda vacía de siempre) y OrderNotFound.
+        entry = scanned_store.park(number)
+        log.info("auto-scan: parked #%s still does not open (attempt %d)", number, entry["tries"])
+        return {"action": "parked", "number": str(number)}
+    meta = _meta_from_preview(preview_fn(text))
+    if not meta.get("order_number") or not (meta.get("item_count") or 0):
+        scanned_store.park(number)
+        return {"action": "parked", "number": str(number)}
+    scanned_store.put(number, text, meta, source="auto_scan")
+    log.info("auto-scan: parked #%s opened at last — cached", number)
+    return {"action": "captured", "number": str(number)}
+
+
 def _wait_for(action: str) -> float:
     return {
         "captured": FOUND_NEXT_DELAY_SEC,
+        # La orden apartada no frena a las siguientes.
+        "parked": FOUND_NEXT_DELAY_SEC,
         # A skipped VOID/empty order is progress — move to the next number quickly.
         "empty_skipped": FOUND_NEXT_DELAY_SEC,
         "not_found": NOT_FOUND_WAIT_SEC,
