@@ -76,6 +76,18 @@ MIGRATIONS: list[tuple[str, str]] = [
         "picking_lists.ship_to_address_id",
         "ALTER TABLE picking_lists ADD COLUMN IF NOT EXISTS ship_to_address_id uuid;",
     ),
+    # 29 oct 2026: the customer is the Ship-to; when somebody else pays (a rep's
+    # sample account, eBay, Consumer All Access) that somebody is the order's
+    # contact. Pickd carries the formal migration; these only keep the watcher
+    # from writing into a missing column.
+    (
+        "picking_lists.contact_name",
+        "ALTER TABLE picking_lists ADD COLUMN IF NOT EXISTS contact_name text;",
+    ),
+    (
+        "picking_lists.contact_phone",
+        "ALTER TABLE picking_lists ADD COLUMN IF NOT EXISTS contact_phone text;",
+    ),
     # The AS400 catalogue name the enrichment step brings back, raw and unsplit
     # (docs/sku-catalog-enrichment.md). Pickd's 20260908120000_as400_description.sql
     # is the source of truth, comments included; these are column-only so a watcher

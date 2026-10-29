@@ -142,9 +142,13 @@ def classify(entry: dict, now: datetime) -> tuple[str, str | None] | None:
     """
     if not entry.get("order_number") or not (entry.get("item_count") or 0):
         return None  # the 'Invalid Order Number' screen an old scanner cached
+    # Junk is a Bill-to rule (EBAY PART SALES pays); «no customer» is about who
+    # RECEIVES: the Ship-to, or the Bill-to when the capture has no Ship-to
+    # (same store, pick up). 29 oct 2026.
     if is_junk_customer(entry.get("customer")):
         return ("junk", "ebay")
-    if not (entry.get("customer") or "").strip() or entry.get("customer") == "Unknown":
+    receiver = (entry.get("ship_to") or entry.get("customer") or "").strip()
+    if not receiver or receiver == "Unknown":
         return ("held", "no_customer")
     if entry.get("total_mismatch"):
         return ("held", "total_mismatch")

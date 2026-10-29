@@ -262,9 +262,16 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str, group_id: str 
     cart_items = _to_cart_items(client, order_data["items"])
 
     # Look up or create customer. The AS400 account from the header is the
-    # identity that survives a rename — see _resolve_customer.
+    # identity that survives a rename — see _resolve_customer — but ONLY when the
+    # Bill-to and the Ship-to are one store (`seal_account`, parser.parse_parties).
+    # A rep's sample account or a channel (eBay, Consumer All Access) names who
+    # pays, not who receives: then the customer is the Ship-to, found by name +
+    # street, never by that account and never sealed with it (29 oct 2026: the
+    # 882087 went to «JOHN EPPLEY» instead of SIC TRANSIT CYCLES).
     customer_id = None
     customer_name = order_data.get("customer_name")
+    same_party = bool(order_data.get("same_party", True))
+    seal_account = bool(order_data.get("seal_account", same_party))
     if customer_name:
         addr = order_data.get("shipping") or {}
         customer_id = _resolve_customer(
@@ -274,7 +281,7 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str, group_id: str 
             city=addr.get("city"),
             state=addr.get("state"),
             zip_code=addr.get("zip_code"),
-            account=order_data.get("as400_account"),
+            account=order_data.get("as400_account") if seal_account else None,
         )
 
     # Mirror the web Orders view: persist the Ship-to address on the customer
@@ -316,6 +323,15 @@ def create_order(order_data: dict, pdf_hash: str, file_name: str, group_id: str 
         insert_data["as400_account_number"] = account_number
     if ship_to_address_id:
         insert_data["ship_to_address_id"] = ship_to_address_id
+
+    # Somebody other than the store pays: that somebody is the order's contact,
+    # with the phone PickD already holds for that account (never written onto
+    # the store's record). Omitted when Bill and Ship are the same store.
+    if not same_party and order_data.get("contact_name"):
+        insert_data["contact_name"] = order_data["contact_name"]
+        phone = _phone_of_account(client, order_data.get("as400_account"))
+        if phone:
+            insert_data["contact_phone"] = phone
 
     if group_id:
         insert_data["group_id"] = group_id
@@ -742,6 +758,40 @@ def _merge_items(existing: list, new_items: list) -> list:
     return merged
 
 
+def _phone_of_account(client: Client, account) -> Optional[str]:
+    """The phone PickD holds for a Bill-to account (customers.phone of the row
+    sealed with it), for `picking_lists.contact_phone`. None when unknown."""
+    if not account:
+        return None
+    try:
+        res = (
+            client.table("customers")
+            .select("phone")
+            .eq("as400_account", str(account))
+            .limit(1)
+            .execute()
+        )
+        if res.data:
+            return (res.data[0].get("phone") or "").strip() or None
+    except Exception as e:  # noqa: BLE001 — a contact phone is never worth failing an order
+        log.warning("Could not read the phone of account %s: %s", account, e)
+    return None
+
+
+# A street that is really a line of the items page (`03 4868 BL N HUDSON E1 …
+# 1368.95`), or an address with no city: the capture lost its header and what
+# follows «Ship» is the column header. 36 such rows reached prod (29 oct 2026).
+_ITEM_LINE = re.compile(r"^\d{2} \d{4} |\d+\.\d{2}")
+
+
+def looks_like_address(ship: dict) -> bool:
+    street = (ship.get("street") or "").strip()
+    city = (ship.get("city") or "").strip()
+    if not street or not city:
+        return False
+    return not _ITEM_LINE.search(street)
+
+
 def _normalize_customer_name(name: str) -> str:
     """Collapse a name to uppercase alphanumerics so 'ACME, INC.' == 'acme inc'."""
     return re.sub(r"[^A-Z0-9]", "", (name or "").upper())
@@ -934,6 +984,14 @@ def _save_shipping_address(
     """
     street = (ship.get("street") or "").strip()
     if not street:
+        return None
+    if not looks_like_address(ship):
+        log.warning(
+            "Ship-to of customer %s is not an address, not saved: %r / %r",
+            customer_id,
+            street,
+            ship.get("city"),
+        )
         return None
 
     address_fields = {

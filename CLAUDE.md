@@ -10,6 +10,13 @@ Daemon que monitorea una carpeta (`~/send-to-pickd/`) por archivos PDF de ordene
 > falla, aplica espera exponencial creciente (4, 8, 16, 32, 64 min tope; un éxito vuelve la cuenta a 4). Cada intento se
 > registra en `as400_screens` (`classified = 'session_restart'`).
 
+> **Una orden que el AS400 no abre se aparta, no reinicia (28 oct 2026, #64).** La 882082 existía
+> pero su búsqueda volvía vacía; el escáner lo leyó como sesión muerta y reinició 69 veces con el
+> cursor parado. Ahora, antes de reiniciar, se prueba la última orden capturada: si esa abre, la
+> sesión está bien y el número se **aparta** en `.scan_parked.json` (`SCAN_PARKED_PATH`), el cursor
+> sigue, y `run_scan_step` lo repasa cada 15 min (`PARKED_REVISIT_SEC`) hasta 3 días
+> (`PARKED_MAX_AGE_SEC`). Si por fin abre, entra como cualquier captura y sale de la lista.
+
 > **El auto-deploy se paró solo, y así se ve (10 sep 2026).** Un push es el deploy
 > (`auto_update.py`), pero `update.sh` hace `mkdir -p logs`, `logs/` no estaba en `.gitignore` y el
 > gate leía `git status --porcelain` — que cuenta lo no trackeado. O sea: **el primer auto-update
@@ -179,9 +186,26 @@ El header `Order Number: 880036   Account Number: 0010495 00` trae la cuenta bil
 teclea en FedEx Ship Manager es `cuenta sin ceros + sufijo` = `1049500`, y FSM ya tiene
 951 destinatarios con esa convención — por eso la llave se guarda y no se inventa.
 
-- **Cuenta → `customers.as400_account`.** `_resolve_customer` busca **primero por
-  cuenta**; solo sin match cae al nombre + calle de siempre, y al encontrar o crear la
-  fila **sella** la cuenta (`UPDATE … IS NULL`: rellena si está vacía, nunca la pisa).
+- **El cliente es el Ship-to; la cuenta sólo si es la misma tienda (29 oct 2026).**
+  `parser.parse_parties` compara el Bill-to con el Ship-to. Si son el mismo nombre
+  (`same_party`), `customer_name` es ese nombre y la cuenta identifica y sella la ficha
+  como siempre. Si no coinciden —cuenta de rep 055xxxx mandando una muestra a una tienda,
+  eBay a una persona, Consumer All Access a un dealer— `customer_name` es el **Ship-to**,
+  la ficha se busca o se crea por nombre + calle del Ship-to, la cuenta **no** se usa ni se
+  sella (`seal_account = False`; `picking_lists.as400_account_number` la guarda cruda), y el
+  Bill-to va a `picking_lists.contact_name` con el teléfono que PickD ya tenga de esa cuenta
+  en `contact_phone`. Un Ship-to que es una instrucción (`PICK UP`, `CONTAINER LOAD`) o sin
+  calle ni ciudad no cuenta como otra tienda. Motivo: la 882087 (cuenta 0550369 = JOHN
+  EPPLEY, Ship SIC TRANSIT CYCLES) nació a nombre del rep porque la cuenta ganaba sobre el
+  nombre. La puerta lee el Ship-to para `no_customer` y el Bill-to para `junk`.
+- **Cuenta → `customers.as400_account`.** Con `seal_account`, `_resolve_customer` busca
+  **primero por cuenta**; solo sin match cae al nombre + calle de siempre, y al encontrar o
+  crear la fila **sella** la cuenta (`UPDATE … IS NULL`: rellena si está vacía, nunca la pisa).
+- **Una dirección que no lo es no se guarda.** `looks_like_address`: sin ciudad, o con una
+  calle que es una línea de artículos (`03 4868 BL N HUDSON … 1368.95`), se descarta y se
+  loguea. 36 fichas llegaron a prod con la calle «Price» + artículos porque una captura sin
+  cabecera leía la columna `Ord Ship` de la tabla como Ship-to; `_extract_ship_to_lines` ya la
+  salta.
 - **Sufijo → `customer_addresses.as400_ship_to`.** El watcher **nunca escribe
   `fedex_recipient_id`**: lo deriva un trigger de la DB a partir del sufijo y la cuenta
   del cliente. Localmente solo se calcula para *buscar* el slot.
