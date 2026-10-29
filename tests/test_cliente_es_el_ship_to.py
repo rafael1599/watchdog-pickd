@@ -132,6 +132,20 @@ def test_warranty_ships_to_the_store_and_a_channel_is_no_contact():
     assert p["contact_name"] is None  # «DEALER WARRANTY 2009» no es nadie a quien llamar
 
 
+def test_a_sales_channel_is_no_contact_either():
+    text = DEALER.replace("Bill TUCKER CYCLES", "Bill JAMIS CONSUMER ALL ACCESS").replace(
+        "Ship TUCKER CYCLES", "Ship LUCKY BIKES"
+    )
+    p = parse_parties(text)
+    assert p["same_party"] is False
+    assert p["customer_name"] == "LUCKY BIKES"
+    assert p["contact_name"] is None
+    for bill in ("EBAY PARTS SALES", "FACEBOOK SALES", "CARINE JOANNOU PERSONAL", "DONATIONS 2026"):
+        assert (
+            parse_parties(text.replace("JAMIS CONSUMER ALL ACCESS", bill))["contact_name"] is None
+        )
+
+
 def test_pick_up_is_not_another_store():
     p = parse_parties(PICKUP)
     assert p["same_party"] is True

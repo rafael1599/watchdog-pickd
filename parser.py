@@ -481,6 +481,32 @@ def _party_key(name) -> str:
     return re.sub(r"[^A-Z0-9]", "", (name or "").upper())
 
 
+_CHANNEL_WORDS = (
+    "VOID",
+    "CONSUMER",
+    "SALES",
+    "WARRANTY",
+    "DONATION",
+    "PERSONAL",
+    "PURCHASE",
+    "ACCOUNT",
+    "ALL ACCESS",
+    "EBAY",
+    "FACEBOOK",
+    "SAMPLE",
+)
+
+
+def _is_channel_name(name: str) -> bool:
+    """A Bill-to that is a sales channel or a placeholder, never a person to call:
+    anything with a digit, VOID, or one of the channel words read in prod on
+    29 oct 2026 (JAMIS CONSUMER ALL ACCESS, EBAY PARTS SALES, FACEBOOK SALES,
+    DEALER WARRANTY 2009, DONATIONS 2026, CARINE JOANNOU PERSONAL, INDUSTRY
+    PURCHASE)."""
+    up = " ".join((name or "").upper().split())
+    return bool(re.search(r"\d", up)) or any(w in up for w in _CHANNEL_WORDS)
+
+
 def parse_parties(text: str) -> Dict:
     """Quién paga y quién recibe, y si son la misma tienda (Rafael, 29 oct 2026).
 
@@ -512,9 +538,11 @@ def parse_parties(text: str) -> Dict:
         customer, contact = bill, None
     else:
         customer = ship_name
-        # El Bill-to como contacto sólo si se lee como un nombre: una cuenta VOID o
-        # un canal con año («DEALER WARRANTY 2009») no es nadie a quien llamar.
-        contact = bill if bill and not re.search(r"\d|VOID", bill, re.IGNORECASE) else None
+        # El Bill-to como contacto sólo si se lee como una persona: una cuenta VOID,
+        # un canal con año («DEALER WARRANTY 2009») o un canal de ventas («JAMIS
+        # CONSUMER ALL ACCESS», «EBAY PARTS SALES», «FACEBOOK SALES», «DONATIONS»,
+        # «CARINE JOANNOU PERSONAL») no es nadie a quien llamar.
+        contact = bill if bill and not _is_channel_name(bill) else None
 
     return {
         "bill_to_name": bill,
