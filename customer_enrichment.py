@@ -215,7 +215,7 @@ def rank_customers(customers, orders, seen=None, today=None, writes=False) -> li
         if c.get("id") not in count:
             continue
         acct = str(c.get("as400_account") or "").strip()
-        if not acct.isdigit() or c.get("ship_to_varies"):
+        if not acct.isdigit() or c.get("ship_to_varies") or is_rep_account(acct):
             continue
         if c.get("phone") and c.get("email"):
             continue
@@ -278,6 +278,13 @@ def fetch_queue(client=None) -> list:
 # ── what a read would write ──────────────────────────────────────────────────
 
 
+def is_rep_account(account) -> bool:
+    """A 055xxxx account is a rep's sample account (JOHN EPPLEY, HAMISH PARSONS…):
+    its CUSTOMER DISPLAY says `SAMPLE ACCOUNT`, never a dealer's contact."""
+    a = str(account or "").strip().lstrip("0")
+    return len(a) == 6 and a.startswith("55")
+
+
 def plan_write(row: dict, parsed: dict) -> dict:
     """The columns a read fills. Pure, and it is the whole write rule:
 
@@ -310,10 +317,14 @@ def apply_write(customer_id: str, plan: dict, client=None) -> int:
     cl = _client(client)
     addresses = plan.get("_addresses") or {}
     for col, value in addresses.items():
+        # Only the default address: the dealer's own store. Writing it on every
+        # row put WYCKOFF's owner on a junk row and Consumer All Access's buyer
+        # on LUCKY BIKES (29 oct 2026).
         res = (
             cl.table("customer_addresses")
             .update({col: value})
             .eq("customer_id", customer_id)
+            .eq("is_default", True)
             .is_(col, "null")
             .execute()
         )

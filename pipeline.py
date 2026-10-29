@@ -93,9 +93,11 @@ def preview_order(text: str) -> dict:
 
     return {
         "order_number": data.get("order_number"),
-        "customer": data.get("customer_name") or "Unknown",  # Bill-to (drives customers.name)
-        # Ship-to name: what the floor reads on the card. Bill-to stays for the DB
-        # and the auto-archive rule (EBAY PART SALES is a Bill-to).
+        # Bill-to: who pays. The door's junk rule reads it (EBAY PART SALES is a
+        # Bill-to) and as400_captures.customer shows it. Since 29 oct 2026 it is
+        # NOT what customers.name gets: that is the Ship-to (parser.parse_parties).
+        "customer": data.get("bill_to_name") or data.get("customer_name") or "Unknown",
+        # Ship-to name: what the floor reads on the card and who the order is for.
         "ship_to": (data.get("shipping") or {}).get("name") or None,
         "item_count": len(items),  # number of distinct line items / SKUs
         "total_units": total_units,  # sum of quantities

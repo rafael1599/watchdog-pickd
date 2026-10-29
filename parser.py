@@ -127,7 +127,25 @@ def mask_bank_numbers(text):
     return _BANK_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}****", text)
 
 
-_NOT_A_PERSON = ("CREDIT CARD", "ON FILE", "NONE", "N/A", "COD", "SAME", "****")
+_NOT_A_PERSON = (
+    "CREDIT CARD",
+    "ON FILE",
+    "NONE",
+    "N/A",
+    "COD",
+    "SAME",
+    "****",
+    # 29 oct 2026, read in prod: notes, not people — `ALEX OR DANNY ARE SONS CAN
+    # ORDER`, `BRIAN OFF FRIDAYS`, `MISH & JODY`, `SAMPLE ACCOUNT` (a rep).
+    " OR ",
+    "&",
+    "SAMPLE",
+    "CAN ORDER",
+    "OFF ",
+)
+# A dash with a space on either side (`AUDREY -BARRY`) is two notes glued, not a
+# `NAME-OWNER`.
+_LOOSE_DASH = re.compile(r"\s-|-\s")
 
 
 def buyer_as_contact(value):
@@ -139,7 +157,7 @@ def buyer_as_contact(value):
     v = (value or "").strip()
     if not v or re.search(r"\d|#", v):
         return None
-    if any(bad in v.upper() for bad in _NOT_A_PERSON):
+    if any(bad in v.upper() for bad in _NOT_A_PERSON) or _LOOSE_DASH.search(v):
         return None
     if not re.fullmatch(r"[A-Za-z][A-Za-z .'&()/,-]*", v):
         return None
@@ -450,6 +468,63 @@ def parse_customer_address(text: str) -> Optional[dict]:
     return None
 
 
+# Un Ship-to que no es una tienda ni una persona: es una instrucción. El cliente
+# sigue siendo el Bill-to (29 oct 2026: «PICK UP», «CONTAINER LOAD», «ALEXIS TO
+# DELIVER», «DO NOT SHIP»).
+_SHIP_TO_INSTRUCTION = re.compile(
+    r"PICK\s*UP|CONTAINER\s+LOAD|TO\s+DELIVER|DO\s+NOT\s+SHIP|WILL\s+CALL|HOLD\s+FOR",
+    re.IGNORECASE,
+)
+
+
+def _party_key(name) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (name or "").upper())
+
+
+def parse_parties(text: str) -> Dict:
+    """Quién paga y quién recibe, y si son la misma tienda (Rafael, 29 oct 2026).
+
+    `customers.name` es el **Ship-to**: a quién se le manda. La cuenta del header
+    es del Bill-to, y sólo identifica la ficha cuando Bill y Ship son el mismo
+    nombre (`same_party`). Si no coinciden —una cuenta de rep (055xxxx) mandando
+    una muestra a una tienda, eBay a una persona, Consumer All Access a un
+    dealer— el Ship-to es el cliente y el Bill-to pasa a `contact_name` de la
+    orden. La 882087 (cuenta 0550369 = JOHN EPPLEY, Ship SIC TRANSIT CYCLES)
+    nació a nombre del rep por buscar la ficha por cuenta antes que por nombre.
+
+    `same_party` también es True cuando no hay Ship-to, cuando el Ship-to es una
+    instrucción («PICK UP») o cuando no trae ni calle ni ciudad: ahí no hay otra
+    tienda a la que atribuir la orden.
+
+    Returns `{bill_to_name, ship_to_name, same_party, customer_name, contact_name}`.
+    """
+    bill = parse_customer_name(text)
+    ship = parse_shipping_address_struct(text) or {}
+    ship_name = (ship.get("name") or "").strip() or None
+
+    same = True
+    if ship_name and _party_key(ship_name) != _party_key(bill):
+        instruction = bool(_SHIP_TO_INSTRUCTION.search(ship_name))
+        has_place = bool((ship.get("street") or "").strip() or (ship.get("city") or "").strip())
+        same = instruction or not has_place
+
+    if same:
+        customer, contact = bill, None
+    else:
+        customer = ship_name
+        # El Bill-to como contacto sólo si se lee como un nombre: una cuenta VOID o
+        # un canal con año («DEALER WARRANTY 2009») no es nadie a quien llamar.
+        contact = bill if bill and not re.search(r"\d|VOID", bill, re.IGNORECASE) else None
+
+    return {
+        "bill_to_name": bill,
+        "ship_to_name": ship_name,
+        "same_party": same,
+        "customer_name": customer,
+        "contact_name": contact,
+    }
+
+
 def parse_items(text: str) -> List[Dict]:
     """
     Parse order line items from the structured table.
@@ -569,8 +644,11 @@ def _extract_ship_to_lines(text: str) -> list:
     for line in lines:
         if ship_col is None:
             m = re.search(r"\bShip\b", line)
-            # The Ship-to label, not 'Ship Via' / 'Ship Date' / 'Shipped From'.
-            if m and not re.search(r"Ship\s+(Via|Date)|Shipped", line):
+            # The Ship-to label, not 'Ship Via' / 'Ship Date' / 'Shipped From', and
+            # not the `Ord   Ship` column header of the items page: on a capture
+            # whose header page lost the Ship-to, that line made the dealer's
+            # address «Price» + a line of items (36 rows in prod, 29 oct 2026).
+            if m and not re.search(r"Ship\s+(Via|Date)|Shipped|\bOrd\s+Ship\b", line):
                 ship_col = m.start()
                 name = line[m.end() :].strip()
                 if name:
@@ -787,7 +865,12 @@ def parse_order(text: str) -> dict:
             'account_number': str | None,  # raw header value, e.g. '0010495 00'
             'as400_account': str | None,   # bill-to account without leading zeros ('10495')
             'as400_ship_to': str | None,   # 2-digit ship-to suffix ('00'); FedEx ID = account+suffix
-            'customer_name': str | None,
+            'customer_name': str | None,   # the Ship-to; the Bill-to only when same_party
+            'bill_to_name': str | None,
+            'ship_to_name': str | None,
+            'same_party': bool,           # Bill and Ship are one store (see parse_parties)
+            'contact_name': str | None,   # the Bill-to, when it is somebody else
+            'seal_account': bool,         # as400_account may identify/seal the customer
             'customer_address': dict | None,
             'items': [ { sku, qty, qty_ordered, raw_sku, warehouse, description, unit_price, extend_price } ],
             'is_last_page': bool,
@@ -800,12 +883,14 @@ def parse_order(text: str) -> dict:
     """
     account_number = parse_account_number(text)
     as400_account, as400_ship_to = split_account_number(account_number)
+    parties = parse_parties(text)
     return {
         "order_number": parse_order_number(text),
         "account_number": account_number,
         "as400_account": as400_account,
         "as400_ship_to": as400_ship_to,
-        "customer_name": parse_customer_name(text),
+        **parties,
+        "seal_account": parties["same_party"],
         "customer_address": parse_customer_address(text),
         "items": parse_items(text),
         "subtotal": parse_order_subtotal(text),
