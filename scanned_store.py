@@ -38,6 +38,12 @@ log = logging.getLogger("pickd-scanned-store")
 # The first order number the auto-scanner should try when the cache is empty.
 SCAN_START = int(os.getenv("SCAN_START", "880112"))
 
+# Capturas que NO son del barrido: un número cualquiera, tecleado a mano en Bay 2
+# o pedido desde la búsqueda de PickD (5 nov 2026). Ninguna mueve el cursor ni
+# cuenta como «la última» del barrido: un error de dedo pedido desde un teléfono
+# (892090) saltaría diez mil órdenes.
+NOT_THE_SWEEP = ("manual_capture", "pickd_request")
+
 _lock = threading.Lock()
 
 
@@ -192,7 +198,7 @@ def next_scan_number(start: int = SCAN_START) -> int:
     # before the cursor existed). Manual captures of arbitrary numbers are excluded —
     # they must not make the scanner skip the orders in between.
     for k, e in load().items():
-        if str(k).isdigit() and int(k) >= start and (e or {}).get("source") != "manual_capture":
+        if str(k).isdigit() and int(k) >= start and (e or {}).get("source") not in NOT_THE_SWEEP:
             candidates.append(int(k) + 1)
     return max(candidates)
 
@@ -208,7 +214,7 @@ def latest_number(start: int = SCAN_START) -> int:
     crosses a boundary."""
     highest = start
     for k, e in load().items():
-        if str(k).isdigit() and int(k) >= start and (e or {}).get("source") != "manual_capture":
+        if str(k).isdigit() and int(k) >= start and (e or {}).get("source") not in NOT_THE_SWEEP:
             highest = max(highest, int(k))
     return highest
 
