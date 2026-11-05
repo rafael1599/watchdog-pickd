@@ -17,6 +17,29 @@ Daemon que monitorea una carpeta (`~/send-to-pickd/`) por archivos PDF de ordene
 > sigue, y `run_scan_step` lo repasa cada 15 min (`PARKED_REVISIT_SEC`) hasta 3 días
 > (`PARKED_MAX_AGE_SEC`). Si por fin abre, entra como cualquier captura y sale de la lista.
 
+> **Una orden pedida desde la búsqueda de PickD se teclea antes que el barrido, sin mover el
+> cursor (5 nov 2026, PR 2 de `docs/prds/ask-as400-from-search.md` en pickd).** El board deja una
+> fila `queued` en `as400_order_requests` (migración `20261105164051` de pickd, aplicada **antes**
+> de mergear esto). `door.py` la lee cada tick (10 s, `AS400_DOOR_POLL_SEC`; sólo las de < 60 min,
+> las demás el board ya las enseña `expired`) y se la pasa a `auto_scanner.set_request_queue`.
+> El bucle, tras la compuerta del operario y `capture_lock`, llama a `serve_request` en vez de
+> `run_scan_step`. El escáner no toca la BD: deja eventos (`started`, `result`) que la puerta
+> escribe en menos de 1 s (`request_events_ready` la despierta): `opening`, `not_in_as400`,
+> `void`, `wont_open`, o de vuelta a `queued` (al tercer intento, `failed`). Una captura buena
+> entra al caché como `pickd_request`, se publica en el acto y `as400_request_captured` decide en
+> SQL (`in_pickd`, `shipped` por `Invoice No`, `held`, o `send` y la puerta la envía sin esperar
+> al tick). Reglas que no se tocan:
+> - **Nunca** `park`, `skip` ni `put(source="auto_scan")` en ese camino: adelantan el cursor, y
+>   un error de dedo (892090) saltaría diez mil órdenes. `scanned_store.NOT_THE_SWEEP` excluye
+>   `pickd_request` (y `manual_capture`) del cursor y de `latest_number`.
+> - «No abre» es la misma prueba que b108f36 (`_another_order_opens`): si la última capturada
+>   abre, la petición queda `wont_open`, **sin** apartar el número.
+> - La petición despierta las esperas y hace ceder al catálogo (`_request`, como `_kick`) pero
+>   **no** salta la compuerta del operario: con alguien en Bay 2 espera, y el latido lleva
+>   `operator_seen_at` para que el board diga «in use». Un «get orders now» de Bay 2 va antes.
+> - Una `opening` de más de 3 min que este proceso no tiene entre manos (un reinicio la cortó)
+>   vuelve a `queued` (`recover_stuck_requests`).
+
 > **El auto-deploy se paró solo, y así se ve (10 sep 2026).** Un push es el deploy
 > (`auto_update.py`), pero `update.sh` hace `mkdir -p logs`, `logs/` no estaba en `.gitignore` y el
 > gate leía `git status --porcelain` — que cuenta lo no trackeado. O sea: **el primer auto-update
