@@ -164,6 +164,26 @@ _thread: threading.Thread | None = None
 # the computer is obviously in use). Consumed right before the scan step runs.
 _kick = threading.Event()
 
+# ── Peticiones de PickD (5 nov 2026, PR 2 de docs/prds/ask-as400-from-search.md) ─
+#
+# Rafael: «si no encuentra una orden, la manda a pedir al AS400 para traerla a
+# PickD». La búsqueda del board deja una fila `queued` en as400_order_requests;
+# la puerta (door.py) la lee cada tick y la deja aquí. El escáner la teclea
+# ANTES que el barrido y le cuenta a la puerta cómo fue por `_req_events`: el
+# escáner no toca la BD, igual que no publica desde `run_scan_step`.
+#
+# `_request` despierta las esperas (los 20 min de not_found, las ráfagas de
+# catálogo) igual que `_kick`, pero NO salta la compuerta del operario: `_kick`
+# lo pulsa alguien sentado en Bay 2; una petición viene de un teléfono.
+_request = threading.Event()
+_req_lock = threading.Lock()
+_req_queue: list[dict] = []  # {id, order_number, attempts, started_at}, en orden
+_req_current: dict | None = None  # la que se está tecleando
+_req_events: list[dict] = []  # lo que la puerta tiene que escribir, en orden
+# La puerta espera en este evento entre ticks: el resultado de una petición se
+# escribe en menos de un segundo, sin esperar a los 10 s del sondeo.
+request_events_ready = threading.Event()
+
 # ── AS400 health beacon ──────────────────────────────────────────────────────
 # The UI status dot used to turn green ONLY after a manual Connect/Check click —
 # it stayed gray while the auto-scanner was happily capturing orders. Every AS400
@@ -325,6 +345,27 @@ def operator_idle_seconds() -> float:
         return 0.0  # Delete ×2: nobody is idle until the stop runs out
 
     return now - _last_operator_input
+
+
+def operator_seen_at() -> str | None:
+    """La última vez que una PERSONA tocó Bay 2, en ISO UTC, para el latido
+    (`as400_watcher_heartbeat.operator_seen_at`). Con ella el board dice «Bay 2
+    is in use» mientras una petición espera la compuerta.
+
+    Lee lo que `operator_idle_seconds` ya recordó (el escáner lo pregunta cada
+    vuelta) y el centinela; no lanza `ioreg` desde el hilo de la puerta. None si
+    no se sabe: fuera de macOS el reloj dice «hace mil millones de segundos»."""
+    import operator_sentinel
+
+    seen = [
+        t for t in (_last_operator_input, operator_sentinel.last_operator_at()) if t is not None
+    ]
+    if not seen:
+        return None
+    ago = time.monotonic() - max(seen)
+    if ago < 0 or ago > 30 * 86400:
+        return None
+    return datetime.fromtimestamp(time.time() - ago, tz=timezone.utc).isoformat()
 
 
 def _meta_from_preview(preview: dict) -> dict:
@@ -501,17 +542,8 @@ def _park_if_session_fine(n: int, err: Exception, driver, capture_fn) -> dict | 
 
     Devuelve el resultado del paso cuando la aparta, o None.
     """
-    if not isinstance(err, AS400SessionClosed):
-        return None
-    if not is_empty_order_search_screen(getattr(err, "screen", None) or ""):
-        return None
-    known = scanned_store.latest_number()
-    if known == n or scanned_store.get(known) is None:
-        return None  # nada capturado con qué comparar: no se puede saber
-    try:
-        capture_fn(str(known), driver)
-    except Exception as probe_err:  # noqa: BLE001 — cualquier fallo = no está probado
-        log.info("auto-scan: #%s did not open and neither did #%s (%s)", n, known, probe_err)
+    known = _another_order_opens(n, err, driver, capture_fn)
+    if known is None:
         return None
     entry = scanned_store.park(n)
     log.warning(
@@ -523,6 +555,191 @@ def _park_if_session_fine(n: int, err: Exception, driver, capture_fn) -> dict | 
         entry["tries"],
     )
     return {"action": "parked", "number": str(n)}
+
+
+def _another_order_opens(n, err: Exception, driver, capture_fn) -> int | None:
+    """La prueba de b108f36, sola: búsqueda vacía tras teclear `n`, ¿abre la
+    última orden que sí capturamos? Devuelve ese número si abre (la sesión está
+    bien: el problema es `n`), o None si no se puede saber o tampoco abre.
+
+    No aparta nada ni mueve el cursor: eso lo decide quien pregunta. El barrido
+    aparta (`_park_if_session_fine`); una petición de PickD no, porque apartar
+    adelanta el cursor más allá del número (`serve_request`)."""
+    if not isinstance(err, AS400SessionClosed):
+        return None
+    if not is_empty_order_search_screen(getattr(err, "screen", None) or ""):
+        return None
+    known = scanned_store.latest_number()
+    if str(known) == str(n) or scanned_store.get(known) is None:
+        return None  # nada capturado con qué comparar: no se puede saber
+    try:
+        capture_fn(str(known), driver)
+    except Exception as probe_err:  # noqa: BLE001 — cualquier fallo = no está probado
+        log.info("auto-scan: #%s did not open and neither did #%s (%s)", n, known, probe_err)
+        return None
+    return known
+
+
+# ── Peticiones de PickD: la cola y quién la atiende ──────────────────────────
+
+
+def set_request_queue(rows: list[dict]) -> int:
+    """La puerta deja aquí las peticiones `queued` que acaba de leer, en orden.
+
+    Sustituye la cola entera: una petición que caducó o que otro cerró en la BD
+    desaparece de aquí también, y así no se teclea algo que el board ya da por
+    muerto. La que se está tecleando, y las que tienen un resultado aún sin
+    escribir, no se vuelven a encolar. Devuelve cuántas quedan en cola."""
+    with _req_lock:
+        held = {e["id"] for e in _req_events}
+        if _req_current is not None:
+            held.add(_req_current["id"])
+        _req_queue[:] = [
+            {
+                "id": r["id"],
+                "order_number": str(r["order_number"]),
+                "attempts": int(r.get("attempts") or 0),
+                "started_at": r.get("started_at"),
+            }
+            for r in rows
+            if r.get("id") is not None and r["id"] not in held
+        ]
+        if _req_queue:
+            _request.set()
+        else:
+            _request.clear()
+        return len(_req_queue)
+
+
+def _take_request() -> dict | None:
+    """La siguiente petición, que pasa a ser la que se teclea."""
+    global _req_current
+    with _req_lock:
+        if not _req_queue:
+            _request.clear()
+            return None
+        _req_current = _req_queue.pop(0)
+        if not _req_queue:
+            _request.clear()
+        return dict(_req_current)
+
+
+def _post_request_event(event: dict) -> None:
+    with _req_lock:
+        _req_events.append(event)
+    request_events_ready.set()
+
+
+def _request_done() -> None:
+    global _req_current
+    with _req_lock:
+        _req_current = None
+
+
+def peek_request_event() -> dict | None:
+    """El primer resultado sin escribir. La puerta lo quita con
+    `pop_request_event` sólo después de escribirlo: un fallo de red no lo pierde."""
+    with _req_lock:
+        return dict(_req_events[0]) if _req_events else None
+
+
+def pop_request_event() -> None:
+    with _req_lock:
+        if _req_events:
+            _req_events.pop(0)
+
+
+def requests_held() -> set:
+    """Ids que este proceso tiene entre manos (tecleando o con resultado sin
+    escribir). La puerta no devuelve a `queued` una `opening` de éstas."""
+    with _req_lock:
+        held = {e["id"] for e in _req_events}
+        if _req_current is not None:
+            held.add(_req_current["id"])
+        return held
+
+
+def serve_request(req: dict, driver, *, capture_fn=capture_order, preview_fn=None) -> dict:
+    """Teclea una orden pedida desde PickD. NUNCA mueve el cursor del barrido.
+
+    Nada de `scanned_store.park`, `skip` ni `put(source="auto_scan")`: los tres
+    adelantan el cursor más allá del número, y un error de dedo (892090)
+    saltaría unas diez mil órdenes. La captura buena entra al caché como
+    `pickd_request`, que el cursor no cuenta.
+
+    Lo que pasó viaja a la puerta en dos eventos — `started` antes de teclear y
+    `result` después — y la puerta lo escribe en `as400_order_requests`. Devuelve
+    el resultado del paso para el bucle: `captured`, `request_closed` (no existe,
+    VOID, no abre), `incomplete` o `unavailable` (sigue el camino de reinicio de
+    siempre).
+    """
+    if preview_fn is None:
+        from pipeline import preview_order as preview_fn
+
+    number = str(req["order_number"])
+    rid = req["id"]
+    attempts = int(req.get("attempts") or 0) + 1
+    _post_request_event(
+        {
+            "kind": "started",
+            "id": rid,
+            "order_number": number,
+            "attempts": attempts,
+            "started_at": req.get("started_at"),
+        }
+    )
+
+    def result(outcome: str, action: str, detail: str | None = None) -> dict:
+        _post_request_event(
+            {
+                "kind": "result",
+                "id": rid,
+                "order_number": number,
+                "attempts": attempts,
+                "outcome": outcome,
+                "detail": detail,
+            }
+        )
+        log.info("auto-scan: PickD asked for #%s — %s", number, outcome)
+        return {"action": action, "number": number, "request": outcome}
+
+    try:
+        try:
+            text = capture_fn(number, driver)
+        except OrderVoidSkip:
+            return result("void", "request_closed")
+        except OrderNotFound:
+            return result("not_in_as400", "request_closed")
+        except AS400SessionClosed as e:
+            known = _another_order_opens(number, e, driver, capture_fn)
+            if known is not None:
+                return result("wont_open", "request_closed", f"#{known} opens")
+            # Ni ésta ni la última: es la sesión. Vuelve a la cola y el bucle
+            # sigue el camino de reinicio de siempre.
+            return result("retry", "unavailable", f"session: {e}"[:300])
+        except (AS400Disconnected, AS400ManualLoginRequired) as e:
+            return result("retry", "unavailable", f"{type(e).__name__}: {e}"[:300])
+        except CaptureError as e:
+            # A medias (sin END OF ORDER, el operario tomó el teclado…).
+            return result("retry", "incomplete", f"{type(e).__name__}: {e}"[:300])
+
+        preview = preview_fn(text)
+        meta = _meta_from_preview(preview)
+        # La misma regla que el barrido: cabecera completa, cero líneas y el
+        # total cuadra ⇒ VOID. Si no cuadra es una página a medio pintar.
+        if (
+            meta.get("order_number")
+            and not (meta.get("item_count") or 0)
+            and preview.get("is_last_page")
+            and not meta.get("total_mismatch")
+        ):
+            return result("void", "request_closed")
+        if not meta.get("order_number") or not (meta.get("item_count") or 0):
+            return result("retry", "incomplete", "the capture parsed to no order")
+        scanned_store.put(number, text, meta, source="pickd_request")
+        return result("captured", "captured")
+    finally:
+        _request_done()
 
 
 def _revisit_parked(number: str, driver, capture_fn, preview_fn) -> dict:
@@ -561,15 +778,24 @@ def _wait_for(action: str) -> float:
         "not_found": NOT_FOUND_WAIT_SEC,
         "incomplete": INCOMPLETE_RETRY_SEC,
         "unavailable": UNAVAILABLE_WAIT_SEC,
+        # Una petición de PickD que ya tiene respuesta: a la siguiente.
+        "request_closed": FOUND_NEXT_DELAY_SEC,
     }.get(action, NOT_FOUND_WAIT_SEC)
 
 
-def _interruptible_wait(seconds: float) -> None:
-    """Sleep up to `seconds`, returning early on shutdown or a manual kick."""
+def _interruptible_wait(seconds: float, *, wake_on_request: bool = True) -> None:
+    """Sleep up to `seconds`, returning early on shutdown, a manual kick, or a
+    request from PickD.
+
+    `wake_on_request=False` donde despertar no serviría de nada: la compuerta
+    del operario (la petición tampoco puede teclear con alguien en Bay 2, y
+    despertar cada medio segundo sería leer `ioreg` en bucle) y las esperas de
+    un terminal caído o a medias (aporrear un AS400 que no contesta es como se
+    atasca una sesión)."""
     deadline = time.monotonic() + seconds
     while not _stop.is_set():
         remaining = deadline - time.monotonic()
-        if remaining <= 0 or _kick.is_set():
+        if remaining <= 0 or _kick.is_set() or (wake_on_request and _request.is_set()):
             return
         _kick.wait(min(0.5, remaining))
 
@@ -645,6 +871,13 @@ def _run_sku_gap() -> float:
             if _kick.is_set():
                 _note_gap("orders requested")
                 log.info("auto-scan: orders requested — SKU queue yields after %d", done)
+                return time.monotonic() - started
+            # Una orden pedida desde PickD también: alguien la espera en el board.
+            if _request.is_set():
+                _note_gap("an order was asked for in PickD")
+                log.info(
+                    "auto-scan: an order was asked for in PickD — SKU queue yields after %d", done
+                )
                 return time.monotonic() - started
             # El teclado del operario gana también, comprobado antes de CADA
             # consulta… salvo mientras dure el permiso de «hoy no hay nadie».
@@ -790,6 +1023,9 @@ def _run_customer_gap() -> float:
             if _kick.is_set():
                 _note_gap("orders requested")
                 return True
+            if _request.is_set():
+                _note_gap("an order was asked for in PickD")
+                return True
             if not ignoring_operator() and operator_idle_seconds() < IDLE_THRESHOLD_SEC:
                 _note_gap("the operator is back")
                 return True
@@ -924,7 +1160,7 @@ def _loop() -> None:
         scanned_store.next_scan_number(),
         SCAN_INITIAL_DELAY_SEC,
     )
-    _interruptible_wait(SCAN_INITIAL_DELAY_SEC)
+    _interruptible_wait(SCAN_INITIAL_DELAY_SEC, wake_on_request=False)
     driver = None
     paused_since = None
     # How long the AS400 has been unreachable, and whether we've said so loudly.
@@ -943,7 +1179,9 @@ def _loop() -> None:
             left = operator_sentinel.emergency_remaining()
             if left > 0:
                 _note_gap(f"stopped by the operator (Delete ×2) — {left / 60:.0f} min left")
-            _interruptible_wait(IDLE_POLL_SEC)
+            # Una petición de PickD tampoco teclea con alguien en Bay 2: espera,
+            # y el board lo dice con `operator_seen_at` del latido.
+            _interruptible_wait(IDLE_POLL_SEC, wake_on_request=False)
             continue
         if paused_since is not None:
             # Measurement (plan F0): how much of the day the scanner spends yielding
@@ -961,6 +1199,10 @@ def _loop() -> None:
             continue
         manual = _kick.is_set()
         _kick.clear()  # this pass consumes the manual trigger
+        # Una petición de PickD va antes que el barrido (antes que las apartadas
+        # y que el cursor). Un «get orders now» de Bay 2 va antes que ella: es
+        # alguien sentado ahí pidiendo el barrido, y la petición sigue en cola.
+        req = None if manual else _take_request()
 
         wait = NOT_FOUND_WAIT_SEC
         # Ligada ANTES del try: `_paced` la lee fuera de el, y si
@@ -974,7 +1216,7 @@ def _loop() -> None:
             if manual:
                 _manual_pass.set()
             try:
-                res = run_scan_step(driver)
+                res = serve_request(req, driver) if req is not None else run_scan_step(driver)
             finally:
                 _manual_pass.clear()
             action = res["action"]
@@ -1022,7 +1264,7 @@ def _loop() -> None:
                             idle_now,
                         )
                     _kick.clear()
-                    _interruptible_wait(IDLE_POLL_SEC)
+                    _interruptible_wait(IDLE_POLL_SEC, wake_on_request=False)
                     continue
                 if _operator_since is not None:
                     log.info("auto-scan: taking the terminal back (idle %.0fs)", idle_now)
@@ -1099,7 +1341,11 @@ def _loop() -> None:
             capture_lock.release()
 
         wait = _paced(action, wait, gap_spent)
-        _interruptible_wait(wait)
+        # Una petición nueva despierta la espera de un not_found o de una orden
+        # capturada; la de un terminal caído o a medias, no.
+        _interruptible_wait(
+            wait, wake_on_request=action not in ("unavailable", "incomplete", "error")
+        )
 
 
 def _paced(action: str, wait: float, gap_spent: float = 0.0) -> float:

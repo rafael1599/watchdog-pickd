@@ -267,16 +267,7 @@ def reconcile(client, *, now=None, preview_fn=None, bike_skus=None) -> dict:
             counts["unchanged"] += 1
             continue
         try:
-            client.rpc(
-                "publish_as400_capture",
-                {
-                    "p_order_number": str(number),
-                    "p_status": status,
-                    "p_hold_reason": reason,
-                    "p_payload": payload,
-                },
-            ).execute()
-            _published[str(number)] = sig
+            _publish(client, number, status, reason, payload, sig)
             counts["published"] += 1
         except Exception as e:  # noqa: BLE001
             counts["failed"] += 1
@@ -290,6 +281,44 @@ def reconcile(client, *, now=None, preview_fn=None, bike_skus=None) -> dict:
                 )
                 break
     return counts
+
+
+def _publish(client, number, status: str, reason, payload: dict, sig: str) -> None:
+    client.rpc(
+        "publish_as400_capture",
+        {
+            "p_order_number": str(number),
+            "p_status": status,
+            "p_hold_reason": reason,
+            "p_payload": payload,
+        },
+    ).execute()
+    _published[str(number)] = sig
+
+
+def publish_cached(client, number, *, now=None, preview_fn=None, bike_skus=None) -> bool:
+    """Publish ONE cached capture now, the same way the reconciler does.
+
+    For an order asked for in PickD: `as400_request_captured` reads the row, so
+    it cannot wait for the next reconcile. False = nothing publishable cached.
+    """
+    from pipeline import preview_order
+
+    entry = scanned_store.get(number)
+    if not entry:
+        return False
+    decision = classify(entry, now or datetime.now(timezone.utc))
+    if decision is None:
+        return False
+    status, reason = decision
+    if bike_skus is None:
+        from supabase_client import get_bike_skus
+
+        bike_skus = get_bike_skus()
+    preview = (preview_fn or preview_order)(entry.get("raw_text") or "")
+    payload = build_payload(entry, preview, bike_skus)
+    _publish(client, number, status, reason, payload, _signature(status, reason, payload))
+    return True
 
 
 # ── the requests ─────────────────────────────────────────────────────────────
@@ -468,6 +497,174 @@ def auto_request(client) -> int:
     return len(rows)
 
 
+# ── orders asked for from PickD's search (5 nov 2026) ───────────────────────
+#
+# docs/prds/ask-as400-from-search.md §4 (pickd). A tap on «Bring #n from AS400»
+# leaves a `queued` row in as400_order_requests when nothing already holds the
+# order. This side reads them, hands them to the scanner (which types them on
+# Bay 2 before the sweep), and writes what happened. Every database write of a
+# request lives HERE: the scanner only posts events, the same rule as «nothing
+# is published from run_scan_step».
+
+REQUEST_OPEN = ("queued", "opening")
+# 60 min in the queue and the board shows it as expired (as400_order_request_json);
+# typing one of those would bring an order nobody is waiting for any more.
+REQUEST_EXPIRE_SEC = 3600.0
+# An `opening` this old was interrupted — a restart, a crash (§4.3 step 5).
+REQUEST_STUCK_SEC = 180.0
+# Interrupted three times ⇒ `failed` (the migration's own definition).
+REQUEST_MAX_ATTEMPTS = 3
+# The scanner's outcome → the request's final status.
+REQUEST_FINAL = {"not_in_as400": "not_in_as400", "void": "void", "wont_open": "wont_open"}
+
+
+def _iso(dt: datetime) -> str:
+    return dt.isoformat()
+
+
+def poll_order_requests(client, *, now=None, enqueue_fn=None) -> int:
+    """The queue, oldest first, handed to the scanner. Returns how many."""
+    import auto_scanner
+
+    now = now or datetime.now(timezone.utc)
+    enqueue_fn = enqueue_fn or auto_scanner.set_request_queue
+    since = datetime.fromtimestamp(now.timestamp() - REQUEST_EXPIRE_SEC, tz=timezone.utc)
+    rows = (
+        client.table("as400_order_requests")
+        .select("id, order_number, attempts, started_at, requested_at")
+        .eq("status", "queued")
+        .gte("requested_at", _iso(since))
+        .order("requested_at")
+        .limit(20)
+        .execute()
+    ).data or []
+    enqueue_fn(rows)
+    return len(rows)
+
+
+def _retry_or_fail(client, event: dict, now: datetime, detail) -> str:
+    """Back to the queue, or `failed` on the third interrupted attempt."""
+    attempts = int(event.get("attempts") or 0)
+    row = {"updated_at": _iso(now), "detail": (detail or None)}
+    if attempts >= REQUEST_MAX_ATTEMPTS:
+        row.update(status="failed", resolved_at=_iso(now))
+    else:
+        row["status"] = "queued"
+    client.table("as400_order_requests").update(row).eq("id", event["id"]).in_(
+        "status", list(REQUEST_OPEN)
+    ).execute()
+    return row["status"]
+
+
+def resolve_order_request(client, event: dict, *, now=None, publish_fn=None, send_fn=None) -> str:
+    """Write one scanner event. Returns what the row became (for logs/tests).
+
+    `started` → opening (only from queued: a row the board already closed stays
+    closed). `result` → the final state, or back to the queue. A good capture is
+    published at once and handed to `as400_request_captured`, which decides in
+    SQL — in PickD already, invoiced, held — and on `send` the door sends it in
+    the act instead of waiting for the next tick.
+    """
+    now = now or datetime.now(timezone.utc)
+    publish_fn = publish_fn or publish_cached
+    send_fn = send_fn or poll_requests
+    rid = event["id"]
+    number = event.get("order_number")
+
+    if event["kind"] == "started":
+        took = (
+            client.table("as400_order_requests")
+            .update(
+                {
+                    "status": "opening",
+                    "attempts": int(event.get("attempts") or 1),
+                    "started_at": event.get("started_at") or _iso(now),
+                    "updated_at": _iso(now),
+                }
+            )
+            .eq("id", rid)
+            .eq("status", "queued")
+            .execute()
+        ).data
+        if not took:
+            log.info("door: request %s (#%s) was no longer queued", rid, number)
+            return "not queued"
+        return "opening"
+
+    outcome = event.get("outcome")
+    if outcome in REQUEST_FINAL:
+        status = REQUEST_FINAL[outcome]
+        client.table("as400_order_requests").update(
+            {
+                "status": status,
+                "resolved_at": _iso(now),
+                "updated_at": _iso(now),
+                "detail": event.get("detail"),
+            }
+        ).eq("id", rid).in_("status", list(REQUEST_OPEN)).execute()
+        log.info("door: request %s — #%s is %s", rid, number, status)
+        return status
+
+    if outcome == "captured":
+        if not publish_fn(client, number):
+            return _retry_or_fail(client, event, now, "the capture is not in the cache")
+        said = (client.rpc("as400_request_captured", {"p_request_id": rid}).execute()).data
+        log.info("door: request %s — #%s captured, PickD says %s", rid, number, said)
+        if said == "send":
+            send_fn(client)
+            return "sending"
+        if said == "missing":
+            return _retry_or_fail(client, event, now, "no capture row to read")
+        return str(said)
+
+    return _retry_or_fail(client, event, now, event.get("detail"))
+
+
+def drain_order_request_events(client, **kw) -> int:
+    """Write every event the scanner left, in order. An event leaves the list
+    only once written, so a network blip retries it on the next tick."""
+    import auto_scanner
+
+    n = 0
+    while True:
+        event = auto_scanner.peek_request_event()
+        if event is None:
+            return n
+        resolve_order_request(client, event, **kw)
+        auto_scanner.pop_request_event()
+        n += 1
+
+
+def recover_stuck_requests(client, *, now=None, held=None) -> int:
+    """`opening` for more than three minutes and not in this process's hands:
+    a restart cut it (auto_update, a crash). Back to the queue, or failed."""
+    import auto_scanner
+
+    now = now or datetime.now(timezone.utc)
+    held = auto_scanner.requests_held() if held is None else held
+    cutoff = datetime.fromtimestamp(now.timestamp() - REQUEST_STUCK_SEC, tz=timezone.utc)
+    rows = (
+        client.table("as400_order_requests")
+        .select("id, order_number, attempts")
+        .eq("status", "opening")
+        .lt("updated_at", _iso(cutoff))
+        .execute()
+    ).data or []
+    n = 0
+    for row in rows:
+        if row["id"] in held:
+            continue
+        became = _retry_or_fail(client, row, now, "interrupted while opening")
+        log.warning(
+            "door: request %s (#%s) was cut mid-opening — %s",
+            row["id"],
+            row.get("order_number"),
+            became,
+        )
+        n += 1
+    return n
+
+
 # ── the pulse ────────────────────────────────────────────────────────────────
 
 
@@ -514,9 +711,19 @@ def heartbeat(client, version: str) -> None:
         row["as400_state"] = (
             h["state"] if h["state"] != "err" or not h.get("parked") else f"err: {h['parked']}"
         )
+        # A person on Bay 2: an order asked for in PickD waits for them, and the
+        # board says so («Bay 2 is in use») instead of just «queued».
+        row["operator_seen_at"] = auto_scanner.operator_seen_at()
     except Exception:  # noqa: BLE001 — the beat matters more than the detail
         pass
-    client.table("as400_watcher_heartbeat").upsert(row).execute()
+    try:
+        client.table("as400_watcher_heartbeat").upsert(row).execute()
+    except Exception:
+        # Before pickd's migration 20261105164051 the column is not there and
+        # PostgREST refuses the whole row: the beat goes out without it.
+        if row.pop("operator_seen_at", "absent") == "absent":
+            raise
+        client.table("as400_watcher_heartbeat").upsert(row).execute()
 
 
 # ── the thread ───────────────────────────────────────────────────────────────
@@ -533,6 +740,7 @@ def _loop() -> None:
     last_reconcile = 0.0
     failures = 0
     recovered_once = False
+    requests_failing = False
     log.info(
         "door: open — polling requests every %.0fs, reconciling every %.0fs",
         poll_sec(),
@@ -548,6 +756,20 @@ def _loop() -> None:
                 recover_stuck(client)
                 recovered_once = True
             poll_requests(client)
+            # Orders asked for from PickD's search: what the scanner did, then
+            # what is waiting. A bad night for the new table must not stop the
+            # captures above, so it fails on its own.
+            try:
+                drain_order_request_events(client)
+                recover_stuck_requests(client)
+                poll_order_requests(client)
+                requests_failing = False
+            except Exception as e:  # noqa: BLE001
+                # Once per bad run, not every ten seconds.
+                (log.info if requests_failing else log.warning)(
+                    "door: order requests tick failed (%s)", e
+                )
+                requests_failing = True
             if time.monotonic() - last_reconcile >= reconcile_sec():
                 counts = reconcile(client)
                 if counts["published"]:
@@ -566,7 +788,16 @@ def _loop() -> None:
             (log.error if failures >= 3 else log.info)(
                 "door: tick failed (%s) — next try in %.0fs", e, delay
             )
-        _stop.wait(delay)
+        # Woken early when the scanner finishes a request, so its result is
+        # written in under a second instead of on the next 10 s tick.
+        auto_scanner_events().wait(delay)
+        auto_scanner_events().clear()
+
+
+def auto_scanner_events() -> threading.Event:
+    import auto_scanner
+
+    return auto_scanner.request_events_ready
 
 
 def start_door() -> None:
@@ -584,3 +815,4 @@ def start_door() -> None:
 
 def stop_door() -> None:
     _stop.set()
+    auto_scanner_events().set()

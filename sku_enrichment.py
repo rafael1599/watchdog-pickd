@@ -1261,10 +1261,12 @@ def run_until_disturbed(
       - the AS400 going away: hammering a terminal that is not there is how a
         session gets stuck.
     """
-    from auto_scanner import _kick, operator_idle_seconds
+    from auto_scanner import _kick, _request, operator_idle_seconds
 
     idle_fn = idle_fn or operator_idle_seconds
-    kick_fn = kick_fn or _kick.is_set
+    # Una orden pedida desde PickD también la para (5 nov 2026): alguien la
+    # espera en el board, y el catálogo es lo de menos prioridad aquí.
+    kick_fn = kick_fn or (lambda: _kick.is_set() or _request.is_set())
     stop_fn = stop_fn or (lambda: False)
     step_fn = step_fn or run_sku_step
     home_fn = home_fn or return_to_order_search
