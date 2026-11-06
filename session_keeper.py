@@ -11,7 +11,7 @@ nothing to do can be twenty minutes away, and then logged in at once. So:
 
   - a thread looks at the screen every `AS400_SESSION_CHECK_SEC` (it takes
     `capture_lock` without waiting, and stays away while a person is at the Mac);
-  - a Sign On or disconnected screen starts the grace (`AS400_RETAKE_WAIT_SEC`,
+  - a Sign On or disconnected screen, or Mocha closed, starts the grace (`AS400_RETAKE_WAIT_SEC`,
     3 min): nobody in the watcher logs in during it — not this thread, not the
     sweep, not a request from PickD (`retake_allowed`, checked where the scanner
     would restart) — so the person who took the user gets their three minutes;
@@ -35,6 +35,9 @@ import threading
 import time
 
 log = logging.getLogger("pickd-session-keeper")
+
+# Mocha itself is not running: no window to read, nothing to type into.
+STATE_CLOSED = "closed"
 
 _lock = threading.Lock()
 _state = {"lost_since": None}
@@ -122,16 +125,25 @@ def check_once(driver, *, note_gap, note_as400, wake, now=None) -> str:
     """
     import as400_capture as cap
 
+    # Mocha closed is a lost session too (Rafael closed it on Bay 2 to test this,
+    # 6 nov 2026): a read then fails with an AppleScript error, not a
+    # CaptureError, and nothing ever opened it again. Taking it back is the same
+    # bootstrap that opens it and logs in.
+    # Only when the read failed: the process name check was never seen on
+    # Bay 2, and a wrong name must not turn every look into a false «closed».
     try:
         screen = driver.copy_screen()
-    except cap.CaptureError as e:
-        log.info("session: could not read the screen (%s)", e)
-        return "unreadable"
-    state = cap.classify_screen(screen)
+        state = cap.classify_screen(screen)
+    except Exception as e:  # noqa: BLE001 — a read that fails is not a verdict
+        is_running = getattr(driver, "_is_running", None)
+        if not (callable(is_running) and not is_running()):
+            log.info("session: could not read the screen (%s)", e)
+            return "unreadable"
+        screen, state = "", STATE_CLOSED
     if state == cap.STATE_UNKNOWN:
         # Not ours to judge: the scanner's own recovery handles a strange screen.
         return "unknown"
-    if state not in (cap.STATE_LOGIN, cap.STATE_DISCONNECTED):
+    if state not in (cap.STATE_LOGIN, cap.STATE_DISCONNECTED, STATE_CLOSED):
         if _state["lost_since"] is not None:
             back()
             note_gap("session: back")
@@ -148,7 +160,9 @@ def check_once(driver, *, note_gap, note_as400, wake, now=None) -> str:
     note_gap(f"session: taking it back ({mode}) after {since:.0f}s")
     log.warning("session: lost for %.0fs — taking it back (%s)", since, mode)
     try:
-        if mode == "same":
+        if state == STATE_CLOSED:
+            cap.bootstrap_session(driver)  # opens Mocha and logs in
+        elif mode == "same":
             try:
                 cap.bootstrap_session(driver)
             except cap.AS400Disconnected:

@@ -21,8 +21,12 @@ def _fresh(monkeypatch):
 
 
 class Driver:
-    def __init__(self, screen):
+    def __init__(self, screen, running=True):
         self.screen = screen
+        self.running = running
+
+    def _is_running(self):
+        return self.running
 
     def copy_screen(self, steps=()):
         if isinstance(self.screen, Exception):
@@ -128,3 +132,22 @@ def test_other_dead_screens_restart_as_before():
 def test_switched_off_never_blocks(monkeypatch):
     monkeypatch.setenv("AS400_SESSION_KEEPER", "0")
     assert sk.blocks_restart(SIGN_ON, now=0.0) is False
+
+
+def test_mocha_closed_is_a_lost_session_and_is_opened_again(calls, monkeypatch):
+    monkeypatch.setenv("AS400_RETAKE_MODE", "new")  # closed always opens + logs in
+    out, gaps, health = run(Driver(RuntimeError("not running"), running=False), 0.0, calls)
+    assert out == "lost" and gaps == ["session: lost (closed), taking it back in 180s"]
+    assert health == [(False, "closed")]
+    out, *_ = run(Driver(RuntimeError("not running"), running=False), 180.0, calls)
+    assert out == "retaken" and calls == ["same", "wake"]
+
+
+def test_a_read_that_errors_any_way_is_not_a_verdict(calls):
+    out, *_ = run(Driver(RuntimeError("osascript exited 1")), 0.0, calls)
+    assert out == "unreadable" and calls == []
+
+
+def test_a_wrong_process_name_never_says_closed_while_the_screen_reads(calls):
+    out, *_ = run(Driver(READY, running=False), 0.0, calls)
+    assert out == "ready" and calls == []
