@@ -40,6 +40,7 @@ import time
 from datetime import datetime, timezone
 
 import scanned_store
+import session_keeper
 from as400_capture import (
     STATE_CUSTOMER_DISPLAY,
     STATE_CUSTOMER_INQUIRY,
@@ -445,6 +446,7 @@ def run_scan_step(
             and hasattr(driver, "new_window")
             and auto_restart_enabled()
             and not is_restart_backing_off()
+            and not session_keeper.blocks_restart(dead_screen)
             and operator_allows_restart()
         )
         if not can_restart:
@@ -1130,6 +1132,7 @@ def _recover_unavailable(
             and driver is not None
             and hasattr(driver, "new_window")
             and not is_restart_backing_off()
+            and not session_keeper.blocks_restart(dead_screen)
             and operator_allows_restart_fn()
         )
         if can_restart:
@@ -1417,6 +1420,25 @@ def start_auto_scanner() -> None:
     operator_sentinel.start()
     _thread = threading.Thread(target=_loop, daemon=True, name="auto-scanner")
     _thread.start()
+
+    from as400_capture import MochaDriver
+
+    session_keeper.start(
+        _stop,
+        capture_lock,
+        operator_present=lambda: (
+            not ignoring_operator() and operator_idle_seconds() < IDLE_THRESHOLD_SEC
+        ),
+        make_driver=MochaDriver,
+        hooks={
+            "mark_automated": as400_capture_mark_automated,
+            "note_gap": _note_gap,
+            "note_as400": note_as400,
+            # A session taken back is work waiting: wake the loop from its
+            # «unavailable» wait instead of leaving PickD's requests for 5 min.
+            "wake": _kick.set,
+        },
+    )
 
 
 def stop_auto_scanner() -> None:
