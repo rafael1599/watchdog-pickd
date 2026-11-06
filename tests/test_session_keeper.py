@@ -14,7 +14,6 @@ GONE = "Connection closed by host"
 def _fresh(monkeypatch):
     sk.back()
     monkeypatch.setenv("AS400_RETAKE_WAIT_SEC", "180")
-    monkeypatch.delenv("AS400_RETAKE_MODE", raising=False)
     monkeypatch.delenv("AS400_SESSION_KEEPER", raising=False)
     yield
     sk.back()
@@ -53,14 +52,14 @@ def run(driver, now, calls):
 @pytest.fixture
 def calls(monkeypatch):
     seen = []
-    monkeypatch.setattr(cap, "bootstrap_session", lambda d, **k: seen.append("same") or "ok")
+    monkeypatch.setattr(cap, "bootstrap_session", lambda d, **k: seen.append("open") or "ok")
     monkeypatch.setattr(
         cap, "restart_as400_session", lambda d, dead_screen=None, **k: seen.append("new") or "ok"
     )
     return seen
 
 
-def test_a_sign_on_waits_the_grace_then_logs_in_on_the_same_window(calls):
+def test_a_sign_on_waits_the_grace_then_focus_cmd_n_and_verify(calls):
     out, gaps, health = run(Driver(SIGN_ON), 1000.0, calls)
     assert out == "lost" and calls == []
     assert gaps == ["session: lost (login), taking it back in 180s"]
@@ -71,33 +70,23 @@ def test_a_sign_on_waits_the_grace_then_logs_in_on_the_same_window(calls):
 
     out, gaps, health = run(Driver(SIGN_ON), 1180.0, calls)
     assert out == "retaken"
-    assert calls == ["same", "wake"]
-    assert gaps[-1] == "session: taken back (same)"
+    assert calls == ["new", "wake"]
+    assert gaps[-1] == "session: taken back"
     assert health[-1] == (True, None)
     assert sk.grace_left(1181.0) == 0.0
 
 
-def test_new_mode_opens_a_fresh_window(calls, monkeypatch):
-    monkeypatch.setenv("AS400_RETAKE_MODE", "new")
-    run(Driver(SIGN_ON), 0.0, calls)
-    out, *_ = run(Driver(SIGN_ON), 180.0, calls)
-    assert out == "retaken" and calls == ["new", "wake"]
-
-
-def test_same_mode_on_a_disconnected_window_falls_back_to_new(calls, monkeypatch):
-    def boom(d, **k):
-        calls.append("same")
-        raise cap.AS400Disconnected("gone")
-
-    monkeypatch.setattr(cap, "bootstrap_session", boom)
+def test_a_disconnected_window_takes_the_same_road(calls):
     run(Driver(GONE), 0.0, calls)
     out, *_ = run(Driver(GONE), 180.0, calls)
-    assert out == "retaken" and calls == ["same", "new", "wake"]
+    assert out == "retaken" and calls == ["new", "wake"]
 
 
 def test_a_failed_retake_waits_another_grace(calls, monkeypatch):
     monkeypatch.setattr(
-        cap, "bootstrap_session", lambda d, **k: (_ for _ in ()).throw(RuntimeError("no"))
+        cap,
+        "restart_as400_session",
+        lambda d, **k: (_ for _ in ()).throw(RuntimeError("no")),
     )
     run(Driver(SIGN_ON), 0.0, calls)
     out, gaps, _ = run(Driver(SIGN_ON), 180.0, calls)
@@ -140,13 +129,12 @@ def test_switched_off_never_blocks(monkeypatch):
     assert sk.blocks_restart(SIGN_ON, now=0.0) is False
 
 
-def test_mocha_closed_is_a_lost_session_and_is_opened_again(calls, monkeypatch):
-    monkeypatch.setenv("AS400_RETAKE_MODE", "new")  # closed always opens + logs in
+def test_mocha_closed_is_a_lost_session_and_is_opened_again(calls):
     out, gaps, health = run(Driver(RuntimeError("not running"), running=False), 0.0, calls)
     assert out == "lost" and gaps == ["session: lost (closed), taking it back in 180s"]
     assert health == [(False, "closed")]
     out, *_ = run(Driver(RuntimeError("not running"), running=False), 180.0, calls)
-    assert out == "retaken" and calls == ["same", "wake"]
+    assert out == "retaken" and calls == ["open", "wake"]
 
 
 def test_a_read_that_errors_any_way_is_not_a_verdict(calls):
@@ -165,7 +153,7 @@ def test_mocha_with_no_window_is_lost_and_opened_again(calls):
     assert out == "lost" and gaps == ["session: lost (no_window), taking it back in 180s"]
     assert health == [(False, "no_window")]
     out, *_ = run(Driver(nothing, windows=0), 180.0, calls)
-    assert out == "retaken" and calls == ["same", "wake"]
+    assert out == "retaken" and calls == ["new", "wake"]
 
 
 class WindowlessMocha:
