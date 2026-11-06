@@ -19,6 +19,8 @@ import subprocess
 import threading
 import time
 
+import obstructions
+
 log = logging.getLogger("pickd-as400")
 
 NO_COPY_MESSAGE = (
@@ -956,6 +958,39 @@ class MochaDriver:
         self._osascript(f'tell application "System Events" to key code {code}')
 
     def copy_screen(self, steps=()) -> str:
+        """Read the screen; if nothing was copied, take away what covers Mocha and
+        read once more (`obstructions.py`, Rafael 6 nov 2026: «una solución
+        general»). A read that worked costs nothing extra.
+        """
+        try:
+            return self._copy_screen_once(steps)
+        except CaptureError as e:
+            if str(e) != NO_COPY_MESSAGE or not obstructions.enabled():
+                raise
+            try:
+                removed, left = obstructions.clear(
+                    lambda script: self._osascript(script, capture=True) or "",
+                    self.app_name,
+                )
+            except OperatorTookOver:
+                raise
+            except Exception as scan_err:  # noqa: BLE001 — never hide the real failure
+                log.info("obstruction: could not look at the screen (%s)", scan_err)
+                raise e from None
+            if removed:
+                log.warning("obstruction: retrying the read after removing %s", removed)
+                try:
+                    return self._copy_screen_once(steps)
+                except CaptureError as again:
+                    raise CaptureError(
+                        f"{again} Removed first: {'; '.join(removed)}."
+                        + (f" Still on screen: {'; '.join(left)}." if left else "")
+                    ) from None
+            if left:
+                raise CaptureError(f"{e} On screen over Mocha: {'; '.join(left)}.") from None
+            raise
+
+    def _copy_screen_once(self, steps=()) -> str:
         """Read the whole AS400 screen: focus if needed, Cmd+A, Cmd+C, clipboard.
 
         ONE osascript does the keyboard half (plan F2/F3). Writes a sentinel to the
