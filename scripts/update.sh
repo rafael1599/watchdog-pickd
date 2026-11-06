@@ -31,7 +31,7 @@ APP_URL="http://127.0.0.1:${APP_PORT}"
 DOMAIN="gui/$(id -u)"
 
 BRANCH="${1:-$(git rev-parse --abbrev-ref HEAD)}"
-say "▶ [1/6] Updating Watchdog PickD on branch '$BRANCH' (repo: $REPO)…"
+say "▶ [1/7] Updating Watchdog PickD on branch '$BRANCH' (repo: $REPO)…"
 
 # 1. Pull the latest code (fast-forward only; aborts if local work would conflict).
 if ! git pull --ff-only origin "$BRANCH"; then
@@ -44,7 +44,7 @@ fi
 # pinned range, and `--upgrade pip` hung with no output on a slow network). We stamp
 # the file's hash after a successful install and skip while it matches.
 # Force a reinstall any time with:  FORCE_DEPS=1 ./scripts/update.sh
-say "▶ [2/6] Checking dependencies…"
+say "▶ [2/7] Checking dependencies…"
 REQ_STAMP="venv/.requirements.sha256"
 req_hash="$(shasum -a 256 requirements.txt | awk '{print $1}')"
 if [ ! -d venv ]; then
@@ -64,7 +64,7 @@ fi
 # 3. Apply the DB schema the watcher depends on (e.g. picking_lists.source_order_date).
 # Idempotent (ADD COLUMN IF NOT EXISTS) and non-fatal: skips cleanly when
 # SUPABASE_DB_URL is unset, and a DB hiccup must never block the app update.
-say "▶ [3/6] Applying DB schema migrations…"
+say "▶ [3/7] Applying DB schema migrations…"
 if mig_out="$(./venv/bin/python3 migrations.py 2>&1)"; then
   say "  ${mig_out}"
 else
@@ -117,17 +117,16 @@ restart_agent() {
 }
 
 # 4. Restart the PDF watcher.
-say "▶ [4/6] Restarting the PDF watcher…"
+say "▶ [4/7] Restarting the PDF watcher…"
 restart_agent "com.antigravity.watchdog-pickd"
 
 # 5. Restart the capture app — freeing the port between stop and start so the new
 # server can actually bind.
-say "▶ [5/6] Restarting the capture app…"
+say "▶ [5/7] Restarting the capture app…"
 restart_agent "com.antigravity.pickd-app" free_port
 
-# 6. Verify the app is really serving, then open it. We open ONLY once the server
-# answers — opening a not-yet-ready server is what produces the endless blank page.
-say "▶ [6/6] Waiting for the capture app to answer on ${APP_URL} ..."
+# 6. Verify the app is really serving the new build.
+say "▶ [6/7] Waiting for the capture app to answer on ${APP_URL} ..."
 if [ -f "$HOME/Library/LaunchAgents/com.antigravity.pickd-app.plist" ]; then
   up=""
   for i in $(seq 1 60); do
@@ -148,17 +147,22 @@ if [ -f "$HOME/Library/LaunchAgents/com.antigravity.pickd-app.plist" ]; then
         say "  Causes: a stale app.py survived the restart, or the LaunchAgent runs"
         say "  ANOTHER clone. Check: grep -A3 ProgramArguments \"$HOME/Library/LaunchAgents/com.antigravity.pickd-app.plist\""
       fi
-      open -a Safari "$APP_URL" 2>/dev/null || open "$APP_URL" 2>/dev/null || true
-      say "✓ Opened $APP_URL in Safari."
+      # No browser any more (6 nov 2026): orders are asked from PickD, nobody
+      # works on this screen, and every push used to open another Safari window.
       break
     fi
     sleep 1
   done
   if [ -z "$up" ]; then
-    say "✗ The app didn't answer within 60s. NOT opening a blank window."
+    say "✗ The app didn't answer within 60s."
     say "  Check logs:  tail -n 40 '$REPO/logs/app-stderr.log'"
     say "  Then retry:  ./scripts/update.sh $BRANCH"
   fi
 fi
+
+# 7. Bay 2 is for the watcher and the AS400 only: lid closed keeps working on AC,
+# and any other app with a window is quit (scripts/bay2_host.sh). Non-fatal.
+say "▶ [7/7] Bay 2 host: power and apps…"
+while IFS= read -r line; do say "  $line"; done < <(./scripts/bay2_host.sh power 2>&1; ./scripts/bay2_host.sh apps 2>&1)
 
 say "✅ Update complete — now on $(git rev-parse --short HEAD) ($BRANCH)."

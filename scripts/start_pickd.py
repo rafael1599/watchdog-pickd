@@ -1,8 +1,9 @@
 """
 start_pickd.py — Launcher for the autostart LaunchAgent.
 
-Opens the AS400 emulator, starts the PickD capture app (no Terminal window), waits
-for it to answer, then opens Safari at the UI.
+Opens the AS400 emulator, starts the PickD capture app (no Terminal window) and
+waits for it to answer. It no longer opens Safari (6 nov 2026): orders are asked
+from PickD and nobody works on this screen.
 
 Run BY THE VENV PYTHON (the LaunchAgent invokes it the same way the PDF watcher is
 invoked). Using the venv python — instead of /bin/bash on a .sh — avoids macOS TCC
@@ -76,8 +77,7 @@ def main():
     app_proc = subprocess.Popen([_venv_python(), str(REPO / "app.py")], cwd=str(REPO))
 
     # 3. Wait until the server actually answers (up to ~60s — the app imports
-    # supabase/flask, which can be slow on a cold start), THEN open Safari. Opening
-    # before it's ready is what leaves a blank, never-loading window.
+    # supabase/flask, which can be slow on a cold start).
     up = False
     for _ in range(120):
         if _server_is_up():
@@ -85,12 +85,10 @@ def main():
             break
         time.sleep(0.5)
     if up:
-        subprocess.run(["open", "-a", "Safari", URL], check=False)
-        print(f"start_pickd: app is up, opened {URL}", flush=True)
+        print(f"start_pickd: app is up on {URL}", flush=True)
     else:
         print(
-            f"start_pickd: app did NOT answer on {URL} within 60s — not opening a "
-            "blank window. Check logs/app-stderr.log.",
+            f"start_pickd: app did NOT answer on {URL} within 60s. Check logs/app-stderr.log.",
             flush=True,
         )
 
