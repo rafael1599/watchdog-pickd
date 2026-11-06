@@ -293,12 +293,36 @@ barra de menús, ni Mocha, ni Terminal/Python/osascript, y **nunca** SecurityAge
 el error que ve PickD. Una lectura que funciona no paga nada. Con alguien en el teclado no se
 toca nada (el freno del operador). `AS400_OBSTRUCTION_GUARD=0` lo apaga.
 
+### Recuperar la sesión (6 nov 2026, `session_keeper.py`, #69–#71)
+Rafael: «si abro la misma cuenta de as400 en otra computadora le cierra la sesión a bay 2 … que
+volviera a intentar iniciar sesión después de 3 minutos». Un hilo mira la pantalla cada
+`AS400_SESSION_CHECK_SEC` (toma `capture_lock` sin esperar; nunca con alguien en la Mac). Sesión
+perdida = **Sign On**, **ventana desconectada**, **Mocha sin ventana** (sólo su barra de menús: las
+teclas pitan y la copia no trae nada) o **Mocha cerrado**. Desde ahí cuenta `AS400_RETAKE_WAIT_SEC`
+de gracia —nadie del watcher entra, tampoco el barrido ni una petición de PickD
+(`blocks_restart`)— y después **Mocha al frente → Cmd+N → verificar y entrar**
+(`restart_as400_session`; el flujo es de Rafael: «la sesión nueva invalida la anterior»). Mocha
+cerrado se abre antes (`bootstrap_session`, que ahora también abre ventana si Mocha no tiene).
+Todo queda en `last_gap_reason` del latido (`session: lost (login), taking it back in 18s`,
+`session: taken back`, `session: could not read …`, `session: unknown screen «…»`).
+
+- **Valores de prueba en el código: gracia 20 s, revisión 10 s.** Van a 180 s / 30 s cuando pasen las
+  pruebas del lunes 9 nov (backlog de pickd, idea-309).
+- **Probado el 6 nov:** Sign On en una ventana abierta → sesión en 21 s. Mocha sin ventana no se
+  recuperaba (#71 lo arregla; sin probar en Bay 2). Abrir el usuario en otra computadora **no**
+  cerró la sesión de Bay 2 ese día: no se pudo probar ese caso.
+- **Lección:** el vigilante callaba lo que no podía leer y pasamos 20 min a ciegas. Todo lo que el
+  watcher descarta se dice en el latido.
+
+
 ### Archivos del MVP
 | Archivo | Rol |
 |---------|-----|
 | `app.py` | UI web local (Flask): capturar, preview, enviar una por una |
 | `scripts/start_pickd.py` | Launcher: abre Mocha + app (para el LaunchAgent) |
 | `scripts/bay2_host.sh` | Bay 2 sólo para el watcher: tapa cerrada con cargador y cierra las demás apps |
+| `obstructions.py` | Quita lo que tape a Mocha cuando una lectura no copia nada |
+| `session_keeper.py` | Recupera la sesión del AS400 tras una gracia (Sign On, desconectada, sin ventana, cerrado) |
 | `scripts/install_autostart.py` | Instala el LaunchAgent de auto-arranque al login |
 | `as400_capture.py` | Driver Mocha (AppleScript) + loop de captura (testeable) |
 | `pipeline.py` | Lógica compartida texto → Supabase (la usan watcher y app) |
