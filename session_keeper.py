@@ -15,15 +15,12 @@ nothing to do can be twenty minutes away, and then logged in at once. So:
     3 min): nobody in the watcher logs in during it — not this thread, not the
     sweep, not a request from PickD (`retake_allowed`, checked where the scanner
     would restart) — so the person who took the user gets their three minutes;
-  - when it runs out, the session is taken back the way `AS400_RETAKE_MODE` says:
-
-      same — type the login on the Sign On that is already there; a
-             disconnected window falls back to `new`;
-      new  — Cmd+N, close the dead window, log into the fresh one (the path a
-             dead session already took).
+  - when it runs out: focus Mocha, Cmd+N, verify the screen and log in
+    (`restart_as400_session`; a closed Mocha is opened first). The new session
+    invalidates the old one (Rafael), so a second window is never a problem here.
 
 The heartbeat says all of it in `last_gap_reason` («session: lost, taking it back
-in 120s», «session: taken back (same)»), so it can be followed from PickD's base.
+in 120s», «session: taken back»), so it can be followed from PickD's base.
 `AS400_SESSION_KEEPER=0` switches it off.
 """
 
@@ -63,11 +60,6 @@ def retake_wait_sec() -> float:
 
 def check_every_sec() -> float:
     return max(2.0, _env_float("AS400_SESSION_CHECK_SEC", 10.0))
-
-
-def retake_mode() -> str:
-    mode = os.getenv("AS400_RETAKE_MODE", "same").strip().lower()
-    return mode if mode in ("same", "new") else "same"
 
 
 def lost(now: float | None = None) -> float:
@@ -166,20 +158,18 @@ def check_once(driver, *, note_gap, note_as400, wake, now=None) -> str:
         note_gap(f"session: lost ({state}), taking it back in {left:.0f}s")
         return "lost"
 
-    mode = retake_mode()
-    note_gap(f"session: taking it back ({mode}) after {since:.0f}s")
-    log.warning("session: lost for %.0fs — taking it back (%s)", since, mode)
+    # Rafael, 6 nov 2026: «enfocar Mocha, después el comando de nueva ventana y
+    # después verifica … la sesión nueva invalida la anterior». That is
+    # `restart_as400_session`: Cmd+N (which focuses first), tidy the dead window
+    # only if it really is dead, then the verified login. A closed Mocha has
+    # nothing to focus, so it is opened first by the bootstrap.
+    note_gap(f"session: taking it back after {since:.0f}s")
+    log.warning("session: lost (%s) for %.0fs — taking it back", state, since)
     try:
-        if state in (STATE_CLOSED, STATE_NO_WINDOW):
-            cap.bootstrap_session(driver)  # opens Mocha / a window, then logs in
-        elif mode == "same":
-            try:
-                cap.bootstrap_session(driver)
-            except cap.AS400Disconnected:
-                log.info("session: the window is disconnected — opening a new one")
-                cap.restart_as400_session(driver, dead_screen=screen)
+        if state == STATE_CLOSED:
+            cap.bootstrap_session(driver)
         else:
-            cap.restart_as400_session(driver, dead_screen=screen)
+            cap.restart_as400_session(driver, dead_screen=screen or None)
     except Exception as e:  # noqa: BLE001 — try again after another grace
         back()
         lost(now)
@@ -188,7 +178,7 @@ def check_once(driver, *, note_gap, note_as400, wake, now=None) -> str:
         return "retake_failed"
     back()
     note_as400(True)
-    note_gap(f"session: taken back ({mode})")
+    note_gap("session: taken back")
     wake()
     return "retaken"
 
@@ -230,8 +220,7 @@ def start(stop: threading.Event, capture_lock, operator_present, make_driver, ho
     )
     _thread.start()
     log.info(
-        "session keeper: every %.0fs, takes the user back after %.0fs (%s)",
+        "session keeper: every %.0fs, takes the user back after %.0fs",
         check_every_sec(),
         retake_wait_sec(),
-        retake_mode(),
     )
