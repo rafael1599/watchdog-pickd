@@ -21,9 +21,13 @@ def _fresh(monkeypatch):
 
 
 class Driver:
-    def __init__(self, screen, running=True):
+    def __init__(self, screen, running=True, windows=1):
         self.screen = screen
         self.running = running
+        self.windows = windows
+
+    def window_count(self):
+        return self.windows
 
     def _is_running(self):
         return self.running
@@ -108,14 +112,16 @@ def test_someone_logging_in_again_ends_the_grace(calls):
     assert sk.grace_left(11.0) == 0.0
 
 
-def test_a_strange_screen_is_left_to_the_scanner(calls):
+def test_a_strange_screen_is_left_to_the_scanner_but_said(calls):
     out, gaps, health = run(Driver("SOMETHING ELSE ENTIRELY"), 0.0, calls)
-    assert out == "unknown" and gaps == [] and health == [] and calls == []
+    assert out == "unknown" and health == [] and calls == []
+    assert gaps == ["session: unknown screen «SOMETHING ELSE ENTIRELY»"]
 
 
-def test_an_unreadable_screen_does_nothing(calls):
-    out, *_ = run(Driver(cap.CaptureError("covered")), 0.0, calls)
+def test_an_unreadable_screen_does_nothing_but_says_so(calls):
+    out, gaps, _ = run(Driver(cap.CaptureError("covered")), 0.0, calls)
     assert out == "unreadable" and calls == []
+    assert gaps == ["session: could not read the screen (CaptureError: covered)"]
 
 
 def test_the_scanner_does_not_log_in_during_the_grace():
@@ -151,3 +157,50 @@ def test_a_read_that_errors_any_way_is_not_a_verdict(calls):
 def test_a_wrong_process_name_never_says_closed_while_the_screen_reads(calls):
     out, *_ = run(Driver(READY, running=False), 0.0, calls)
     assert out == "ready" and calls == []
+
+
+def test_mocha_with_no_window_is_lost_and_opened_again(calls):
+    nothing = cap.CaptureError("the clipboard didn't change")
+    out, gaps, health = run(Driver(nothing, windows=0), 0.0, calls)
+    assert out == "lost" and gaps == ["session: lost (no_window), taking it back in 180s"]
+    assert health == [(False, "no_window")]
+    out, *_ = run(Driver(nothing, windows=0), 180.0, calls)
+    assert out == "retaken" and calls == ["same", "wake"]
+
+
+class WindowlessMocha:
+    """bootstrap_session on a Mocha with no window: Cmd+N first, then the login."""
+
+    def __init__(self):
+        self.windows = 0
+        self.log = []
+
+    def launch(self):
+        self.log.append("launch")
+
+    def window_count(self):
+        return self.windows
+
+    def new_window(self):
+        self.log.append("cmd+n")
+        self.windows = 1
+
+    def focus(self):
+        pass
+
+    def copy_screen(self, steps=()):
+        return READY
+
+
+def test_bootstrap_opens_a_window_when_mocha_has_none(monkeypatch):
+    monkeypatch.setenv("AS400_NEW_WINDOW_WAIT", "0")
+    d = WindowlessMocha()
+    cap.bootstrap_session(d, launch_wait=0)
+    assert d.log == ["launch", "cmd+n"]
+
+
+def test_bootstrap_leaves_an_open_window_alone(monkeypatch):
+    d = WindowlessMocha()
+    d.windows = 1
+    cap.bootstrap_session(d, launch_wait=0)
+    assert d.log == ["launch"]

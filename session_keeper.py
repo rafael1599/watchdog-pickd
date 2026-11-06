@@ -38,6 +38,8 @@ log = logging.getLogger("pickd-session-keeper")
 
 # Mocha itself is not running: no window to read, nothing to type into.
 STATE_CLOSED = "closed"
+# Mocha running with no session window (6 nov 2026): keys beep, reads copy nothing.
+STATE_NO_WINDOW = "no_window"
 
 _lock = threading.Lock()
 _state = {"lost_since": None}
@@ -136,14 +138,22 @@ def check_once(driver, *, note_gap, note_as400, wake, now=None) -> str:
         state = cap.classify_screen(screen)
     except Exception as e:  # noqa: BLE001 — a read that fails is not a verdict
         is_running = getattr(driver, "_is_running", None)
-        if not (callable(is_running) and not is_running()):
+        windows = getattr(driver, "window_count", None)
+        if callable(is_running) and not is_running():
+            screen, state = "", STATE_CLOSED
+        elif callable(windows) and windows() == 0:
+            screen, state = "", STATE_NO_WINDOW
+        else:
             log.info("session: could not read the screen (%s)", e)
+            note_gap(f"session: could not read the screen ({type(e).__name__}: {e})"[:300])
             return "unreadable"
-        screen, state = "", STATE_CLOSED
     if state == cap.STATE_UNKNOWN:
         # Not ours to judge: the scanner's own recovery handles a strange screen.
+        # Said in the heartbeat, though: a silent keeper is a blind one.
+        shown = " ".join((screen or "").split())[:120]
+        note_gap(f"session: unknown screen «{shown}»")
         return "unknown"
-    if state not in (cap.STATE_LOGIN, cap.STATE_DISCONNECTED, STATE_CLOSED):
+    if state not in (cap.STATE_LOGIN, cap.STATE_DISCONNECTED, STATE_CLOSED, STATE_NO_WINDOW):
         if _state["lost_since"] is not None:
             back()
             note_gap("session: back")
@@ -160,8 +170,8 @@ def check_once(driver, *, note_gap, note_as400, wake, now=None) -> str:
     note_gap(f"session: taking it back ({mode}) after {since:.0f}s")
     log.warning("session: lost for %.0fs — taking it back (%s)", since, mode)
     try:
-        if state == STATE_CLOSED:
-            cap.bootstrap_session(driver)  # opens Mocha and logs in
+        if state in (STATE_CLOSED, STATE_NO_WINDOW):
+            cap.bootstrap_session(driver)  # opens Mocha / a window, then logs in
         elif mode == "same":
             try:
                 cap.bootstrap_session(driver)
