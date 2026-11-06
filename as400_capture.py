@@ -917,6 +917,27 @@ class MochaDriver:
         time.sleep(1.5)
         return not self._is_running()
 
+    def window_count(self) -> int:
+        """How many windows Mocha has open; -1 if it can't be told.
+
+        Mocha can be running with NO session window (Rafael, 6 nov 2026: «Mocha
+        sí sale en la barra superior … pero veo el escritorio, hace falta
+        command + n»). Every key then goes nowhere — the beeps on Bay 2 — and
+        every read copies nothing.
+        """
+        target = (
+            f'first application process whose bundle identifier is "{_applescript_literal(self.bundle_id)}"'
+            if self.bundle_id
+            else f'application process "{_applescript_literal(self.app_name)}"'
+        )
+        try:
+            out = self._osascript(
+                f'tell application "System Events" to count windows of ({target})', capture=True
+            )
+            return int(str(out).strip())
+        except Exception:  # noqa: BLE001 — unknown is not zero
+            return -1
+
     def _is_running(self) -> bool:
         out = subprocess.run(
             ["pgrep", "-x", self.app_name], capture_output=True, text=True, check=False
@@ -1635,6 +1656,18 @@ def _system_idle_seconds() -> float:
             return 0.0  # can't tell → assume somebody is there, and don't restart
 
 
+def _open_a_window_if_none(driver) -> None:
+    """Mocha open with no session window: Cmd+N opens one (it comes up on the
+    Sign On, which the bootstrap then logs into). `open -b` on a running Mocha
+    does not open one by itself."""
+    count = getattr(driver, "window_count", None)
+    if not callable(count) or count() != 0:
+        return
+    log.warning("AS400 connect: Mocha has no session window — opening one (Cmd+N)")
+    driver.new_window()
+    time.sleep(_env_float("AS400_NEW_WINDOW_WAIT", 3.0))
+
+
 def bootstrap_session(
     driver,
     launch_wait: float = LAUNCH_WAIT,
@@ -1657,6 +1690,7 @@ def bootstrap_session(
     """
     driver.launch()
     time.sleep(launch_wait)
+    _open_a_window_if_none(driver)
     driver.focus()
 
     unsticks = 0
