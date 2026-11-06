@@ -1,7 +1,7 @@
 """
 install_autostart.py — Install a macOS LaunchAgent so the PickD capture app starts
 automatically at login: it opens the AS400 emulator, runs the app (no Terminal
-window), and opens the UI in Safari.
+window). It no longer opens Safari (6 nov 2026).
 
 Run once on the AS400 Mac:
 
@@ -39,7 +39,7 @@ def main():
         # avoids macOS TCC blocking bash inside ~/Documents, and ensures deps exist.
         "ProgramArguments": [python, str(start_script)],
         "RunAtLoad": True,
-        # Run once at login; don't relaunch (avoids reopening Safari/Mocha in a loop).
+        # Run once at login; don't relaunch (avoids reopening Mocha in a loop).
         "KeepAlive": False,
         "StandardOutPath": str(logs / "app-stdout.log"),
         "StandardErrorPath": str(logs / "app-stderr.log"),
@@ -53,7 +53,7 @@ def main():
     subprocess.run(["launchctl", "load", str(plist_path)], check=False)
 
     print(f"✅ Autostart installed: {plist_path}")
-    print("   It will run at every login: open AS400, start the app, open Safari.")
+    print("   It will run at every login: open AS400 and start the app.")
     print(f"   Python:   {python}")
     print(f"   Launcher: {start_script}")
 

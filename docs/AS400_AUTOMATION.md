@@ -231,8 +231,8 @@ El macro de login está en `DEFAULT_LOGIN_STEPS` (`as400_capture.py`) — fácil
 secuencia/tiempos reales difieren (ej. si "3" no necesita ENTER después).
 
 ### Auto-arranque al prender la Mac (sin Terminal)
-Para que al iniciar sesión se abra el AS400, arranque la app y se abra Safari en la UI —
-sin ventana de Terminal — instalar el LaunchAgent **una vez** en la Mac del AS400:
+Para que al iniciar sesión se abra el AS400 y arranque la app —sin ventana de Terminal ni
+navegador— instalar el LaunchAgent **una vez** en la Mac del AS400:
 
 ```bash
 cd ~/watchdog-pickd
@@ -242,10 +242,12 @@ python3 scripts/install_autostart.py
 Qué hace en cada login (vía `scripts/start_pickd.py`, ejecutado por el python del venv):
 1. Abre el emulador (`open -b <AS400_LAUNCH_TARGET>`).
 2. Levanta `app.py` en segundo plano (sin Terminal).
-3. Espera a que el servidor responda y abre **Safari** en `http://127.0.0.1:5757`.
+3. Espera a que el servidor responda. **Ya no abre Safari** (6 nov 2026): las órdenes se piden
+   desde PickD y nadie trabaja en esa pantalla; la UI sigue en `http://127.0.0.1:5757` para
+   quien la abra.
 
 No hace login automático en el AS400 (eso se hace a mano o con el botón Connect). Corre una
-vez por login (`KeepAlive=False`) para no reabrir Safari/Mocha en bucle.
+vez por login (`KeepAlive=False`) para no reabrir Mocha en bucle.
 
 > Nota TCC: el launcher es **Python ejecutado por el python del venv** (no `bash`). macOS
 > bloquea a `bash` al leer scripts dentro de carpetas protegidas como `~/Documents`
@@ -259,11 +261,32 @@ rm ~/Library/LaunchAgents/com.antigravity.pickd-app.plist
 
 Logs: `logs/app-stdout.log` y `logs/app-stderr.log`.
 
+### Bay 2 sólo para el watcher y el AS400 (6 nov 2026)
+Rafael: «que le permita a la mac seguir enviando órdenes con la pantalla cerrada y asegurarse de
+que sólo los procesos necesarios para el watcher y as400 estén corriendo». Nadie usa esa Mac para
+otra cosa. `update.sh` (paso 7) corre `scripts/bay2_host.sh` en cada actualización:
+
+- **`power`**: con cargador, `pmset -a disablesleep 1` —con la tapa cerrada y sin monitor una
+  MacBook se duerme aunque `caffeinate` diga otra cosa, y dormida no atiende lo pedido desde
+  PickD—; con batería, `disablesleep 0`, para que no se descargue. Pide root, y `update.sh` corre
+  sin terminal: **una vez, a mano**, `./scripts/bay2_host.sh setup` (pide la contraseña) instala
+  `/etc/sudoers.d/watchdog-pickd`, que permite sólo esos dos comandos.
+- **Pantalla bloqueada = captura rota**: las teclas de System Events van a la ventana de login.
+  `power` y `status` dicen si la pantalla pide contraseña; se apaga en Ajustes → Pantalla bloqueada
+  → «Solicitar contraseña»: Nunca. El script no lo cambia.
+- **`apps`**: cierra con `SIGTERM` toda app con ventana salvo Mocha, Finder, Terminal, iTerm2,
+  AnyDesk, Tailscale, Compartir pantalla, Python y osascript. Los procesos de fondo (watcher,
+  `app.py`, el centinela, el sistema) no se tocan. Los pid salen de System Events, que el watcher
+  ya controla: `tell application "X" to quit` pediría un permiso de Automatización nuevo por app,
+  un diálogo que nadie contesta.
+- **`status`**: cargador, `SleepDisabled`, la regla de sudoers, el bloqueo y las apps abiertas.
+
 ### Archivos del MVP
 | Archivo | Rol |
 |---------|-----|
 | `app.py` | UI web local (Flask): capturar, preview, enviar una por una |
-| `scripts/start_pickd.py` | Launcher: abre Mocha + app + Safari (para el LaunchAgent) |
+| `scripts/start_pickd.py` | Launcher: abre Mocha + app (para el LaunchAgent) |
+| `scripts/bay2_host.sh` | Bay 2 sólo para el watcher: tapa cerrada con cargador y cierra las demás apps |
 | `scripts/install_autostart.py` | Instala el LaunchAgent de auto-arranque al login |
 | `as400_capture.py` | Driver Mocha (AppleScript) + loop de captura (testeable) |
 | `pipeline.py` | Lógica compartida texto → Supabase (la usan watcher y app) |
