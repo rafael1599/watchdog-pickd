@@ -281,6 +281,18 @@ otra cosa. `update.sh` (paso 7) corre `scripts/bay2_host.sh` en cada actualizaci
   un diálogo que nadie contesta.
 - **`status`**: cargador, `SleepDisabled`, la regla de sudoers, el bloqueo y las apps abiertas.
 
+### Lo que tape a Mocha se quita (6 nov 2026, `obstructions.py`)
+Tras un reinicio, el aviso «Enter the Apple ID password» de la App Store quedó encima del Sign On:
+Mocha estaba al frente, pero Cmd+A/Cmd+C se los llevó el aviso, la copia no cambió el portapapeles
+y tres órdenes pedidas desde PickD fallaron. Rafael: «quiero una solución general». Cuando una
+lectura no copia nada, el driver mira **todas** las ventanas de los demás procesos y las quita:
+primero un botón que dice no (Cancel, Not Now, Later, Close, Don't Allow…; nunca OK ni Sign In),
+luego Escape, y si sigue ahí, `SIGTERM` al proceso. Después lee una vez más. No toca el Dock ni la
+barra de menús, ni Mocha, ni Terminal/Python/osascript, y **nunca** SecurityAgent ni loginwindow
+(macOS no deja, y la contraseña de administrador es de una persona): ésas se dicen por nombre en
+el error que ve PickD. Una lectura que funciona no paga nada. Con alguien en el teclado no se
+toca nada (el freno del operador). `AS400_OBSTRUCTION_GUARD=0` lo apaga.
+
 ### Archivos del MVP
 | Archivo | Rol |
 |---------|-----|
