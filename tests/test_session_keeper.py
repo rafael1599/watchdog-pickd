@@ -192,3 +192,130 @@ def test_bootstrap_leaves_an_open_window_alone(monkeypatch):
     d.windows = 1
     cap.bootstrap_session(d, launch_wait=0)
     assert d.log == ["launch"]
+
+
+# ── an unknown screen: close Mocha, wait, open it again (9 nov 2026) ──────────
+
+CANCELED = (
+    "Input-Output XP BASICR OPVOF,,40 SYS-5580 System operator canceled job. "
+    "Press Enter SYS-7212 Cmd7 not allowed now"
+)
+
+
+class Mocha(Driver):
+    def __init__(self, screen, closes=True):
+        super().__init__(screen)
+        self.closes = closes
+        self.quits = 0
+
+    def quit(self):
+        self.quits += 1
+        return self.closes
+
+
+@pytest.fixture
+def relaunch(monkeypatch, calls):
+    cap._reset_restart_backoff_for_tests()
+    sk.known()
+    monkeypatch.setenv("AS400_UNKNOWN_RESTART_SEC", "120")
+    monkeypatch.setenv("AS400_RELAUNCH_PAUSE_SEC", "5")
+    monkeypatch.delenv("AS400_UNKNOWN_RELAUNCH", raising=False)
+    monkeypatch.setattr(cap, "operator_allows_restart", lambda idle_fn=None: True)
+    yield calls
+    cap._reset_restart_backoff_for_tests()
+    sk.known()
+
+
+def look(driver, now, calls, slept):
+    gaps, health = [], []
+    out = sk.check_once(
+        driver,
+        note_gap=gaps.append,
+        note_as400=lambda ok, parked=None: health.append((ok, parked)),
+        wake=lambda: calls.append("wake"),
+        now=now,
+        sleep=slept.append,
+    )
+    return out, gaps, health
+
+
+def test_the_canceled_job_screen_is_unknown():
+    assert cap.classify_screen(CANCELED) == cap.STATE_UNKNOWN
+
+
+def test_an_unknown_screen_waits_then_closes_pauses_and_reopens(relaunch):
+    mocha, slept = Mocha(CANCELED), []
+    out, gaps, _ = look(mocha, 1000.0, relaunch, slept)
+    assert out == "unknown" and mocha.quits == 0
+    assert gaps[0].startswith("session: unknown screen «Input-Output")
+
+    out, *_ = look(mocha, 1119.0, relaunch, slept)
+    assert out == "unknown" and mocha.quits == 0
+
+    out, gaps, health = look(mocha, 1120.0, relaunch, slept)
+    assert out == "relaunched"
+    assert mocha.quits == 1 and slept == [5.0]
+    assert relaunch == ["open", "wake"]
+    assert gaps == ["session: unknown screen for 120s, closing Mocha", "session: Mocha reopened"]
+    assert health == [(True, None)]
+
+
+def test_a_known_screen_forgets_the_unknown_one(relaunch):
+    mocha, slept = Mocha(CANCELED), []
+    look(mocha, 0.0, relaunch, slept)
+    mocha.screen = READY
+    assert look(mocha, 60.0, relaunch, slept)[0] == "ready"
+    mocha.screen = CANCELED
+    assert look(mocha, 130.0, relaunch, slept)[0] == "unknown"
+    assert look(mocha, 249.0, relaunch, slept)[0] == "unknown"
+    assert look(mocha, 250.0, relaunch, slept)[0] == "relaunched"
+
+
+def test_nobody_closes_mocha_under_somebodys_hands(relaunch, monkeypatch):
+    monkeypatch.setattr(cap, "operator_allows_restart", lambda idle_fn=None: False)
+    mocha, slept = Mocha(CANCELED), []
+    look(mocha, 0.0, relaunch, slept)
+    out, gaps, _ = look(mocha, 500.0, relaunch, slept)
+    assert out == "unknown" and mocha.quits == 0 and relaunch == []
+    assert gaps == ["session: unknown screen for 500s, waiting for the Mac to be free"]
+
+
+def test_a_failed_reopen_feeds_the_backoff(relaunch):
+    mocha, slept = Mocha(CANCELED, closes=False), []
+    look(mocha, 0.0, relaunch, slept)
+    out, gaps, _ = look(mocha, 120.0, relaunch, slept)
+    assert out == "relaunch_failed" and relaunch == [] and slept == []
+    assert gaps[-1] == "session: reopening Mocha failed (RuntimeError: Mocha would not close)"
+    assert cap.is_restart_backing_off(120.0)
+
+    # Inside the 4 min the screen counts again from zero and the backoff holds it.
+    mocha.closes = True
+    look(mocha, 130.0, relaunch, slept)
+    out, gaps, _ = look(mocha, 250.0, relaunch, slept)
+    assert out == "unknown" and mocha.quits == 1
+    assert gaps == ["session: unknown screen for 120s, backing off 110s"]
+
+    out, *_ = look(mocha, 360.0, relaunch, slept)
+    assert out == "relaunched" and mocha.quits == 2
+    assert not cap.is_restart_backing_off(361.0)
+
+
+def test_a_bootstrap_that_fails_counts_too(relaunch, monkeypatch):
+    def boom(d, **k):
+        raise RuntimeError("no Sign On")
+
+    monkeypatch.setattr(cap, "bootstrap_session", boom)
+    mocha, slept = Mocha(CANCELED), []
+    look(mocha, 0.0, relaunch, slept)
+    out, gaps, _ = look(mocha, 120.0, relaunch, slept)
+    assert out == "relaunch_failed" and mocha.quits == 1 and slept == [5.0]
+    assert gaps[-1] == "session: reopening Mocha failed (RuntimeError: no Sign On)"
+    assert cap.is_restart_backing_off(121.0)
+
+
+def test_the_switch_turns_only_this_off(relaunch, monkeypatch):
+    monkeypatch.setenv("AS400_UNKNOWN_RELAUNCH", "0")
+    mocha, slept = Mocha(CANCELED), []
+    look(mocha, 0.0, relaunch, slept)
+    assert look(mocha, 9999.0, relaunch, slept)[0] == "unknown"
+    assert mocha.quits == 0
