@@ -619,3 +619,20 @@ def test_step_unavailable_when_restart_fails():
     )
     assert r == {"action": "unavailable", "number": "880112"}
     assert scanned_store.get("880112") is None
+
+
+def test_a_pending_stock_reread_does_not_wait_twenty_minutes(monkeypatch):
+    """Rafael, 9 nov 2026: 19 S/D en la lista de relectura y el siguiente hueco a
+    veinte minutos. Mientras queden códigos, «not_found» espera lo del catálogo;
+    vaciada la lista, la pauta de siempre. Un AS400 caído no se toca."""
+    import auto_scanner
+    import stock_reread
+
+    monkeypatch.setenv("SKU_ENRICH_EXCLUSIVE_UNTIL", "2000-01-01T00:00:00Z")
+    monkeypatch.setattr(stock_reread, "next_code", lambda client=None: "01-0528")
+    assert auto_scanner._paced("not_found", 1200.0, 0.0) == auto_scanner.CATALOGUE_MAX_WAIT_SEC
+    assert auto_scanner._paced("unavailable", 300.0, 0.0) == 300.0
+    assert auto_scanner._paced("captured", 5.0, 0.0) == 5.0
+
+    monkeypatch.setattr(stock_reread, "next_code", lambda client=None: None)
+    assert auto_scanner._paced("not_found", 1200.0, 0.0) == 1200.0
