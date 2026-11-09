@@ -847,6 +847,7 @@ def _run_sku_gap() -> float:
     try:
         import auto_update
         import sku_enrichment
+        import stock_reread
 
         if not sku_enrichment.enabled():
             _note_gap("switched off (SKU_ENRICH)")
@@ -862,8 +863,16 @@ def _run_sku_gap() -> float:
         # no toca el terminal, así que va antes de pedir la primera pantalla.
         sku_enrichment.backfill_absent_once()
 
-        deadline = started + sku_enrichment.gap_budget_sec()
-        for _ in range(sku_enrichment.max_per_gap()):
+        # Una relectura de stock pedida desde PickD va delante del catálogo y trae
+        # su propio presupuesto (Rafael, 9 nov 2026: «quiero una lectura de hoy»).
+        rereading = stock_reread.active()
+        budget = sku_enrichment.gap_budget_sec()
+        cap = sku_enrichment.max_per_gap()
+        if rereading:
+            budget = stock_reread.gap_budget_sec(budget)
+            cap = stock_reread.max_per_gap(cap)
+        deadline = started + budget
+        for _ in range(cap):
             if time.monotonic() >= deadline:
                 _note_gap("budget spent")
                 log.info("auto-scan: SKU budget spent after %d lookup(s)", done)
@@ -898,6 +907,37 @@ def _run_sku_gap() -> float:
                 log.info("auto-scan: an update is waiting — SKU queue yields after %d", done)
                 return time.monotonic() - started
             hold_awake()
+            code = stock_reread.next_code() if rereading else None
+            if code:
+                res = stock_reread.run_step(
+                    _driver_for_sku_step(), code, on_search_screen=on_search
+                )
+                done += 1
+                good = res.get("action") in ("read", "unknown")
+                n, total = stock_reread.progress()
+                _note_gap(
+                    f"working (stock reread {n}/{total})"
+                    if good
+                    else f"stock reread {res.get('action')}: {res.get('why') or code}",
+                    read=1 if res.get("action") == "read" else 0,
+                )
+                if res["action"] == "unavailable":
+                    return time.monotonic() - started
+                if res.get("returned") is False:
+                    _note_gap(f"didn't get home after {code}")
+                    return time.monotonic() - started
+                if res.get("on_search"):
+                    on_search = True
+                else:
+                    on_search = False
+                    try:
+                        from as400_capture import return_to_menu
+
+                        return_to_menu(_driver_for_sku_step())
+                    except Exception as e:  # noqa: BLE001
+                        _note_gap(f"lost the terminal after a {res['action']}: {e}")
+                        return time.monotonic() - started
+                continue
             row = sku_enrichment.next_sku()
             if not row:
                 _note_gap("the queue is empty")
