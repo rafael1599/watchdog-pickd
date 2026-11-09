@@ -306,6 +306,16 @@ cerrado se abre antes (`bootstrap_session`, que ahora también abre ventana si M
 Todo queda en `last_gap_reason` del latido (`session: lost (login), taking it back in 18s`,
 `session: taken back`, `session: could not read …`, `session: unknown screen «…»`).
 
+**Pantalla desconocida → cerrar Mocha y volver a abrir (9 nov 2026).** Esa mañana Bay 2 se quedó
+horas en «SYS-5580 System operator canceled job. Press Enter» y el vigilante sólo lo anotaba.
+Rafael: «incluir la recuperación cerrando el mocha automáticamente, esperar unos segundos y volver
+a abrir». Si una pantalla desconocida dura `AS400_UNKNOWN_RESTART_SEC` (120 s) y nadie usa la Mac
+(`operator_allows_restart`), se cierra Mocha (`quit`, y si no cierra, `pkill`), se esperan
+`AS400_RELAUNCH_PAUSE_SEC` (5 s) y se abre y entra con `bootstrap_session`. Un fallo entra en el
+backoff de reinicios (4, 8, 16… min) y un éxito lo pone a cero. Latido: `session: unknown screen for
+120s, closing Mocha` → `session: Mocha reopened` o `session: reopening Mocha failed (…)`. Para
+apagar sólo esto: `AS400_UNKNOWN_RELAUNCH=0`.
+
 - **Valores de prueba en el código: gracia 20 s, revisión 10 s.** Van a 180 s / 30 s cuando pasen las
   pruebas del lunes 9 nov (backlog de pickd, idea-309).
 - **Probado el 6 nov:** Sign On en una ventana abierta → sesión en 21 s. Mocha sin ventana no se

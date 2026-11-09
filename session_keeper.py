@@ -19,6 +19,15 @@ nothing to do can be twenty minutes away, and then logged in at once. So:
     (`restart_as400_session`; a closed Mocha is opened first). The new session
     invalidates the old one (Rafael), so a second window is never a problem here.
 
+A screen the watcher does not know (9 nov 2026: «System operator canceled job.
+Press Enter») used to be only noted, and Bay 2 sat on it all morning. Rafael:
+«incluir la recuperación cerrando el mocha automáticamente, esperar unos segundos
+y volver a abrir». So when an unknown screen lasts `AS400_UNKNOWN_RESTART_SEC`
+(120 s), and nobody is at the Mac, Mocha is closed, the keeper waits
+`AS400_RELAUNCH_PAUSE_SEC` (5 s) and opens it and logs in — the same bootstrap as a
+closed Mocha. A failure counts in the restart backoff of `as400_capture` (4, 8,
+16… min); `AS400_UNKNOWN_RELAUNCH=0` switches only this part off.
+
 The heartbeat says all of it in `last_gap_reason` («session: lost, taking it back
 in 120s», «session: taken back»), so it can be followed from PickD's base.
 `AS400_SESSION_KEEPER=0` switches it off.
@@ -39,7 +48,7 @@ STATE_CLOSED = "closed"
 STATE_NO_WINDOW = "no_window"
 
 _lock = threading.Lock()
-_state = {"lost_since": None}
+_state = {"lost_since": None, "unknown_since": None}
 _thread: threading.Thread | None = None
 
 
@@ -52,6 +61,32 @@ def _env_float(name: str, default: float) -> float:
 
 def enabled() -> bool:
     return os.getenv("AS400_SESSION_KEEPER", "1") not in ("0", "false", "no")
+
+
+def relaunch_on_unknown() -> bool:
+    return os.getenv("AS400_UNKNOWN_RELAUNCH", "1") not in ("0", "false", "no")
+
+
+def unknown_restart_sec() -> float:
+    return max(0.0, _env_float("AS400_UNKNOWN_RESTART_SEC", 120.0))
+
+
+def relaunch_pause_sec() -> float:
+    return max(0.0, _env_float("AS400_RELAUNCH_PAUSE_SEC", 5.0))
+
+
+def unknown_for(now: float | None = None) -> float:
+    """Mark an unknown screen seen (first notice wins). Returns seconds since."""
+    now = time.monotonic() if now is None else now
+    with _lock:
+        if _state["unknown_since"] is None:
+            _state["unknown_since"] = now
+        return now - _state["unknown_since"]
+
+
+def known() -> None:
+    with _lock:
+        _state["unknown_since"] = None
 
 
 def retake_wait_sec() -> float:
@@ -111,11 +146,46 @@ def retake_allowed(now: float | None = None) -> bool:
     return True
 
 
-def check_once(driver, *, note_gap, note_as400, wake, now=None) -> str:
+def _relaunch(driver, *, since, note_gap, note_as400, wake, sleep, now) -> str:
+    """Close Mocha, wait, open it and log in. Guarded by the operator and the
+    restart backoff; a failure feeds that backoff, a success resets it."""
+    import as400_capture as cap
+
+    clock = time.time() if now is None else now
+    if cap.is_restart_backing_off(clock):
+        left = cap.restart_cooldown_remaining(clock)
+        note_gap(f"session: unknown screen for {since:.0f}s, backing off {left:.0f}s")
+        return "unknown"
+    if not cap.operator_allows_restart():
+        note_gap(f"session: unknown screen for {since:.0f}s, waiting for the Mac to be free")
+        return "unknown"
+    note_gap(f"session: unknown screen for {since:.0f}s, closing Mocha")
+    log.warning("session: unknown screen for %.0fs — closing Mocha and opening it again", since)
+    try:
+        if not driver.quit():
+            raise RuntimeError("Mocha would not close")
+        sleep(relaunch_pause_sec())
+        cap.bootstrap_session(driver)
+    except Exception as e:  # noqa: BLE001 — the backoff decides when to try again
+        cap.record_restart_failure(clock)
+        known()
+        note_gap(f"session: reopening Mocha failed ({type(e).__name__}: {e})"[:300])
+        log.warning("session: reopening Mocha failed: %s", e)
+        return "relaunch_failed"
+    cap.record_restart_success()
+    known()
+    back()
+    note_as400(True)
+    note_gap("session: Mocha reopened")
+    wake()
+    return "relaunched"
+
+
+def check_once(driver, *, note_gap, note_as400, wake, now=None, sleep=time.sleep) -> str:
     """One look at the screen; logs back in when the grace is over.
 
     Returns what happened, for the log and the tests: ready, unknown, lost,
-    retaken, retake_failed, unreadable.
+    retaken, retake_failed, unreadable, relaunched, relaunch_failed.
     """
     import as400_capture as cap
 
@@ -140,11 +210,23 @@ def check_once(driver, *, note_gap, note_as400, wake, now=None) -> str:
             note_gap(f"session: could not read the screen ({type(e).__name__}: {e})"[:300])
             return "unreadable"
     if state == cap.STATE_UNKNOWN:
-        # Not ours to judge: the scanner's own recovery handles a strange screen.
-        # Said in the heartbeat, though: a silent keeper is a blind one.
+        # The scanner's own recovery gets the first `unknown_restart_sec`; past
+        # that, close Mocha and open it again (Rafael, 9 nov 2026).
         shown = " ".join((screen or "").split())[:120]
+        since = unknown_for(now)
+        if relaunch_on_unknown() and since >= unknown_restart_sec():
+            return _relaunch(
+                driver,
+                since=since,
+                note_gap=note_gap,
+                note_as400=note_as400,
+                wake=wake,
+                sleep=sleep,
+                now=now,
+            )
         note_gap(f"session: unknown screen «{shown}»")
         return "unknown"
+    known()
     if state not in (cap.STATE_LOGIN, cap.STATE_DISCONNECTED, STATE_CLOSED, STATE_NO_WINDOW):
         if _state["lost_since"] is not None:
             back()
