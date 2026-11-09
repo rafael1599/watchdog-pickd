@@ -1418,6 +1418,22 @@ def _paced(action: str, wait: float, gap_spent: float = 0.0) -> float:
                 CATALOGUE_MAX_WAIT_SEC,
             )
             wait = CATALOGUE_MAX_WAIT_SEC
+        # Una relectura pedida desde PickD con códigos pendientes tampoco espera
+        # los veinte minutos de «not_found» (Rafael, 9 nov 2026: 19 S/D perdidas
+        # en cola y el hueco siguiente a 20 min). Se apaga sola: cada código
+        # termina en MAX_TRIES y `next_code()` vuelve None. Sólo «not_found»: un
+        # AS400 caído o una captura a medias conservan su pausa.
+        if action == "not_found" and wait > CATALOGUE_MAX_WAIT_SEC:
+            import stock_reread
+
+            if stock_reread.next_code():
+                log.info(
+                    "auto-scan: %s — %.0fs recortados a %.0fs (relectura pendiente)",
+                    action,
+                    wait,
+                    CATALOGUE_MAX_WAIT_SEC,
+                )
+                wait = CATALOGUE_MAX_WAIT_SEC
     except Exception:  # noqa: BLE001 — el recorte es un lujo, la espera no
         log.exception("auto-scan: no se pudo recortar la espera")
     if wait > FOUND_NEXT_DELAY_SEC:
