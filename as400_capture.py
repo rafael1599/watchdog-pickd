@@ -1868,7 +1868,13 @@ def _type_stock_lookup(sku, driver, digits, colour, page_wait, read, *, optimist
     driver.key("tab")
     if colour:
         driver.type_text(colour)
-    driver.key("tab")
+    # A three-letter colour fills the field and the 5250 jumps to the next one
+    # by itself (auto field exit), so a TAB here skipped one field too many and
+    # the X opened NOTES: on 9 nov 2026 `03-4035BLT` and `03-3779RDD` came back
+    # with their own stock number and no fields, while every two-letter code
+    # read fine. `AS400_COLOUR3_TAB=1` puts the old TAB back.
+    if not (len(colour) >= 3 and os.getenv("AS400_COLOUR3_TAB", "0") != "1"):
+        driver.key("tab")
     # The X is the last key. Rafael, 2026-09-08: "después de presionar X no se
     # debe presionar otra tecla, solo copiar de frente". It submits by itself,
     # and the ENTER that used to follow it was a guess of mine.
