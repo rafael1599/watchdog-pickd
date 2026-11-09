@@ -325,6 +325,18 @@ apagar sólo esto: `AS400_UNKNOWN_RELAUNCH=0`.
   watcher descarta se dice en el latido.
 
 
+### Releer el stock por una lista de PickD (9 nov 2026, `stock_reread.py`)
+Rafael: «a veces el as400 lo tiene con terminaciones diferentes … blt o bl por bk … y quiero una
+lectura de hoy». La cola del catálogo no pregunta dos veces (un SKU con `as400_description` ya no
+vuelve), así que el `On Hand` del AS400 se quedó en el 12 sep. PickD pone la lista en `app_flags`
+(`as400_stock_reread`: `rev`, `skus` en orden, `home` = en qué ficha guardar un código que PickD no
+tiene, como `03-4035BLT` → `03-4035BL`, y `gap_budget_sec`/`max_per_gap` propios). El bucle de huecos
+la lee **delante del catálogo**, con los mismos frenos (orden pedida, operario, update). Escribe sólo
+`as400_snapshot` (+ `reread_rev`, `reread_at`, y `variants[código]` en la ficha `home`) y
+`as400_read_at`; nunca cantidad, peso ni nombre. Si la pantalla enseña otro código (el campo de color
+puede comerse la tercera letra) no escribe nada y lo deja tras 2 intentos. Lo hecho por `rev` vive en
+`.stock_reread.json`; un `rev` nuevo empieza de cero. Latido: `working (stock reread n/N)`.
+
 ### Archivos del MVP
 | Archivo | Rol |
 |---------|-----|
