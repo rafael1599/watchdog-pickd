@@ -372,6 +372,26 @@ def test_a_sku_with_no_colour_suffix_tabs_straight_past_the_field():
     assert driver.actions.count(("key", "tab")) == 2  # both tabs pressed, one field left blank
 
 
+def test_a_three_letter_colour_skips_the_tab_the_full_field_already_did(monkeypatch):
+    # 9 nov 2026: 03-4035BLT, 03-3779RDD and 03-3768BLD came back with their own
+    # stock number and no fields (NOTES) while every two-letter code read. Three
+    # letters fill the colour field and the 5250 moves on by itself, so the TAB
+    # after them skipped one field too many.
+    monkeypatch.delenv("AS400_COLOUR3_TAB", raising=False)
+    screen = STOCK_DETAIL.replace("Stock Number: 03 3933 BK", "Stock Number: 03 4035 BLT")
+    driver = FakeDriver([ORDER_SEARCH, MENU, screen, screen])
+    capture_stock_inquiry("03-4035BLT", driver, page_wait=0, step_wait=0)
+    assert driver.actions[-3:] == [("key", "tab"), ("text", "BLT"), ("text", "X")]
+
+
+def test_the_old_tab_after_three_letters_comes_back_with_one_env_line(monkeypatch):
+    monkeypatch.setenv("AS400_COLOUR3_TAB", "1")
+    screen = STOCK_DETAIL.replace("Stock Number: 03 3933 BK", "Stock Number: 03 4035 BLT")
+    driver = FakeDriver([ORDER_SEARCH, MENU, screen, screen])
+    capture_stock_inquiry("03-4035BLT", driver, page_wait=0, step_wait=0)
+    assert driver.actions[-3:] == [("text", "BLT"), ("key", "tab"), ("text", "X")]
+
+
 def test_the_notes_screen_is_refused_instead_of_read():
     # R10. Same title, no fields: reading here would report the weight as ABSENT
     # rather than as "I am not where I think I am".
