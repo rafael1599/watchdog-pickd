@@ -1,5 +1,7 @@
 """stock_reread: PickD hands over a list, the watcher reads the AS400 stock again."""
 
+import json
+
 import pytest
 
 import stock_reread as sr
@@ -249,8 +251,8 @@ def test_the_priority_list_runs_through_the_operator_and_stops_only_for_an_order
     prioritaria, a menos que se le pida explícitamente jalar una orden desde
     pickd». Somebody at the keyboard does not stop it; the catalogue after it
     still yields to them; an order asked for in PickD stops it at once."""
-    from tests.test_sku_enrichment import _gap_harness
     import auto_scanner
+    from tests.test_sku_enrichment import _gap_harness
 
     seen = _gap_harness(monkeypatch, idle=0.0)
     monkeypatch.setattr(auto_scanner, "operator_idle_seconds", lambda: 0.0)
@@ -271,8 +273,8 @@ def test_the_priority_list_runs_through_the_operator_and_stops_only_for_an_order
 
 
 def test_an_order_asked_for_in_pickd_stops_the_priority_list(monkeypatch):
-    from tests.test_sku_enrichment import _gap_harness
     import auto_scanner
+    from tests.test_sku_enrichment import _gap_harness
 
     _gap_harness(monkeypatch)
     monkeypatch.setattr(
@@ -292,3 +294,72 @@ def test_an_order_asked_for_in_pickd_stops_the_priority_list(monkeypatch):
     finally:
         auto_scanner._request.clear()
     assert reread == CFG["skus"][:1]
+
+
+class _Table:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def insert(self, row):
+        self.rows.append(row)
+        return self
+
+    def execute(self):
+        return None
+
+
+class _Client:
+    def __init__(self):
+        self.rows = []
+
+    def table(self, name):
+        assert name == "as400_screens"
+        return _Table(self.rows)
+
+
+def test_every_screen_read_is_kept_raw_beside_what_was_taken(monkeypatch):
+    capture_returns(monkeypatch, DETAIL)
+    monkeypatch.setenv("SKU_ENRICH_WRITE", "1")
+    client = _Client()
+    monkeypatch.setattr(sr, "_client", lambda c=None: client)
+    writes, fn = recorder()
+    sr.run_step(object(), "03-4035BL", write_fn=fn)
+    assert len(client.rows) == 1
+    row = client.rows[0]
+    assert row["sku"] == "03-4035BL" and row["classified"] == "stock_inquiry"
+    assert row["raw"] == DETAIL
+    assert json.loads(row["after"])["on_hand"]["NJ"] == 41
+
+
+def test_a_screen_of_another_code_is_kept_too(monkeypatch):
+    # the mismatch is exactly what has to be looked at later
+    capture_returns(monkeypatch, DETAIL)
+    monkeypatch.setenv("SKU_ENRICH_WRITE", "1")
+    client = _Client()
+    monkeypatch.setattr(sr, "_client", lambda c=None: client)
+    writes, fn = recorder()
+    sr.run_step(object(), "03-4035BLT", write_fn=fn)
+    assert [r["sku"] for r in client.rows] == ["03-4035BLT"] and writes == []
+
+
+def test_keeping_the_screen_never_stops_the_read(monkeypatch):
+    capture_returns(monkeypatch, DETAIL)
+    monkeypatch.setenv("SKU_ENRICH_WRITE", "1")
+
+    def boom(c=None):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(sr, "_client", boom)
+    writes, fn = recorder()
+    res = sr.run_step(object(), "03-4035BL", write_fn=fn)
+    assert res["action"] == "read" and writes
+
+
+def test_nothing_is_kept_with_writes_off(monkeypatch):
+    capture_returns(monkeypatch, DETAIL)
+    monkeypatch.setenv("SKU_ENRICH_WRITE", "0")
+    client = _Client()
+    monkeypatch.setattr(sr, "_client", lambda c=None: client)
+    writes, fn = recorder()
+    sr.run_step(object(), "03-4035BL", write_fn=fn)
+    assert client.rows == []
