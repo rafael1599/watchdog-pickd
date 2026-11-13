@@ -242,3 +242,53 @@ def test_a_miss_walks_to_the_menu_before_the_next_code(monkeypatch):
 
     auto_scanner._run_sku_gap()
     assert hops == [False, False] and len(walks) == 2
+
+
+def test_the_priority_list_runs_through_the_operator_and_stops_only_for_an_order(monkeypatch):
+    """Rafael, 13 nov 2026: «que corra sin parar hasta terminar la lista
+    prioritaria, a menos que se le pida explícitamente jalar una orden desde
+    pickd». Somebody at the keyboard does not stop it; the catalogue after it
+    still yields to them; an order asked for in PickD stops it at once."""
+    from tests.test_sku_enrichment import _gap_harness
+    import auto_scanner
+
+    seen = _gap_harness(monkeypatch, idle=0.0)
+    monkeypatch.setattr(auto_scanner, "operator_idle_seconds", lambda: 0.0)
+    monkeypatch.setattr(
+        sr, "_flag", lambda client=None: {"enabled": True, "config": {**CFG, "max_per_gap": 50}}
+    )
+    reread = []
+
+    def step(driver, code, **kw):
+        reread.append(code)
+        sr._finish("r1", code, "read")
+        return {"action": "read", "sku": code, "returned": True, "on_search": True}
+
+    monkeypatch.setattr(sr, "run_step", step)
+    auto_scanner._run_sku_gap()
+    assert reread == CFG["skus"]  # the whole list, with the operator "at the keyboard"
+    assert seen == []  # the catalogue after it yields to the operator as before
+
+
+def test_an_order_asked_for_in_pickd_stops_the_priority_list(monkeypatch):
+    from tests.test_sku_enrichment import _gap_harness
+    import auto_scanner
+
+    _gap_harness(monkeypatch)
+    monkeypatch.setattr(
+        sr, "_flag", lambda client=None: {"enabled": True, "config": {**CFG, "max_per_gap": 50}}
+    )
+    reread = []
+
+    def step(driver, code, **kw):
+        reread.append(code)
+        sr._finish("r1", code, "read")
+        auto_scanner._request.set()  # somebody asks for an order from the board
+        return {"action": "read", "sku": code, "returned": True, "on_search": True}
+
+    monkeypatch.setattr(sr, "run_step", step)
+    try:
+        auto_scanner._run_sku_gap()
+    finally:
+        auto_scanner._request.clear()
+    assert reread == CFG["skus"][:1]
