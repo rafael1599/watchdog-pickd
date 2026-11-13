@@ -890,9 +890,19 @@ def _run_sku_gap() -> float:
                     "auto-scan: an order was asked for in PickD — SKU queue yields after %d", done
                 )
                 return time.monotonic() - started
+            # La lista prioritaria de PickD corre de corrido hasta acabarse (Rafael,
+            # 13 nov 2026: «que corra sin parar hasta terminar la lista prioritaria,
+            # a menos que se le pida explícitamente jalar una orden desde pickd»).
+            # Mientras quede algo en ella sólo ceden las dos de arriba, que son una
+            # persona pidiendo órdenes; el operario y una actualización esperan.
+            priority = rereading and stock_reread.next_code() is not None
             # El teclado del operario gana también, comprobado antes de CADA
             # consulta… salvo mientras dure el permiso de «hoy no hay nadie».
-            if not ignoring_operator() and operator_idle_seconds() < IDLE_THRESHOLD_SEC:
+            if (
+                not priority
+                and not ignoring_operator()
+                and operator_idle_seconds() < IDLE_THRESHOLD_SEC
+            ):
                 _note_gap("the operator is back")
                 log.info("auto-scan: the operator is back — SKU queue yields after %d", done)
                 return time.monotonic() - started
@@ -902,7 +912,7 @@ def _run_sku_gap() -> float:
             # for hours: the lock would be free about five seconds in every three
             # hundred. Catalogue work is the lowest-priority thing here — it
             # yields to the operator, to the orders, and to a deploy.
-            if auto_update.update_pending.is_set():
+            if not priority and auto_update.update_pending.is_set():
                 _note_gap("an update is waiting")
                 log.info("auto-scan: an update is waiting — SKU queue yields after %d", done)
                 return time.monotonic() - started
