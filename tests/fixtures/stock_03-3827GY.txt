@@ -1,0 +1,24 @@
+                            S T O C K   I N Q U I R Y                           
+                                                                                
+  Stock Number: 03 3827 GY      B-Bike/P-Part: B    Model Year: 2025            
+  Description:  RENEGADE S3 56 2026 MONTEREY GREY                               
+                                                                                
+     Inventory  NJ       FL       CA                 Price  Quantity            
+  On Hand        1        0        0       Each   1330.95         49            
+  On Order       1        0        0    Level 1   1254.95         99            
+  Available      0        0        0          2   1216.95        199            
+  Open PO        0        0        0          3       .00          0            
+                                              4       .00          0            
+  Next Purchase Order                                                           
+  Est Del     Quantity     Vendor No:      0065                                 
+                           Alternate Ven:  03382                                
+                                                                                
+  Unit Meas:   EA                                                               
+  First Cost                Bin Location:  R40      Status Code:                
+  Freight                 Stock Location:  R42                                  
+  Duty %                          Weight:    37                                 
+  Broker                  Commission Pct:  3                                    
+  Harbor Fee%                  Cost Code:  1                                    
+  Landed Cost                                                                   
+                     Cmd10                                          Cmd7        
+                      NOTES                                          EXIT       

@@ -1,0 +1,24 @@
+                            S T O C K   I N Q U I R Y                           
+                                                                                
+  Stock Number: 02 3054 TL      B-Bike/P-Part: B    Model Year: 2024            
+  Description:  EXPLORER A1 S/T 16 2024 ANO TEAL    PHTO                        
+                                                                                
+     Inventory  NJ       FL       CA                 Price  Quantity            
+  On Hand        0        0        0       Each    441.00         49            
+  On Order       0        0        0    Level 1    428.00         99            
+  Available      0        0        0          2    416.00        199            
+  Open PO        0        0        0          3    403.00       9999            
+                                              4       .00          0            
+  Next Purchase Order                                                           
+  Est Del     Quantity     Vendor No:      0302                                 
+                           Alternate Ven:  02305                                
+                                                                                
+  Unit Meas:   EA                                                               
+  First Cost                Bin Location:           Status Code:                
+  Freight                 Stock Location:                                       
+  Duty %                          Weight:     0                                 
+  Broker                  Commission Pct:  2                                    
+  Harbor Fee%                  Cost Code:  1                                    
+  Landed Cost                                                                   
+                     Cmd10                                          Cmd7        
+                      NOTES                                          EXIT       

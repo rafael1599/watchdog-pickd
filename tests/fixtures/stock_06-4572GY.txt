@@ -1,0 +1,24 @@
+                            S T O C K   I N Q U I R Y                           
+                                                                                
+  Stock Number: 06 4572 GY      B-Bike/P-Part: B    Model Year:                 
+  Description:  EC1 18 2026 KINETIC GREY                                        
+                                                                                
+     Inventory  NJ       FL       CA                 Price  Quantity            
+  On Hand        0       16        0       Each    354.95         49            
+  On Order       1        0        0    Level 1    333.95         99            
+  Available      1-      16        0          2    322.95        199            
+  Open PO        0        0        0          3       .00          0            
+                                              4       .00          0            
+  Next Purchase Order                                                           
+  Est Del     Quantity     Vendor No:      0302                                 
+                           Alternate Ven:  06457                                
+                                                                                
+  Unit Meas:   EA                                                               
+  First Cost                Bin Location:  5        Status Code:                
+  Freight                 Stock Location:                                       
+  Duty %                          Weight:    38                                 
+  Broker                  Commission Pct:  3                                    
+  Harbor Fee%                  Cost Code:  1                                    
+  Landed Cost                                                                   
+                     Cmd10                                          Cmd7        
+                      NOTES                                          EXIT       

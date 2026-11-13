@@ -1,0 +1,24 @@
+                            S T O C K   I N Q U I R Y                           
+                                                                                
+  Stock Number: 45 1036         B-Bike/P-Part: P    Model Year: 0000            
+  Description:  STEM ATI PINION STANDARD 39MM 1 1/8TRDLS                        
+                                                                                
+     Inventory  NJ       FL       CA                 Price  Quantity            
+  On Hand       10        2        0       Each      5.95       9999            
+  On Order       0        0        0    Level 1       .00          0            
+  Available     10        2        0          2       .00          0            
+  Open PO        0        0        0          3       .00          0            
+                                              4       .00          0            
+  Next Purchase Order                                                           
+  Est Del     Quantity     Vendor No:      0098                                 
+                           Alternate Ven:  45103                                
+                                                                                
+  Unit Meas:                                                                    
+  First Cost                Bin Location:  E20      Status Code:                
+  Freight                 Stock Location:                                       
+  Duty %                          Weight:     0                                 
+  Broker                  Commission Pct:  4                                    
+  Harbor Fee%                  Cost Code:  1                                    
+  Landed Cost                                                                   
+                     Cmd10                                          Cmd7        
+  NOTES EXIST         NOTES                                          EXIT       
