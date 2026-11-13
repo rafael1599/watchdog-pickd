@@ -311,7 +311,10 @@ def parse_stock_inquiry(text: str) -> Dict:
         # fuera su valor.
         "unit_meas": one(r"Unit\s*Meas:[ \t]*([A-Z]{1,4})\b"),
         "status_code": one(r"Status\s*Code:[ \t]*(\S+)"),
-        "bin_location": one(r"Bin\s*Location:[ \t]*(\S+)"),
+        # Y en la misma línea: un `Bin Location:` vacío se llevaba la etiqueta
+        # de al lado, «Status» (de `Status Code:`). 393 fichas guardaban «Status»
+        # como ubicación hasta el 13 nov 2026.
+        "bin_location": one(r"Bin\s*Location:[ \t]*(?!Status\s*Code:)(\S+)"),
         "stock_location": one(r"Stock\s*Location:[ \t]*(\S+)"),
         "commission_pct": _num(one(r"Commission\s*Pct:[ \t]*([\d.]+)")),
         "vendor_no": one(r"Vendor\s*No\.?:?[ \t]*(\S+)"),
