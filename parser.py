@@ -275,7 +275,15 @@ def parse_stock_inquiry(text: str) -> Dict:
             continue
         rest = m.group(1)
         tier = re.search(r"(Each|Level\s*\d)", rest, re.IGNORECASE)
-        nums = re.findall(r"-?\d+(?:\.\d+)?", re.sub(r"Level\s*\d|Each", " ", rest, flags=re.I))
+        # El AS400 escribe un negativo con el signo DETRÁS: «Available 1-». Leído
+        # sin él, 6 de 54 pantallas de muestra (13 nov 2026) daban un disponible
+        # positivo donde había más comprometido que en mano.
+        nums = [
+            f"-{n[:-1]}" if n.endswith("-") else n
+            for n in re.findall(
+                r"-?\d+(?:\.\d+)?-?|-?\.\d+", re.sub(r"Level\s*\d|Each", " ", rest, flags=re.I)
+            )
+        ]
         if warehouses and len(nums) >= 3:
             rows[key] = {w: int(float(n)) for w, n in zip(warehouses, nums[:3])}
         if len(nums) >= 5:
@@ -317,7 +325,9 @@ def parse_stock_inquiry(text: str) -> Dict:
         "bin_location": one(r"Bin\s*Location:[ \t]*(?!Status\s*Code:)(\S+)"),
         "stock_location": one(r"Stock\s*Location:[ \t]*(\S+)"),
         "commission_pct": _num(one(r"Commission\s*Pct:[ \t]*([\d.]+)")),
-        "vendor_no": one(r"Vendor\s*No\.?:?[ \t]*(\S+)"),
+        # Los dos puntos son obligatorios: con `:?` un `Vendor No:` vacío guardaba
+        # el propio «:» como número (386 fichas, 13 nov 2026).
+        "vendor_no": one(r"Vendor\s*No\.?[ \t]*:[ \t]*(\S+)"),
     }
 
 

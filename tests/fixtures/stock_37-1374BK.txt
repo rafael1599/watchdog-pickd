@@ -1,0 +1,24 @@
+                            S T O C K   I N Q U I R Y                           
+                                                                                
+  Stock Number: 37 1374 BK      B-Bike/P-Part: P    Model Year: 0000            
+  Description:  STEM CYCLERITE ATB 90MM/40 DEG/22.2MM                           
+                                                                                
+     Inventory  NJ       FL       CA                 Price  Quantity            
+  On Hand       21        0        0       Each      6.95       9999            
+  On Order       0        3        0    Level 1       .00          0            
+  Available     21        3-       0          2       .00          0            
+  Open PO        0        0        0          3       .00          0            
+                                              4       .00          0            
+  Next Purchase Order                                                           
+  Est Del     Quantity     Vendor No:      0001                                 
+                           Alternate Ven:  37137                                
+                                                                                
+  Unit Meas:   EA                                                               
+  First Cost                Bin Location:  D1       Status Code: 1              
+  Freight                 Stock Location:                                       
+  Duty %                          Weight:     0                                 
+  Broker                  Commission Pct:  8                                    
+  Harbor Fee%                  Cost Code:  1                                    
+  Landed Cost                                                                   
+                     Cmd10                                          Cmd7        
+                      NOTES                                          EXIT       
