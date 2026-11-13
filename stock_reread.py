@@ -297,6 +297,30 @@ def write(code: str, home: str | None, parsed: dict | None, rev: str, client=Non
     return "written"
 
 
+def keep_screen(code: str, screen: str, parsed: dict, client=None) -> bool:
+    """Keep the screen as read, beside what was taken from it (Rafael, 13 Nov 2026:
+    «estudiemos cada una de esas pantallas para ver si pickd está preparado para sacar
+    de manera acurated la info precisa»). Only the parsed values used to be kept, so a
+    misread (`Status` as a bin, `:` as a vendor) could not be checked against the
+    screen nor fixed by parsing it again. `as400_screens`, `classified = 'stock_inquiry'`.
+    Same switch as every other write; a failure is logged, never fatal."""
+    if not _writes_enabled():
+        return False
+    try:
+        _client(client).table("as400_screens").insert(
+            {
+                "sku": code,
+                "classified": "stock_inquiry",
+                "after": json.dumps(parsed, default=str),
+                "raw": screen,
+            }
+        ).execute()
+        return True
+    except Exception as e:  # noqa: BLE001 — keeping the screen must not stop the read
+        log.warning("stock reread %s: screen not kept (%s)", code, e)
+        return False
+
+
 # ── one step, in the gap loop ────────────────────────────────────────────────
 
 
@@ -315,6 +339,7 @@ def run_step(driver, code: str, *, on_search_screen=False, client=None, write_fn
             else capture_stock_inquiry(code, driver)
         )
         parsed = parse_stock_inquiry(screen)
+        keep_screen(code, screen, parsed, client)
         if parsed.get("sku") != code:
             # The colour field may eat a third letter (01-8791SPT shown as SP):
             # then the screen is somebody else's record and nothing is written.
