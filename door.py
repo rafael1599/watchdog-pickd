@@ -523,7 +523,8 @@ def _iso(dt: datetime) -> str:
 
 
 def poll_order_requests(client, *, now=None, enqueue_fn=None) -> int:
-    """The queue, oldest first, handed to the scanner. Returns how many."""
+    """The queue, a person's search first and then oldest first, handed to the scanner.
+    Returns how many."""
     import auto_scanner
 
     now = now or datetime.now(timezone.utc)
@@ -531,9 +532,12 @@ def poll_order_requests(client, *, now=None, enqueue_fn=None) -> int:
     since = datetime.fromtimestamp(now.timestamp() - REQUEST_EXPIRE_SEC, tz=timezone.utc)
     rows = (
         client.table("as400_order_requests")
-        .select("id, order_number, attempts, started_at, requested_at")
+        .select("id, order_number, attempts, started_at, requested_at, purpose")
         .eq("status", "queued")
         .gte("requested_at", _iso(since))
+        # A person searching first ('search' > 'as400_check'): PickD's daytime queue can
+        # put dozens of orders here (13 Nov 2026) and nobody at the board waits behind them.
+        .order("purpose", desc=True)
         .order("requested_at")
         .limit(20)
         .execute()

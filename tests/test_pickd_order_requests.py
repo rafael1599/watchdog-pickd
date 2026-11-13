@@ -360,8 +360,8 @@ class _Query:
         self.filters.append(lambda r: str(r.get(col)) < val)
         return self
 
-    def order(self, col):
-        self.order_by = col
+    def order(self, col, desc=False):
+        self.orders = getattr(self, "orders", []) + [(col, desc)]
         return self
 
     def limit(self, _n):
@@ -380,6 +380,8 @@ class _Query:
             res.data = [self.values]
             return res
         rows = [r for r in self.db.tables.get(self.table, []) if all(f(r) for f in self.filters)]
+        for col, desc in reversed(getattr(self, "orders", [])):
+            rows.sort(key=lambda r: str(r.get(col) or ""), reverse=desc)
         if self.op == "update":
             for r in rows:
                 r.update(self.values)
@@ -578,3 +580,18 @@ def test_off_macos_nobody_is_ever_seen(monkeypatch):
     # HIDIdleTime ilegible = mil millones de segundos: no es una fecha.
     monkeypatch.setattr(auto_scanner, "_last_operator_input", time.monotonic() - 1e9)
     assert auto_scanner.operator_seen_at() is None
+
+
+def test_a_person_searching_goes_before_the_daytime_check_queue():
+    """13 nov 2026: PickD encola de día las órdenes por confirmar de lo que se movió.
+    Quien busca una orden en el board no espera detrás de ellas."""
+    db = FakeDB(
+        [
+            _req(1, purpose="as400_check", requested_at=(NOW - timedelta(minutes=9)).isoformat()),
+            _req(2, purpose="as400_check", requested_at=(NOW - timedelta(minutes=8)).isoformat()),
+            _req(3, purpose="search", requested_at=(NOW - timedelta(minutes=1)).isoformat()),
+        ]
+    )
+    handed = []
+    door.poll_order_requests(db, now=NOW, enqueue_fn=handed.extend)
+    assert [r["id"] for r in handed] == [3, 1, 2]
