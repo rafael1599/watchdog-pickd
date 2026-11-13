@@ -259,3 +259,14 @@ def test_an_empty_field_does_not_borrow_the_next_line():
     assert r["stock_location"] is None
     assert r["bin_location"] == "1"
     assert r["commission_pct"] == 3.0
+
+
+def test_an_empty_bin_location_does_not_borrow_the_status_label():
+    """Rafael, 13 nov 2026: el reporte AS400 Sync compara la ubicación del
+    AS400 con la de PickD. Un `Bin Location:` vacío se leía «Status», la
+    etiqueta que sigue en la misma línea."""
+    from parser import parse_stock_inquiry
+
+    empty = STOCK_FULL.replace("Bin Location:  1        Status", "Bin Location:           Status")
+    assert parse_stock_inquiry(empty)["bin_location"] is None
+    assert parse_stock_inquiry(STOCK_FULL)["bin_location"] == "1"
