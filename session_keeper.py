@@ -25,7 +25,9 @@ Press Enter») used to be only noted, and Bay 2 sat on it all morning. Rafael:
 y volver a abrir». So when an unknown screen lasts `AS400_UNKNOWN_RESTART_SEC`
 (120 s), and nobody is at the Mac, Mocha is closed, the keeper waits
 `AS400_RELAUNCH_PAUSE_SEC` (5 s) and opens it and logs in — the same bootstrap as a
-closed Mocha. A failure counts in the restart backoff of `as400_capture` (4, 8,
+closed Mocha. The same goes for a screen that cannot be read at all while Mocha is up with a
+window (16 nov 2026: Mocha's own «Server has closed the session» dialog took
+Cmd+A/Cmd+C for two days). A failure counts in the restart backoff of `as400_capture` (4, 8,
 16… min); `AS400_UNKNOWN_RELAUNCH=0` switches only this part off.
 
 The heartbeat says all of it in `last_gap_reason` («session: lost, taking it back
@@ -146,7 +148,7 @@ def retake_allowed(now: float | None = None) -> bool:
     return True
 
 
-def _relaunch(driver, *, since, note_gap, note_as400, wake, sleep, now) -> str:
+def _relaunch(driver, *, since, note_gap, note_as400, wake, sleep, now, what="unknown screen") -> str:
     """Close Mocha, wait, open it and log in. Guarded by the operator and the
     restart backoff; a failure feeds that backoff, a success resets it."""
     import as400_capture as cap
@@ -154,13 +156,13 @@ def _relaunch(driver, *, since, note_gap, note_as400, wake, sleep, now) -> str:
     clock = time.time() if now is None else now
     if cap.is_restart_backing_off(clock):
         left = cap.restart_cooldown_remaining(clock)
-        note_gap(f"session: unknown screen for {since:.0f}s, backing off {left:.0f}s")
+        note_gap(f"session: {what} for {since:.0f}s, backing off {left:.0f}s")
         return "unknown"
     if not cap.operator_allows_restart():
-        note_gap(f"session: unknown screen for {since:.0f}s, waiting for the Mac to be free")
+        note_gap(f"session: {what} for {since:.0f}s, waiting for the Mac to be free")
         return "unknown"
-    note_gap(f"session: unknown screen for {since:.0f}s, closing Mocha")
-    log.warning("session: unknown screen for %.0fs — closing Mocha and opening it again", since)
+    note_gap(f"session: {what} for {since:.0f}s, closing Mocha")
+    log.warning("session: %s for %.0fs — closing Mocha and opening it again", what, since)
     try:
         if not driver.quit():
             raise RuntimeError("Mocha would not close")
@@ -206,6 +208,24 @@ def check_once(driver, *, note_gap, note_as400, wake, now=None, sleep=time.sleep
         elif callable(windows) and windows() == 0:
             screen, state = "", STATE_NO_WINDOW
         else:
+            # Mocha up, with a window, and nothing copies: one of Mocha's own
+            # dialogs is on top (16 nov 2026: «Server has closed the session»
+            # sat there from Saturday 5:00 to Monday). `obstructions` leaves
+            # Mocha's windows alone, so nothing else would ever clear it. Past
+            # the same wait as an unknown screen, close Mocha and open it again
+            # (`quit` ends in a TERM, which a modal cannot refuse).
+            since = unknown_for(now)
+            if relaunch_on_unknown() and since >= unknown_restart_sec():
+                return _relaunch(
+                    driver,
+                    since=since,
+                    note_gap=note_gap,
+                    note_as400=note_as400,
+                    wake=wake,
+                    sleep=sleep,
+                    now=now,
+                    what="unreadable screen",
+                )
             log.info("session: could not read the screen (%s)", e)
             note_gap(f"session: could not read the screen ({type(e).__name__}: {e})"[:300])
             return "unreadable"
