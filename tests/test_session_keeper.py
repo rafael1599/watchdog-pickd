@@ -13,6 +13,7 @@ GONE = "Connection closed by host"
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     sk.back()
+    sk.known()
     monkeypatch.setenv("AS400_RETAKE_WAIT_SEC", "180")
     monkeypatch.delenv("AS400_SESSION_KEEPER", raising=False)
     yield
@@ -319,3 +320,44 @@ def test_the_switch_turns_only_this_off(relaunch, monkeypatch):
     look(mocha, 0.0, relaunch, slept)
     assert look(mocha, 9999.0, relaunch, slept)[0] == "unknown"
     assert mocha.quits == 0
+
+
+# ── a screen nothing copies from: Mocha's own dialog on top (16 nov 2026) ─────
+
+CLOSED_BY_SERVER = cap.CaptureError("the clipboard didn't change")
+
+
+def test_a_screen_that_never_copies_closes_mocha_and_reopens(relaunch):
+    mocha, slept = Mocha(CLOSED_BY_SERVER), []
+    out, gaps, _ = look(mocha, 0.0, relaunch, slept)
+    assert out == "unreadable" and mocha.quits == 0
+    out, *_ = look(mocha, 119.0, relaunch, slept)
+    assert out == "unreadable" and mocha.quits == 0
+
+    out, gaps, health = look(mocha, 120.0, relaunch, slept)
+    assert out == "relaunched" and mocha.quits == 1 and slept == [5.0]
+    assert relaunch == ["open", "wake"]
+    assert gaps == [
+        "session: unreadable screen for 120s, closing Mocha",
+        "session: Mocha reopened",
+    ]
+    assert health == [(True, None)]
+
+
+def test_one_good_read_forgets_the_unreadable_ones(relaunch):
+    mocha, slept = Mocha(CLOSED_BY_SERVER), []
+    look(mocha, 0.0, relaunch, slept)
+    mocha.screen = READY
+    assert look(mocha, 60.0, relaunch, slept)[0] == "ready"
+    mocha.screen = CLOSED_BY_SERVER
+    assert look(mocha, 150.0, relaunch, slept)[0] == "unreadable"
+    assert mocha.quits == 0
+
+
+def test_an_unreadable_screen_waits_for_the_mac_to_be_free(relaunch, monkeypatch):
+    monkeypatch.setattr(cap, "operator_allows_restart", lambda idle_fn=None: False)
+    mocha, slept = Mocha(CLOSED_BY_SERVER), []
+    look(mocha, 0.0, relaunch, slept)
+    out, gaps, _ = look(mocha, 500.0, relaunch, slept)
+    assert mocha.quits == 0 and relaunch == []
+    assert gaps == ["session: unreadable screen for 500s, waiting for the Mac to be free"]
