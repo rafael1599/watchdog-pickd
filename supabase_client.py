@@ -525,6 +525,43 @@ def _pick_by_stock(matches: list, available: dict, requested_qty: int) -> Option
     return best if available.get(best, 0) > 0 else matches[0]
 
 
+def _desc_key(desc) -> str:
+    """Model, size and color of an AS400 description: the year, the flag after a wide gap
+    ('...   T') and punctuation left out. Mirror of `as400_desc_key` in PickD (SQL)."""
+    d = (desc or "").upper()
+    d = re.split(r"\s{3,}", d)[0]
+    d = re.sub(r"\b(19|20)\d\d\b", " ", d)
+    d = re.sub(r"[^A-Z0-9 ]", "", d)
+    return re.sub(r"\s+", " ", d).strip()
+
+
+def _twin_homes(rows: list, sku_map: dict) -> dict:
+    """normalized twin code -> the catalog SKU it belongs to. Only a code with no catalog row of
+    its own, found by the AS400, with the same model and color as its SKU; a code two SKUs claim
+    is left out (the picker decides, as with any ambiguity)."""
+    homes: dict = {}
+    clash: set = set()
+    for row in rows:
+        variants = row.get("variants")
+        if not isinstance(variants, dict):
+            continue
+        home_key = _desc_key(row.get("descr"))
+        for code, v in variants.items():
+            if not isinstance(v, dict) or v.get("found") is not True:
+                continue
+            norm = normalize_sku(code)
+            if not norm or norm in sku_map:
+                continue
+            if not home_key or _desc_key(v.get("description")) != home_key:
+                continue
+            if norm in homes and homes[norm] != row["sku"]:
+                clash.add(norm)
+            homes[norm] = row["sku"]
+    for norm in clash:
+        homes.pop(norm, None)
+    return homes
+
+
 def _to_cart_items(client: Client, parsed_items: list) -> list:
     """
     Convert parsed PDF items to CartItem-compatible format.
@@ -540,7 +577,7 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
     while True:
         res = (
             client.table("sku_metadata")
-            .select("sku")
+            .select("sku, descr:as400_snapshot->>description, variants:as400_snapshot->variants")
             .range(offset, offset + page_size - 1)
             .execute()
         )
@@ -568,6 +605,14 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         log.warning("Ambiguous catalog SKUs share normalized form %s — leaving manual", norm)
         sku_map.pop(norm, None)
 
+    # Twin codes the AS400 keeps beside a catalog SKU, with no catalog row of their own: the
+    # watcher read them as `as400_snapshot.variants` of that SKU, found, with the same model and
+    # color in their description. A line on paper under the twin is that SKU (Rafael, 17 Nov
+    # 2026: order 882230 said '03 4070 BKT', which is 03-4070BL's twin, EXPLORER A2 19 GLOSS
+    # BLACK; the 2-letter guess '03-4070BK' is a TRAIL X1 of 2009 with no stock, the order came
+    # in LOW STOCK and was completed taking nothing).
+    twin_home = _twin_homes(all_metadata, sku_map)
+
     # Variant-sibling index: normalized bike SKUs grouped by dept+number+color
     # base, so '033768BL' and '033768BLD' are looked at together (_variant_base).
     family_index = {}
@@ -593,7 +638,10 @@ def _to_cart_items(client: Client, parsed_items: list) -> list:
         # real 2-letter color like 'WT'/'GT'.)
         candidates = []
         raw_norm = normalize_sku(item.get("raw_sku") or "")
-        if raw_norm:
+        # The SKU whose twin the paper names goes first: it is the same bike, said by the AS400.
+        if raw_norm and raw_norm in twin_home:
+            candidates.append(normalize_sku(twin_home[raw_norm]))
+        if raw_norm and raw_norm not in candidates:
             candidates.append(raw_norm)
         if normalized_pdf_sku not in candidates:
             candidates.append(normalized_pdf_sku)

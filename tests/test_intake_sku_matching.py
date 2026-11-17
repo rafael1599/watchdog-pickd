@@ -263,3 +263,63 @@ def test_not_found_line_without_raw_sku_falls_back_to_the_parsed_key():
     client = _client_with_catalog([])
     items = _to_cart_items(client, [{"sku": "034664BR", "qty": 1, "description": "d"}])
     assert items[0]["sku"] == "03-4664BR"
+
+
+# --- a twin code the AS400 keeps beside a catalog SKU (Rafael, 17 Nov 2026) --------------------
+
+
+def _client_with_rows(rows, inventory=None):
+    client = _client_with_catalog([], inventory)
+    real = client.table.side_effect
+
+    def table(name):
+        t = real(name)
+        if name == "sku_metadata":
+            t.select.return_value.range.return_value.execute.return_value.data = rows
+        return t
+
+    client.table.side_effect = table
+    return client
+
+
+EXPLORER_BL = {
+    "sku": "03-4070BL",
+    "descr": "EXPLORER A2 19 2026 GLOSS BLACK",
+    "variants": {
+        "03-4070BKT": {"found": True, "description": "EXPLORER A2 19 2026 GLOSS BLACK          T"},
+        "03-4070BLD": {"found": False},
+    },
+}
+TRAIL_BK = {"sku": "03-4070BK", "descr": "TRAIL X1 2009 14 GLOSS BLACK", "variants": None}
+
+
+def test_a_twin_on_paper_goes_to_the_sku_it_belongs_to_not_the_two_letter_guess():
+    # Order 882230: '03 4070 BKT' is 03-4070BL's twin (same model and color in the AS400);
+    # '03-4070BK' is a TRAIL X1 of 2009 with no stock.
+    client = _client_with_rows(
+        [EXPLORER_BL, TRAIL_BK], inventory=[_row("03-4070BL", "ROW 43", 192)]
+    )
+    items = _to_cart_items(
+        client, [{"sku": "034070BK", "raw_sku": "03 4070 BKT", "qty": 1, "description": "d"}]
+    )
+    assert items[0]["sku"] == "03-4070BL"
+    assert items[0]["sku_not_found"] is False
+    assert items[0]["insufficient_stock"] is False
+
+
+def test_a_twin_with_another_model_or_color_is_not_taken():
+    other = dict(EXPLORER_BL, descr="EXPLORER A2 19 2026 DEEP BLUE")
+    client = _client_with_rows([other, TRAIL_BK], inventory=[_row("03-4070BL", "ROW 43", 192)])
+    items = _to_cart_items(
+        client, [{"sku": "034070BK", "raw_sku": "03 4070 BKT", "qty": 1, "description": "d"}]
+    )
+    assert items[0]["sku"] == "03-4070BK"
+
+
+def test_a_twin_two_skus_claim_is_left_to_the_picker_rule():
+    twin = dict(EXPLORER_BL, sku="03-4070GY")
+    client = _client_with_rows([EXPLORER_BL, twin, TRAIL_BK])
+    items = _to_cart_items(
+        client, [{"sku": "034070BK", "raw_sku": "03 4070 BKT", "qty": 1, "description": "d"}]
+    )
+    assert items[0]["sku"] == "03-4070BK"
