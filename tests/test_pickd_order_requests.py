@@ -595,3 +595,31 @@ def test_a_person_searching_goes_before_the_daytime_check_queue():
     handed = []
     door.poll_order_requests(db, now=NOW, enqueue_fn=handed.extend)
     assert [r["id"] for r in handed] == [3, 1, 2]
+
+
+def test_a_long_wait_ends_when_pickd_leaves_a_reread_list(monkeypatch):
+    # Rafael, 17 nov 2026: la relectura de las 3:45 no puede esperar los 20 min de un not_found.
+    import stock_reread
+
+    monkeypatch.setattr(auto_scanner, "REREAD_POLL_SEC", 0.2)
+    codes = iter([None, "03-4067BL"])
+    monkeypatch.setattr(stock_reread, "next_code", lambda client=None: next(codes, "03-4067BL"))
+    auto_scanner._request.clear()
+    t0 = time.monotonic()
+    auto_scanner._interruptible_wait(10.0)
+    took = time.monotonic() - t0
+    assert 0.35 <= took < 1.5  # the first look finds nothing, the second one the list
+
+
+def test_a_reread_list_never_ends_a_wait_before_the_poll_or_an_operator_gate(monkeypatch):
+    import stock_reread
+
+    monkeypatch.setattr(auto_scanner, "REREAD_POLL_SEC", 0.3)
+    monkeypatch.setattr(stock_reread, "next_code", lambda client=None: "03-4067BL")
+    auto_scanner._request.clear()
+    t0 = time.monotonic()
+    auto_scanner._interruptible_wait(5.0)
+    assert 0.25 <= time.monotonic() - t0 < 1.0  # never at once: no hammering the AS400
+    t0 = time.monotonic()
+    auto_scanner._interruptible_wait(0.8, wake_on_request=False)
+    assert time.monotonic() - t0 >= 0.75  # the operator's gate does not wake for it

@@ -785,20 +785,55 @@ def _wait_for(action: str) -> float:
     }.get(action, NOT_FOUND_WAIT_SEC)
 
 
+# Cada cuánto mira una espera larga si PickD dejó una lista de relectura nueva.
+# Es también la espera mínima antes de despertar por ella: la misma que el
+# recorte de `CATALOGUE_MAX_WAIT_SEC`, así una lista que no avanza no convierte
+# el bucle de órdenes en un martilleo contra el AS400.
+REREAD_POLL_SEC = float(os.getenv("SCAN_REREAD_POLL_SEC", "30"))
+
+
+def _reread_waiting() -> bool:
+    """¿Hay códigos de la lista de relectura de PickD sin leer? La fila se lee
+    con la caché de `stock_reread` (60 s), no en cada vuelta."""
+    try:
+        import stock_reread
+
+        return stock_reread.next_code() is not None
+    except Exception:  # noqa: BLE001 — mirar la lista es un lujo, la espera no
+        log.debug("auto-scan: no se pudo mirar la lista de relectura", exc_info=True)
+        return False
+
+
 def _interruptible_wait(seconds: float, *, wake_on_request: bool = True) -> None:
-    """Sleep up to `seconds`, returning early on shutdown, a manual kick, or a
-    request from PickD.
+    """Sleep up to `seconds`, returning early on shutdown, a manual kick, a
+    request from PickD, or a stock reread list PickD left meanwhile.
 
     `wake_on_request=False` donde despertar no serviría de nada: la compuerta
     del operario (la petición tampoco puede teclear con alguien en Bay 2, y
     despertar cada medio segundo sería leer `ioreg` en bucle) y las esperas de
     un terminal caído o a medias (aporrear un AS400 que no contesta es como se
-    atasca una sesión)."""
-    deadline = time.monotonic() + seconds
+    atasca una sesión).
+
+    La lista de relectura (Rafael, 17 nov 2026: «si se corta un escaneo por una
+    orden que se pide escanear, después de entregar la orden debe seguir el
+    escaneo»): los 20 min de un not_found se recortaban sólo si la lista ya
+    tenía códigos al empezar a esperar, así que una lista que PickD dejaba
+    durante la espera (las relecturas de las 10:00, 12:00, 2:00 y 3:45) se leía
+    hasta 20 min tarde. Ahora la espera mira cada `REREAD_POLL_SEC` y despierta
+    en cuanto hay algo que leer."""
+    started = time.monotonic()
+    deadline = started + seconds
+    next_look = started + REREAD_POLL_SEC
     while not _stop.is_set():
-        remaining = deadline - time.monotonic()
+        now = time.monotonic()
+        remaining = deadline - now
         if remaining <= 0 or _kick.is_set() or (wake_on_request and _request.is_set()):
             return
+        if wake_on_request and now >= next_look:
+            next_look = now + REREAD_POLL_SEC
+            if _reread_waiting():
+                log.info("auto-scan: PickD left a stock reread list — the wait ends")
+                return
         _kick.wait(min(0.5, remaining))
 
 
