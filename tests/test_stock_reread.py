@@ -175,6 +175,25 @@ def test_write_touches_only_the_snapshot_and_read_at():
     assert sku == "03-4035BL" and set(upd) == {"as400_snapshot"}
 
 
+def test_a_code_the_as400_does_not_have_is_written_as_read_not_found():
+    # Rafael, 17 Nov 2026: 03-4091SL was read again and again, nothing written, and PickD kept
+    # waiting for the read. «No such number» is an answer: found false, with its time.
+    c = FakeClient({"03-4091SL": {"variants": {"03-4091SLT": {"found": True}}, "bin_location": "9"}})
+    assert sr.write("03-4091SL", None, None, "r1", client=c) == "not_found"
+    sku, upd = c.calls[0]
+    assert sku == "03-4091SL" and set(upd) == {"as400_snapshot"}
+    snap = upd["as400_snapshot"]
+    assert snap["found"] is False and snap["reread_rev"] == "r1" and snap["reread_at"]
+    assert snap["variants"] == {"03-4091SLT": {"found": True}}  # the rest stays
+    assert snap["bin_location"] == "9"
+
+
+def test_a_code_read_is_marked_found():
+    c = FakeClient({"03-4035BL": {"found": False}})
+    sr.write("03-4035BL", None, {"on_hand": {"NJ": 41}}, "r1", client=c)
+    assert c.calls[0][1]["as400_snapshot"]["found"] is True
+
+
 def test_write_is_dry_with_writes_off(monkeypatch):
     monkeypatch.setenv("SKU_ENRICH_WRITE", "0")
     c = FakeClient({"03-4035BL": {}})

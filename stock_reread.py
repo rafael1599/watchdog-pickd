@@ -292,8 +292,19 @@ def write(code: str, home: str | None, parsed: dict | None, rev: str, client=Non
         return "no_row"
     if target == code:
         if parsed is None:
-            return "not_found"  # its own row stays as it was
-        update = {"as400_snapshot": plan_own(old, parsed, rev, at), "as400_read_at": at}
+            # «AS400 has no such number» is an answer too: PickD has to know it was read, or it
+            # keeps waiting for the read and asking for it again (Rafael, 17 Nov 2026: 03-4091SL
+            # and 07-3708BL, whose units the AS400 keeps under their T twin, were read again and
+            # again while the History waited). The rest of the snapshot stays as it was.
+            new = dict(old or {})
+            new["found"] = False
+            new["reread_rev"] = rev
+            new["reread_at"] = at
+            client.table("sku_metadata").update({"as400_snapshot": new}).eq("sku", target).execute()
+            return "not_found"
+        snap = plan_own(old, parsed, rev, at)
+        snap["found"] = True
+        update = {"as400_snapshot": snap, "as400_read_at": at}
     else:
         update = {"as400_snapshot": plan_variant(old, code, parsed, rev, at)}
     client.table("sku_metadata").update(update).eq("sku", target).execute()
