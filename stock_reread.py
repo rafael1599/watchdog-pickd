@@ -59,7 +59,10 @@ from parser import parse_stock_inquiry
 log = logging.getLogger("pickd-stock-reread")
 
 FLAG_KEY = "as400_stock_reread"
-FLAG_TTL_SEC = 60.0
+# How long the list PickD hands over is cached. 15 s, not 60: a SKU asked from History before
+# printing the AS400 Sync report goes to the front of the list and should be read at once (Rafael,
+# 17 Nov 2026: «necesito que sea inmediata la respuesta o lo mas cercana a inmediata posible»).
+FLAG_TTL_SEC = float(os.getenv("STOCK_REREAD_FLAG_TTL_SEC", "15"))
 # A code that fails this many times (mismatch, error) is given up on for the rev:
 # one bad number must not hold the list.
 MAX_TRIES = 2

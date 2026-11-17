@@ -786,10 +786,12 @@ def _wait_for(action: str) -> float:
 
 
 # Cada cuánto mira una espera larga si PickD dejó una lista de relectura nueva.
-# Es también la espera mínima antes de despertar por ella: la misma que el
-# recorte de `CATALOGUE_MAX_WAIT_SEC`, así una lista que no avanza no convierte
-# el bucle de órdenes en un martilleo contra el AS400.
-REREAD_POLL_SEC = float(os.getenv("SCAN_REREAD_POLL_SEC", "30"))
+# Es también la espera mínima antes de despertar por ella, así una lista que no
+# avanza no convierte el bucle de órdenes en un martilleo contra el AS400: cada
+# código termina en MAX_TRIES y la lista se apaga sola.
+# 15 s (was 30): what History asks before printing is read almost at once (Rafael, 17 Nov 2026:
+# «necesito que sea inmediata la respuesta o lo mas cercana a inmediata posible»).
+REREAD_POLL_SEC = float(os.getenv("SCAN_REREAD_POLL_SEC", "15"))
 
 
 def _reread_waiting() -> bool:
